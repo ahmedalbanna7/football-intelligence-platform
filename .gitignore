@@ -1,0 +1,5 @@
+__pycache__/
+*.py[cod]
+.pycache-check/
+.env
+apps/backend/.env
