@@ -30,3 +30,9 @@ class MatchVideo(Base):
         "Match",
         back_populates="videos"
     )
+
+    processing_jobs = relationship(
+        "VideoProcessingJob",
+        back_populates="video",
+        cascade="all, delete-orphan"
+    )

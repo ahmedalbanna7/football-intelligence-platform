@@ -3,9 +3,13 @@ from collections.abc import AsyncIterator
 
 from aio_pika.abc import AbstractIncomingMessage
 
+from app.queues.events import MatchAnalysisRequestedEvent
 from app.queues.events import VideoUploadedEvent
+from app.queues.routing_keys import MATCH_ANALYSIS_PROCESSING_QUEUE
 from app.queues.routing_keys import VIDEO_PROCESSING_QUEUE
-from app.services.rabbitmq import rabbitmq_channel, setup_video_topology
+from app.services.rabbitmq import rabbitmq_channel
+from app.services.rabbitmq import setup_match_analysis_topology
+from app.services.rabbitmq import setup_video_topology
 
 
 async def consume_video_uploaded_events() -> AsyncIterator[
@@ -19,3 +23,16 @@ async def consume_video_uploaded_events() -> AsyncIterator[
             async for message in queue_iter:
                 payload = json.loads(message.body.decode("utf-8"))
                 yield message, VideoUploadedEvent.model_validate(payload)
+
+
+async def consume_match_analysis_requested_events() -> AsyncIterator[
+    tuple[AbstractIncomingMessage, MatchAnalysisRequestedEvent]
+]:
+    async with rabbitmq_channel() as channel:
+        await setup_match_analysis_topology(channel)
+        queue = await channel.get_queue(MATCH_ANALYSIS_PROCESSING_QUEUE)
+
+        async with queue.iterator() as queue_iter:
+            async for message in queue_iter:
+                payload = json.loads(message.body.decode("utf-8"))
+                yield message, MatchAnalysisRequestedEvent.model_validate(payload)

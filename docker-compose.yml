@@ -1,5 +1,18 @@
 services:
 
+  frontend:
+    build:
+      context: ./apps/frontend
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_API_BASE_URL: http://localhost:8000
+    volumes:
+      - ./apps/frontend:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+
   backend:
     build:
       context: ./apps/backend
@@ -7,6 +20,8 @@ services:
       - "8000:8000"
     env_file:
       - ./apps/backend/.env
+    environment:
+      YOLO_CONFIG_DIR: /tmp
     volumes:
       - ./apps/backend:/app
     depends_on:
@@ -31,12 +46,18 @@ services:
       - postgres
 
   video-worker:
+    profiles:
+      - worker
     build:
       context: ./apps/backend
     command: python -m app.workers.video_worker
     restart: unless-stopped
+    cpus: "2.0"
+    mem_limit: 2g
     env_file:
       - ./apps/backend/.env
+    environment:
+      YOLO_CONFIG_DIR: /tmp
     volumes:
       - ./apps/backend:/app
     depends_on:
@@ -45,7 +66,29 @@ services:
       redis:
         condition: service_started
       rabbitmq:
+        condition: service_healthy
+      minio:
         condition: service_started
+
+  match-analysis-worker:
+    image: sports-platform-backend
+    command: python -m app.workers.match_analysis_worker
+    restart: unless-stopped
+    cpus: "2.0"
+    mem_limit: 2g
+    env_file:
+      - ./apps/backend/.env
+    environment:
+      YOLO_CONFIG_DIR: /tmp
+      PYTHONPATH: /app:/opt/sports-main
+    volumes:
+      - ./apps/backend:/app
+      - ./apps/match-analysis-worker/sports-main:/opt/sports-main:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
       minio:
         condition: service_started
 
@@ -68,6 +111,11 @@ services:
     ports:
       - "5672:5672"
       - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
 
   minio:
     image: minio/minio

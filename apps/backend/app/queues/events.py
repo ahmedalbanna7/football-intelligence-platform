@@ -12,6 +12,21 @@ class VideoUploadedEvent(BaseModel):
     object_name: str
     filename: str
     content_type: str | None = None
+    match_context: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class MatchAnalysisRequestedEvent(BaseModel):
+    event_type: str = "match_analysis.requested"
+    run_id: int
+    match_id: int
+    video_id: int
+    bucket: str
+    object_name: str
+    artifact_prefix: str
+    mode: str = "PLAYER_TRACKING"
+    max_frames: int = 450
+    match_context: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 

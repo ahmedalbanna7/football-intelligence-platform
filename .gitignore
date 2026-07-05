@@ -3,3 +3,31 @@ __pycache__/
 .pycache-check/
 .env
 apps/backend/.env
+
+# Frontend/runtime dependencies
+node_modules/
+apps/frontend/node_modules/
+dist/
+build/
+.vite/
+*.tsbuildinfo
+
+# Local inspection/extracted archives
+zip_inspect/
+
+# Generated media/artifacts
+output_videos/
+input_videos/
+uploads/
+artifacts/
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+
+# Local caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.DS_Store

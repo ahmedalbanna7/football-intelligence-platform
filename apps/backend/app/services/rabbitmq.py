@@ -7,6 +7,9 @@ from aio_pika.abc import AbstractChannel, AbstractRobustConnection
 
 from app.core.config import settings
 from app.queues.routing_keys import (
+    MATCH_ANALYSIS_EXCHANGE,
+    MATCH_ANALYSIS_PROCESSING_QUEUE,
+    MATCH_ANALYSIS_REQUESTED_ROUTING_KEY,
     VIDEO_EXCHANGE,
     VIDEO_PROCESSING_QUEUE,
     VIDEO_UPLOADED_ROUTING_KEY,
@@ -55,3 +58,16 @@ async def setup_video_topology(channel: AbstractChannel) -> None:
         durable=True,
     )
     await queue.bind(exchange, routing_key=VIDEO_UPLOADED_ROUTING_KEY)
+
+
+async def setup_match_analysis_topology(channel: AbstractChannel) -> None:
+    exchange = await channel.declare_exchange(
+        MATCH_ANALYSIS_EXCHANGE,
+        aio_pika.ExchangeType.TOPIC,
+        durable=True,
+    )
+    queue = await channel.declare_queue(
+        MATCH_ANALYSIS_PROCESSING_QUEUE,
+        durable=True,
+    )
+    await queue.bind(exchange, routing_key=MATCH_ANALYSIS_REQUESTED_ROUTING_KEY)
