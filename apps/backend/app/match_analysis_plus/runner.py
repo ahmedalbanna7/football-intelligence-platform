@@ -35,32 +35,55 @@ class StableTrackState:
     stable_id: int
     bbox: list[float]
     center: tuple[float, float]
+    velocity: tuple[float, float]
     last_frame: int
     raw_ids_seen: set[int]
+    appearance_hist: np.ndarray | None = None
+    jersey_color: tuple[int, int, int] | None = None
+    hits: int = 1
 
 
 class TrackIdStabilizer:
-    def __init__(self, max_gap_frames: int = 120) -> None:
+    def __init__(self, max_gap_frames: int = 240) -> None:
         self.max_gap_frames = max_gap_frames
         self.next_stable_id = 1
         self.tracks: dict[int, StableTrackState] = {}
         self.raw_to_stable: dict[int, int] = {}
         self.raw_ids_seen: set[int] = set()
+        self.raw_id_reassignments = 0
+        self.appearance_matches = 0
 
-    def update(self, frame_index: int, players: list[AnalysisObject]) -> list[AnalysisObject]:
+    def update(self, frame_index: int, players: list[AnalysisObject], frame: np.ndarray | None = None) -> list[AnalysisObject]:
         used_stable_ids: set[int] = set()
         stabilized: list[AnalysisObject] = []
-        ordered_players = sorted(players, key=lambda item: (item.bbox[0], item.bbox[1]))
+        ordered_players = sorted(
+            players,
+            key=lambda item: (-(item.confidence or 0.0), item.bbox[0], item.bbox[1]),
+        )
 
         for player in ordered_players:
             raw_id = player.raw_track_id if player.raw_track_id is not None else player.track_id
             self.raw_ids_seen.add(raw_id)
-            stable_id = self._stable_from_raw(raw_id, player, frame_index, used_stable_ids)
+            appearance_hist, jersey_color = self._extract_appearance(frame, player.bbox)
+            stable_id = self._stable_from_raw(
+                raw_id,
+                player,
+                frame_index,
+                used_stable_ids,
+                appearance_hist,
+                jersey_color,
+            )
             if stable_id is None:
-                stable_id = self._match_existing(player, frame_index, used_stable_ids)
+                stable_id = self._match_existing(
+                    player,
+                    frame_index,
+                    used_stable_ids,
+                    appearance_hist,
+                    jersey_color,
+                )
             if stable_id is None:
-                stable_id = self._create_track(player, frame_index, raw_id)
-            self._update_track(stable_id, player, frame_index, raw_id)
+                stable_id = self._create_track(player, frame_index, raw_id, appearance_hist, jersey_color)
+            self._update_track(stable_id, player, frame_index, raw_id, appearance_hist, jersey_color)
             used_stable_ids.add(stable_id)
             stabilized.append(
                 AnalysisObject(
@@ -75,10 +98,12 @@ class TrackIdStabilizer:
 
     def summary(self) -> dict[str, Any]:
         return {
-            "engine": "raw_id_iou_center_stabilizer_v1",
+            "engine": "appearance_motion_stabilizer_v2",
             "raw_track_ids_seen": len(self.raw_ids_seen),
             "stable_tracks_count": len(self.tracks),
             "max_gap_frames": self.max_gap_frames,
+            "raw_id_reassignments": self.raw_id_reassignments,
+            "appearance_matches": self.appearance_matches,
         }
 
     def _stable_from_raw(
@@ -87,6 +112,8 @@ class TrackIdStabilizer:
         player: AnalysisObject,
         frame_index: int,
         used_stable_ids: set[int],
+        appearance_hist: np.ndarray | None,
+        jersey_color: tuple[int, int, int] | None,
     ) -> int | None:
         stable_id = self.raw_to_stable.get(raw_id)
         if stable_id is None or stable_id in used_stable_ids:
@@ -94,8 +121,9 @@ class TrackIdStabilizer:
         state = self.tracks.get(stable_id)
         if state is None or frame_index - state.last_frame > self.max_gap_frames:
             return None
-        if self._is_compatible(state, player, frame_index):
+        if self._is_compatible(state, player, frame_index, appearance_hist, jersey_color):
             return stable_id
+        self.raw_id_reassignments += 1
         return None
 
     def _match_existing(
@@ -103,6 +131,8 @@ class TrackIdStabilizer:
         player: AnalysisObject,
         frame_index: int,
         used_stable_ids: set[int],
+        appearance_hist: np.ndarray | None,
+        jersey_color: tuple[int, int, int] | None,
     ) -> int | None:
         best: tuple[float, int] | None = None
         for stable_id, state in self.tracks.items():
@@ -112,44 +142,171 @@ class TrackIdStabilizer:
             if gap < 0 or gap > self.max_gap_frames:
                 continue
             iou = self._iou(player.bbox, state.bbox)
-            distance = self._center_distance(self._center(player.bbox), state.center)
+            predicted = self._predicted_center(state, gap)
+            distance = self._center_distance(self._center(player.bbox), predicted)
             max_distance = self._max_center_distance(player.bbox, state.bbox, gap)
-            if iou <= 0.02 and distance > max_distance:
+            appearance = self._appearance_similarity(appearance_hist, state.appearance_hist)
+            color_similarity = self._color_similarity(jersey_color, state.jersey_color)
+            if iou <= 0.02 and distance > max_distance and appearance < 0.62 and color_similarity < 0.55:
                 continue
-            score = (iou * 3.0) + max(0.0, 1.0 - (distance / max_distance)) - (gap * 0.002)
+            position_score = max(0.0, 1.0 - (distance / max_distance))
+            score = (
+                (iou * 2.2)
+                + (position_score * 3.0)
+                + (appearance * 2.4)
+                + (color_similarity * 1.2)
+                - (gap * 0.0025)
+            )
             if best is None or score > best[0]:
                 best = (score, stable_id)
+        if best is not None:
+            state = self.tracks[best[1]]
+            if self._appearance_similarity(appearance_hist, state.appearance_hist) >= 0.70:
+                self.appearance_matches += 1
         return best[1] if best is not None else None
 
-    def _create_track(self, player: AnalysisObject, frame_index: int, raw_id: int) -> int:
+    def _create_track(
+        self,
+        player: AnalysisObject,
+        frame_index: int,
+        raw_id: int,
+        appearance_hist: np.ndarray | None,
+        jersey_color: tuple[int, int, int] | None,
+    ) -> int:
         stable_id = self.next_stable_id
         self.next_stable_id += 1
         self.tracks[stable_id] = StableTrackState(
             stable_id=stable_id,
             bbox=player.bbox,
             center=self._center(player.bbox),
+            velocity=(0.0, 0.0),
             last_frame=frame_index,
             raw_ids_seen={raw_id},
+            appearance_hist=appearance_hist,
+            jersey_color=jersey_color,
         )
         self.raw_to_stable[raw_id] = stable_id
         return stable_id
 
-    def _update_track(self, stable_id: int, player: AnalysisObject, frame_index: int, raw_id: int) -> None:
+    def _update_track(
+        self,
+        stable_id: int,
+        player: AnalysisObject,
+        frame_index: int,
+        raw_id: int,
+        appearance_hist: np.ndarray | None,
+        jersey_color: tuple[int, int, int] | None,
+    ) -> None:
         state = self.tracks[stable_id]
+        new_center = self._center(player.bbox)
+        frame_delta = max(frame_index - state.last_frame, 1)
+        instant_velocity = (
+            (new_center[0] - state.center[0]) / frame_delta,
+            (new_center[1] - state.center[1]) / frame_delta,
+        )
+        state.velocity = (
+            state.velocity[0] * 0.55 + instant_velocity[0] * 0.45,
+            state.velocity[1] * 0.55 + instant_velocity[1] * 0.45,
+        )
         state.bbox = player.bbox
-        state.center = self._center(player.bbox)
+        state.center = new_center
         state.last_frame = frame_index
         state.raw_ids_seen.add(raw_id)
+        state.hits += 1
+        if appearance_hist is not None:
+            if state.appearance_hist is None:
+                state.appearance_hist = appearance_hist
+            else:
+                state.appearance_hist = self._normalize_hist(state.appearance_hist * 0.80 + appearance_hist * 0.20)
+        if jersey_color is not None:
+            if state.jersey_color is None:
+                state.jersey_color = jersey_color
+            else:
+                state.jersey_color = tuple(
+                    int(round(state.jersey_color[index] * 0.85 + jersey_color[index] * 0.15))
+                    for index in range(3)
+                )
         self.raw_to_stable[raw_id] = stable_id
 
-    def _is_compatible(self, state: StableTrackState, player: AnalysisObject, frame_index: int) -> bool:
+    def _is_compatible(
+        self,
+        state: StableTrackState,
+        player: AnalysisObject,
+        frame_index: int,
+        appearance_hist: np.ndarray | None,
+        jersey_color: tuple[int, int, int] | None,
+    ) -> bool:
         gap = max(frame_index - state.last_frame, 1)
-        distance = self._center_distance(self._center(player.bbox), state.center)
-        return distance <= self._max_center_distance(player.bbox, state.bbox, gap) or self._iou(player.bbox, state.bbox) > 0.05
+        distance = self._center_distance(self._center(player.bbox), self._predicted_center(state, gap))
+        iou = self._iou(player.bbox, state.bbox)
+        appearance = self._appearance_similarity(appearance_hist, state.appearance_hist)
+        color_similarity = self._color_similarity(jersey_color, state.jersey_color)
+        return (
+            distance <= self._max_center_distance(player.bbox, state.bbox, gap)
+            or iou > 0.05
+            or (appearance >= 0.72 and color_similarity >= 0.60)
+        )
 
     def _max_center_distance(self, bbox_a: list[float], bbox_b: list[float], gap: int) -> float:
         size = max(self._bbox_size(bbox_a), self._bbox_size(bbox_b), 1.0)
-        return max(55.0, min(240.0, size * 1.35 + min(gap, 30) * 4.0))
+        return max(65.0, min(320.0, size * 1.55 + min(gap, 45) * 5.0))
+
+    def _predicted_center(self, state: StableTrackState, gap: int) -> tuple[float, float]:
+        capped_gap = min(gap, 45)
+        return (
+            state.center[0] + state.velocity[0] * capped_gap,
+            state.center[1] + state.velocity[1] * capped_gap,
+        )
+
+    def _extract_appearance(
+        self,
+        frame: np.ndarray | None,
+        bbox: list[float],
+    ) -> tuple[np.ndarray | None, tuple[int, int, int] | None]:
+        if frame is None:
+            return None, None
+        height, width = frame.shape[:2]
+        x1, y1, x2, y2 = [int(round(value)) for value in bbox]
+        x1, x2 = max(0, x1), min(width, x2)
+        y1, y2 = max(0, y1), min(height, y2)
+        if x2 <= x1 or y2 <= y1:
+            return None, None
+        crop = frame[y1:y2, x1:x2]
+        if crop.size == 0:
+            return None, None
+        torso_y2 = max(1, int(crop.shape[0] * 0.65))
+        torso = crop[:torso_y2, :]
+        if torso.size == 0:
+            return None, None
+        hsv = cv2.cvtColor(torso, cv2.COLOR_BGR2HSV)
+        hist = cv2.calcHist([hsv], [0, 1], None, [16, 8], [0, 180, 0, 256]).astype(np.float32).flatten()
+        hist = self._normalize_hist(hist)
+        pixels = torso.reshape(-1, 3).astype(np.float32)
+        jersey_color = None
+        if len(pixels) >= 6:
+            jersey_color = tuple(int(value) for value in np.median(pixels, axis=0))
+        return hist, jersey_color
+
+    def _normalize_hist(self, hist: np.ndarray) -> np.ndarray:
+        total = float(np.linalg.norm(hist))
+        if total <= 1e-6:
+            return hist
+        return hist / total
+
+    def _appearance_similarity(self, a: np.ndarray | None, b: np.ndarray | None) -> float:
+        if a is None or b is None:
+            return 0.0
+        return float(max(0.0, min(1.0, np.dot(a, b))))
+
+    def _color_similarity(
+        self,
+        a: tuple[int, int, int] | None,
+        b: tuple[int, int, int] | None,
+    ) -> float:
+        if a is None or b is None:
+            return 0.0
+        distance = float(np.linalg.norm(np.array(a, dtype=np.float32) - np.array(b, dtype=np.float32)))
+        return max(0.0, 1.0 - distance / 255.0)
 
     def _bbox_size(self, bbox: list[float]) -> float:
         return max(bbox[2] - bbox[0], bbox[3] - bbox[1])
@@ -377,7 +534,7 @@ class MatchAnalysisPlusRunner:
             raw_detections_count += len(raw_objects)
             raw_players = [item for item in raw_objects if item.class_name == "player"]
             raw_balls = [item for item in raw_objects if item.class_name == "ball"]
-            players = track_stabilizer.update(frames_processed, raw_players)
+            players = track_stabilizer.update(frames_processed, raw_players, frame)
             balls = ball_filter.filter(frames_processed, raw_balls, players, width)
             objects = players + balls
             detections_count += len(objects)
