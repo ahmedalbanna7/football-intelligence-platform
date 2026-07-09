@@ -1,0 +1,13 @@
+# Ultralytics BoT-SORT tuned for football player identity stability.
+tracker_type: botsort
+track_high_thresh: 0.25
+track_low_thresh: 0.10
+new_track_thresh: 0.30
+track_buffer: 120
+match_thresh: 0.78
+fuse_score: True
+gmc_method: sparseOptFlow
+proximity_thresh: 0.45
+appearance_thresh: 0.72
+with_reid: True
+model: auto

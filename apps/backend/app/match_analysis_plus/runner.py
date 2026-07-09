@@ -53,6 +53,9 @@ class TrackIdStabilizer:
         self.raw_id_reassignments = 0
         self.appearance_matches = 0
         self.rejected_far_matches = 0
+        self.rejected_appearance_mismatches = 0
+        self.rejected_jersey_mismatches = 0
+        self.raw_id_identity_mismatch_ignores = 0
 
     def update(self, frame_index: int, players: list[AnalysisObject], frame: np.ndarray | None = None) -> list[AnalysisObject]:
         used_stable_ids: set[int] = set()
@@ -112,6 +115,9 @@ class TrackIdStabilizer:
             "raw_id_reassignments": self.raw_id_reassignments,
             "appearance_matches": self.appearance_matches,
             "rejected_far_matches": self.rejected_far_matches,
+            "rejected_appearance_mismatches": self.rejected_appearance_mismatches,
+            "rejected_jersey_mismatches": self.rejected_jersey_mismatches,
+            "raw_id_identity_mismatch_ignores": self.raw_id_identity_mismatch_ignores,
             "tracks_with_multiple_raw_ids": sum(1 for count in raw_ids_per_stable.values() if count > 1),
             "max_raw_ids_per_stable_track": max(raw_ids_per_stable.values(), default=0),
             "avg_raw_ids_per_stable_track": round(raw_count / stable_count, 3),
@@ -133,6 +139,9 @@ class TrackIdStabilizer:
             return None
         state = self.tracks.get(stable_id)
         if state is None or frame_index - state.last_frame > self.max_gap_frames:
+            return None
+        if self._raw_id_identity_mismatch(state, player, frame_index, appearance_hist, jersey_color):
+            self.raw_id_identity_mismatch_ignores += 1
             return None
         if self._is_compatible(state, player, frame_index, appearance_hist, jersey_color):
             return stable_id
@@ -160,6 +169,9 @@ class TrackIdStabilizer:
             max_distance = self._max_center_distance(player.bbox, state.bbox, gap)
             appearance = self._appearance_similarity(appearance_hist, state.appearance_hist)
             color_similarity = self._color_similarity(jersey_color, state.jersey_color)
+            if self._is_locked_jersey_mismatch(state, jersey_color, appearance, color_similarity):
+                self.rejected_jersey_mismatches += 1
+                continue
             far_distance_gate = max_distance * (2.6 if gap > 8 else 1.8)
             if iou <= 0.02 and distance > far_distance_gate:
                 self.rejected_far_matches += 1
@@ -259,6 +271,12 @@ class TrackIdStabilizer:
         appearance = self._appearance_similarity(appearance_hist, state.appearance_hist)
         color_similarity = self._color_similarity(jersey_color, state.jersey_color)
         max_distance = self._max_center_distance(player.bbox, state.bbox, gap)
+        if self._is_locked_jersey_mismatch(state, jersey_color, appearance, color_similarity):
+            return False
+        if state.hits >= 5 and appearance_hist is not None and state.appearance_hist is not None:
+            if appearance < 0.38 and color_similarity < 0.62:
+                self.rejected_appearance_mismatches += 1
+                return False
         if iou <= 0.02 and distance > max_distance * 2.6:
             return False
         return (
@@ -267,9 +285,52 @@ class TrackIdStabilizer:
             or (distance <= max_distance * 2.0 and appearance >= 0.80 and color_similarity >= 0.72)
         )
 
+    def _raw_id_identity_mismatch(
+        self,
+        state: StableTrackState,
+        player: AnalysisObject,
+        frame_index: int,
+        appearance_hist: np.ndarray | None,
+        jersey_color: tuple[int, int, int] | None,
+    ) -> bool:
+        if state.hits < 4:
+            return False
+        gap = max(frame_index - state.last_frame, 1)
+        distance = self._center_distance(self._center(player.bbox), self._predicted_center(state, gap))
+        max_distance = self._max_center_distance(player.bbox, state.bbox, gap)
+        iou = self._iou(player.bbox, state.bbox)
+        appearance = self._appearance_similarity(appearance_hist, state.appearance_hist)
+        color_similarity = self._color_similarity(jersey_color, state.jersey_color)
+        if self._is_locked_jersey_mismatch(state, jersey_color, appearance, color_similarity):
+            return True
+        if state.appearance_hist is not None and appearance_hist is not None and appearance < 0.30 and color_similarity < 0.68:
+            return True
+        if distance > max_distance * 1.4 and iou < 0.08 and appearance < 0.55 and color_similarity < 0.72:
+            return True
+        return False
+
     def _max_center_distance(self, bbox_a: list[float], bbox_b: list[float], gap: int) -> float:
         size = max(self._bbox_size(bbox_a), self._bbox_size(bbox_b), 1.0)
         return max(65.0, min(320.0, size * 1.55 + min(gap, 45) * 5.0))
+
+    def _is_locked_jersey_mismatch(
+        self,
+        state: StableTrackState,
+        jersey_color: tuple[int, int, int] | None,
+        appearance: float,
+        color_similarity: float,
+    ) -> bool:
+        if state.hits < 4 or state.jersey_color is None or jersey_color is None:
+            return False
+        state_hsv = self._bgr_to_hsv(state.jersey_color)
+        candidate_hsv = self._bgr_to_hsv(jersey_color)
+        hue_gap = self._hue_gap(state_hsv[0], candidate_hsv[0])
+        both_colored = state_hsv[1] >= 45 and candidate_hsv[1] >= 45
+        if both_colored and hue_gap >= 22 and color_similarity < 0.58 and appearance < 0.62:
+            return True
+        if both_colored and hue_gap >= 15 and color_similarity < 0.72 and appearance < 0.70:
+            return True
+        return color_similarity < 0.42 and appearance < 0.55
 
     def _predicted_center(self, state: StableTrackState, gap: int) -> tuple[float, float]:
         capped_gap = min(gap, 45)
@@ -294,15 +355,25 @@ class TrackIdStabilizer:
         crop = frame[y1:y2, x1:x2]
         if crop.size == 0:
             return None, None
-        torso_y2 = max(1, int(crop.shape[0] * 0.65))
-        torso = crop[:torso_y2, :]
+        crop_height, crop_width = crop.shape[:2]
+        tx1 = max(0, int(crop_width * 0.18))
+        tx2 = min(crop_width, int(crop_width * 0.82))
+        ty1 = max(0, int(crop_height * 0.08))
+        ty2 = min(crop_height, int(crop_height * 0.58))
+        torso = crop[ty1:ty2, tx1:tx2]
         if torso.size == 0:
             return None, None
         torso = cv2.resize(torso, (32, 48), interpolation=cv2.INTER_AREA)
         hsv = cv2.cvtColor(torso, cv2.COLOR_BGR2HSV)
-        hist = cv2.calcHist([hsv], [0, 1], None, [16, 8], [0, 180, 0, 256]).astype(np.float32).flatten()
+        mask = cv2.inRange(hsv, np.array([0, 38, 45]), np.array([179, 255, 255]))
+        if int(np.count_nonzero(mask)) < max(12, int(mask.size * 0.08)):
+            mask = None
+        hist = cv2.calcHist([hsv], [0, 1], mask, [24, 8], [0, 180, 0, 256]).astype(np.float32).flatten()
         hist = self._normalize_hist(hist)
-        pixels = torso.reshape(-1, 3).astype(np.float32)
+        if mask is not None:
+            pixels = torso[mask > 0].reshape(-1, 3).astype(np.float32)
+        else:
+            pixels = torso.reshape(-1, 3).astype(np.float32)
         jersey_color = None
         if len(pixels) >= 6:
             jersey_color = tuple(int(value) for value in np.median(pixels, axis=0))
@@ -327,7 +398,16 @@ class TrackIdStabilizer:
         if a is None or b is None:
             return 0.0
         distance = float(np.linalg.norm(np.array(a, dtype=np.float32) - np.array(b, dtype=np.float32)))
-        return max(0.0, 1.0 - distance / 255.0)
+        return max(0.0, 1.0 - distance / 441.672)
+
+    def _bgr_to_hsv(self, color: tuple[int, int, int]) -> tuple[int, int, int]:
+        pixel = np.array([[list(color)]], dtype=np.uint8)
+        hsv = cv2.cvtColor(pixel, cv2.COLOR_BGR2HSV)[0][0]
+        return int(hsv[0]), int(hsv[1]), int(hsv[2])
+
+    def _hue_gap(self, hue_a: int, hue_b: int) -> int:
+        diff = abs(hue_a - hue_b)
+        return min(diff, 180 - diff)
 
     def _bbox_size(self, bbox: list[float]) -> float:
         return max(bbox[2] - bbox[0], bbox[3] - bbox[1])
@@ -615,6 +695,12 @@ class MatchAnalysisPlusRunner:
                 "raw_ids_seen": sorted(track_stabilizer.tracks[track_id].raw_ids_seen)
                 if track_id in track_stabilizer.tracks
                 else [],
+                "jersey_color_bgr": list(track_stabilizer.tracks[track_id].jersey_color)
+                if track_id in track_stabilizer.tracks and track_stabilizer.tracks[track_id].jersey_color is not None
+                else None,
+                "jersey_color_hsv": list(track_stabilizer._bgr_to_hsv(track_stabilizer.tracks[track_id].jersey_color))
+                if track_id in track_stabilizer.tracks and track_stabilizer.tracks[track_id].jersey_color is not None
+                else None,
             }
             for track_id in sorted(track_frames)
         ]
@@ -677,7 +763,7 @@ class MatchAnalysisPlusRunner:
             device=settings.YOLO_DEVICE,
             max_det=settings.YOLO_MAX_DETECTIONS,
             verbose=False,
-            tracker=settings.MATCH_ANALYSIS_TRACKER,
+            tracker=self._resolve_tracker_config(),
             classes=classes,
         )
         if not results:
@@ -910,6 +996,15 @@ class MatchAnalysisPlusRunner:
         if configured.exists():
             return configured
         return Path("yolo11n.pt")
+
+    def _resolve_tracker_config(self) -> str:
+        configured = Path(settings.MATCH_ANALYSIS_TRACKER)
+        if configured.exists():
+            return str(configured)
+        app_relative = Path("/app") / configured
+        if app_relative.exists():
+            return str(app_relative)
+        return settings.MATCH_ANALYSIS_TRACKER
 
     def _transcode_for_browser(self, source_path: Path, output_path: Path) -> str:
         ffmpeg = shutil.which("ffmpeg")
