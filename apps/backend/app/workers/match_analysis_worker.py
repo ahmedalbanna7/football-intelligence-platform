@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime
+from datetime import UTC, datetime
 import traceback
 
 from sqlalchemy.orm import Session
@@ -25,7 +25,8 @@ def mark_run_processing(db: Session, event: MatchAnalysisRequestedEvent) -> Matc
     if run is None:
         raise ValueError(f"Match analysis run {event.run_id} not found")
     run.status = "processing"
-    run.started_at = datetime.utcnow()
+    run.started_at = datetime.now(UTC).replace(tzinfo=None)
+    run.finished_at = None
     run.error_message = None
     db.commit()
     db.refresh(run)
@@ -40,7 +41,7 @@ def finish_run(
     error_message: str | None = None,
 ) -> None:
     run.status = status
-    run.finished_at = datetime.utcnow()
+    run.finished_at = datetime.now(UTC).replace(tzinfo=None)
     run.error_message = error_message
     if summary is not None:
         run.output_object = summary.get("output_object")

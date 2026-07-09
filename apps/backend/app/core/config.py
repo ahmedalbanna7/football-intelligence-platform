@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     MATCH_ANALYSIS_AUTO_QUEUE_ON_UPLOAD: bool = True
     MATCH_ANALYSIS_DEFAULT_MODE: str = "PLAYER_TRACKING"
     MATCH_ANALYSIS_DEFAULT_MAX_FRAMES: int = 450
+    MATCH_ANALYSIS_TRACKER: str = "ocsort.yaml"
 
     class Config:
         env_file = ".env"

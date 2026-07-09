@@ -629,6 +629,7 @@ class MatchAnalysisPlusRunner:
             "engine": "match_analysis_plus",
             "model": str(self.model_path),
             "model_mode": "sports-main-light-yolo",
+            "tracker": settings.MATCH_ANALYSIS_TRACKER,
             "output_codec": output_codec,
             "output_content_type": "video/mp4",
             "frames_processed": frames_processed,
@@ -666,16 +667,17 @@ class MatchAnalysisPlusRunner:
         elif mode == "PLAYER_DETECTION":
             classes = [0]
         else:
-            classes = None
+            classes = [0, 32]
 
         results = model.track(
             frame,
             persist=True,
-            conf=max(settings.YOLO_CONFIDENCE, 0.15),
+            conf=max(settings.YOLO_CONFIDENCE, 0.25),
             imgsz=settings.YOLO_IMAGE_SIZE,
             device=settings.YOLO_DEVICE,
+            max_det=settings.YOLO_MAX_DETECTIONS,
             verbose=False,
-            tracker="bytetrack.yaml",
+            tracker=settings.MATCH_ANALYSIS_TRACKER,
             classes=classes,
         )
         if not results:
