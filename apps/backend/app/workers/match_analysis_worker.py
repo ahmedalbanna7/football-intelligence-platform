@@ -59,7 +59,8 @@ async def run_worker() -> None:
         try:
             run = mark_run_processing(db, event)
             update_match_status(db, event.match_id, "processing")
-            summary = runner.run(
+            summary = await asyncio.to_thread(
+                runner.run,
                 run_id=event.run_id,
                 match_id=event.match_id,
                 bucket=event.bucket,
