@@ -52,6 +52,7 @@ class TrackIdStabilizer:
         self.raw_ids_seen: set[int] = set()
         self.raw_id_reassignments = 0
         self.appearance_matches = 0
+        self.rejected_far_matches = 0
 
     def update(self, frame_index: int, players: list[AnalysisObject], frame: np.ndarray | None = None) -> list[AnalysisObject]:
         used_stable_ids: set[int] = set()
@@ -97,13 +98,25 @@ class TrackIdStabilizer:
         return stabilized
 
     def summary(self) -> dict[str, Any]:
+        raw_ids_per_stable = {
+            stable_id: len(state.raw_ids_seen)
+            for stable_id, state in self.tracks.items()
+        }
+        stable_count = max(len(self.tracks), 1)
+        raw_count = len(self.raw_ids_seen)
         return {
             "engine": "appearance_motion_stabilizer_v2",
-            "raw_track_ids_seen": len(self.raw_ids_seen),
+            "raw_track_ids_seen": raw_count,
             "stable_tracks_count": len(self.tracks),
             "max_gap_frames": self.max_gap_frames,
             "raw_id_reassignments": self.raw_id_reassignments,
             "appearance_matches": self.appearance_matches,
+            "rejected_far_matches": self.rejected_far_matches,
+            "tracks_with_multiple_raw_ids": sum(1 for count in raw_ids_per_stable.values() if count > 1),
+            "max_raw_ids_per_stable_track": max(raw_ids_per_stable.values(), default=0),
+            "avg_raw_ids_per_stable_track": round(raw_count / stable_count, 3),
+            "fragmentation_reduction_percent": round(max(0, raw_count - len(self.tracks)) * 100 / max(raw_count, 1), 2),
+            "raw_ids_per_stable_track": raw_ids_per_stable,
         }
 
     def _stable_from_raw(
@@ -147,7 +160,11 @@ class TrackIdStabilizer:
             max_distance = self._max_center_distance(player.bbox, state.bbox, gap)
             appearance = self._appearance_similarity(appearance_hist, state.appearance_hist)
             color_similarity = self._color_similarity(jersey_color, state.jersey_color)
-            if iou <= 0.02 and distance > max_distance and appearance < 0.62 and color_similarity < 0.55:
+            far_distance_gate = max_distance * (2.6 if gap > 8 else 1.8)
+            if iou <= 0.02 and distance > far_distance_gate:
+                self.rejected_far_matches += 1
+                continue
+            if distance > max_distance and not (appearance >= 0.80 and color_similarity >= 0.72):
                 continue
             position_score = max(0.0, 1.0 - (distance / max_distance))
             score = (
@@ -241,10 +258,13 @@ class TrackIdStabilizer:
         iou = self._iou(player.bbox, state.bbox)
         appearance = self._appearance_similarity(appearance_hist, state.appearance_hist)
         color_similarity = self._color_similarity(jersey_color, state.jersey_color)
+        max_distance = self._max_center_distance(player.bbox, state.bbox, gap)
+        if iou <= 0.02 and distance > max_distance * 2.6:
+            return False
         return (
-            distance <= self._max_center_distance(player.bbox, state.bbox, gap)
+            distance <= max_distance
             or iou > 0.05
-            or (appearance >= 0.72 and color_similarity >= 0.60)
+            or (distance <= max_distance * 2.0 and appearance >= 0.80 and color_similarity >= 0.72)
         )
 
     def _max_center_distance(self, bbox_a: list[float], bbox_b: list[float], gap: int) -> float:
@@ -278,6 +298,7 @@ class TrackIdStabilizer:
         torso = crop[:torso_y2, :]
         if torso.size == 0:
             return None, None
+        torso = cv2.resize(torso, (32, 48), interpolation=cv2.INTER_AREA)
         hsv = cv2.cvtColor(torso, cv2.COLOR_BGR2HSV)
         hist = cv2.calcHist([hsv], [0, 1], None, [16, 8], [0, 180, 0, 256]).astype(np.float32).flatten()
         hist = self._normalize_hist(hist)
@@ -588,12 +609,20 @@ class MatchAnalysisPlusRunner:
                 "frames": track_frames.get(track_id, 0),
                 "distance_m": round(track_distance.get(track_id, 0.0), 2),
                 "last_speed_kmh": round(track_speed.get(track_id, 0.0), 2),
+                "raw_ids_count": len(track_stabilizer.tracks[track_id].raw_ids_seen)
+                if track_id in track_stabilizer.tracks
+                else 0,
+                "raw_ids_seen": sorted(track_stabilizer.tracks[track_id].raw_ids_seen)
+                if track_id in track_stabilizer.tracks
+                else [],
             }
             for track_id in sorted(track_frames)
         ]
         team_1 = sum(1 for item in ball_control if item == 1)
         team_2 = sum(1 for item in ball_control if item == 2)
         total_control = max(team_1 + team_2, 1)
+        elapsed_ms = round((perf_counter() - start) * 1000, 2)
+        processing_fps = round(frames_processed / max(elapsed_ms / 1000, 0.001), 3)
 
         return {
             "status": "ok",
@@ -605,6 +634,7 @@ class MatchAnalysisPlusRunner:
             "frames_processed": frames_processed,
             "max_frames": max_frames,
             "fps": round(float(fps), 3),
+            "processing_fps": processing_fps,
             "resolution": [width, height],
             "detections_count": detections_count,
             "raw_detections_count": raw_detections_count,
@@ -627,7 +657,7 @@ class MatchAnalysisPlusRunner:
                 "sports-main source is vendored in apps/match-analysis-worker/sports-main",
                 "specialized sports-main models are optional; this run uses the local YOLO model by default",
             ],
-            "elapsed_ms": round((perf_counter() - start) * 1000, 2),
+            "elapsed_ms": elapsed_ms,
         }
 
     def _detect_and_track(self, model: Any, frame: np.ndarray, mode: str) -> list[AnalysisObject]:
