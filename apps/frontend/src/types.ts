@@ -293,6 +293,7 @@ export type MatchAnalysisPlusSummary = {
   frames_processed: number;
   max_frames: number;
   fps: number;
+  processing_fps?: number;
   resolution: number[];
   detections_count: number;
   class_counts?: Record<string, number>;
@@ -302,6 +303,65 @@ export type MatchAnalysisPlusSummary = {
     max?: number | null;
   };
   tracks_count: number;
+  raw_tracks_count?: number;
+  player_filter?: {
+    engine: string;
+    raw_player_detections: number;
+    kept_player_detections: number;
+    rejected_implausible_shape: number;
+    rejected_field_fixtures: number;
+  };
+  ball_filter?: {
+    engine: string;
+    raw_ball_observations: number;
+    kept_ball_observations: number;
+    filtered_static_candidates: number;
+    static_hits_threshold: number;
+    pitch_stabilized_observations?: number;
+  };
+  team_classifier?: {
+    engine: string;
+    kit_anchors_bgr: Record<string, number[]>;
+    classified_tracks: number;
+    color_observations: number;
+    anchor_initializations: number;
+  };
+  radar?: {
+    engine: string;
+    model_available: boolean;
+    calibration_mode?: string | null;
+    calibration_attempts: number;
+    successful_calibrations: number;
+    goal_geometry_calibrations?: number;
+    rendered_frames: number;
+    last_visible_keypoints: number;
+    last_inliers: number;
+    last_reprojection_error_cm?: number | null;
+    last_line_alignment_score?: number | null;
+    camera_tracking?: {
+      engine: string;
+      attempts: number;
+      successes: number;
+      failures: number;
+      last_inliers: number;
+      last_inlier_ratio?: number | null;
+      last_reprojection_error_px?: number | null;
+    };
+    pitch_template?: {
+      name: string;
+      length_cm: number;
+      width_cm: number;
+    };
+    projection_model?: string;
+    coordinate_system: string;
+    errors: number;
+  };
+  metric_tracking?: {
+    coordinate_system: string;
+    ground_plane_z_cm: number;
+    trajectory_sample_rate_hz: number;
+    heatmap_ready: boolean;
+  };
   tracks?: Array<{
     track_id: number;
     team?: number | null;

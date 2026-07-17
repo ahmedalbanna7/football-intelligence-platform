@@ -3,7 +3,20 @@ import unittest
 import cv2
 import numpy as np
 
-from app.match_analysis_plus.runner import AnalysisObject, TrackIdStabilizer
+from app.match_analysis_plus.runner import (
+    AnalysisObject,
+    BallStaticFilter,
+    GOAL_AREA_LENGTH_CM,
+    GOAL_AREA_WIDTH_CM,
+    MatchAnalysisPlusRunner,
+    PENALTY_SPOT_DISTANCE_CM,
+    PITCH_LENGTH_CM,
+    PITCH_WIDTH_CM,
+    PitchRadar,
+    PlayerValidityFilter,
+    TeamColorClassifier,
+    TrackIdStabilizer,
+)
 
 
 FRAME_HEIGHT = 360
@@ -234,6 +247,233 @@ class TrackIdStabilizerTests(unittest.TestCase):
         self.assertEqual(0, summary["stable_tracks_count"])
         self.assertEqual(0, summary["predicted_boxes_rendered"])
         self.assertGreaterEqual(summary["discarded_tentative_tracks"], 1)
+
+
+class PlayerValidityFilterTests(unittest.TestCase):
+    def test_corner_flag_is_rejected_before_identity_assignment(self) -> None:
+        frame = np.full((FRAME_HEIGHT, FRAME_WIDTH, 3), (45, 105, 45), dtype=np.uint8)
+        frame[20:190, 30:150] = (70, 78, 165)
+        pole = AnalysisObject(
+            track_id=301,
+            raw_track_id=301,
+            class_name="player",
+            bbox=[45, 35, 135, 175],
+            confidence=0.61,
+        )
+        player = _player(240, 100, 302)
+        cv2.line(frame, (78, 55), (78, 174), (235, 235, 235), 2)
+        cv2.fillPoly(
+            frame,
+            [np.array([[78, 35], [101, 47], [78, 61]], dtype=np.int32)],
+            (20, 45, 230),
+        )
+        _draw_player(frame, player, (0, 220, 220), (25, 25, 25), (30, 90, 210))
+
+        validity_filter = PlayerValidityFilter()
+        output = validity_filter.filter([pole, player], frame)
+
+        self.assertEqual([302], [item.track_id for item in output])
+        self.assertEqual(1, validity_filter.summary()["rejected_field_fixtures"])
+
+    def test_football_model_classes_include_players_goalkeepers_and_ball(self) -> None:
+        class Model:
+            names = {0: "ball", 1: "goalkeeper", 2: "player", 3: "referee"}
+
+        runner = MatchAnalysisPlusRunner.__new__(MatchAnalysisPlusRunner)
+        self.assertEqual([0, 1, 2], runner._target_class_ids(Model()))
+
+
+class PitchRadarTests(unittest.TestCase):
+    def test_goal_area_geometry_maps_to_metric_penalty_end(self) -> None:
+        frame = np.full((720, 1280, 3), (45, 112, 45), dtype=np.uint8)
+        white = (245, 245, 245)
+        cv2.line(frame, (340, 200), (940, 200), white, 8)
+        cv2.line(frame, (340, 200), (340, 350), white, 8)
+        cv2.line(frame, (940, 200), (940, 350), white, 8)
+        cv2.line(frame, (340, 350), (940, 350), white, 8)
+        cv2.line(frame, (0, 200), (1279, 200), white, 8)
+        cv2.line(frame, (0, 650), (1279, 650), white, 8)
+        cv2.line(frame, (520, 60), (520, 200), white, 10)
+        cv2.line(frame, (760, 60), (760, 200), white, 10)
+        cv2.line(frame, (520, 60), (760, 60), white, 10)
+        cv2.ellipse(frame, (640, 500), (16, 7), 0, 0, 360, white, cv2.FILLED)
+
+        radar = PitchRadar(model=None, stride=12)
+        result = radar._goal_area_metric_homography(
+            frame,
+            players=[],
+            marker_candidates=[(640.0, 500.0)],
+        )
+
+        self.assertIsNotNone(result)
+        homography = result[0]  # type: ignore[index]
+        transformed = cv2.perspectiveTransform(
+            np.float32([[640.0, 500.0], [340.0, 350.0]]).reshape(-1, 1, 2),
+            homography,
+        ).reshape(-1, 2)
+        np.testing.assert_allclose(
+            transformed[0],
+            [PITCH_LENGTH_CM - PENALTY_SPOT_DISTANCE_CM, PITCH_WIDTH_CM / 2],
+            atol=35.0,
+        )
+        np.testing.assert_allclose(
+            transformed[1],
+            [
+                PITCH_LENGTH_CM - GOAL_AREA_LENGTH_CM,
+                PITCH_WIDTH_CM / 2 - GOAL_AREA_WIDTH_CM / 2,
+            ],
+            atol=55.0,
+        )
+
+    def test_radar_renders_observed_players_with_stable_ids(self) -> None:
+        radar = PitchRadar(model=None, stride=12)
+        radar.homography = np.array(
+            [
+                [12000.0 / FRAME_WIDTH, 0.0, 0.0],
+                [0.0, 7000.0 / FRAME_HEIGHT, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float64,
+        )
+        radar.last_calibrated_frame = 0
+        frame = np.zeros((FRAME_HEIGHT, FRAME_WIDTH, 3), dtype=np.uint8)
+        player_one = _player(145, 90, 7)
+        player_two = _player(410, 110, 9)
+        ball = AnalysisObject(
+            track_id=1,
+            raw_track_id=1,
+            class_name="ball",
+            bbox=[315, 210, 327, 222],
+            confidence=0.9,
+        )
+
+        radar.draw(
+            frame,
+            frame_index=1,
+            players=[player_one, player_two],
+            balls=[ball],
+            team_by_track={7: 1, 9: 2},
+        )
+
+        self.assertEqual(1, radar.summary()["rendered_frames"])
+        self.assertGreater(int(np.count_nonzero(frame)), 1000)
+
+    def test_visual_marker_requires_temporal_stability(self) -> None:
+        radar = PitchRadar(model=None, stride=12)
+
+        first = radar._track_visual_markers(
+            0,
+            [(100.0, 120.0), (300.0, 220.0)],
+            FRAME_WIDTH,
+        )
+        second = radar._track_visual_markers(
+            12,
+            [(180.0, 120.0), (305.0, 223.0)],
+            FRAME_WIDTH,
+        )
+
+        self.assertEqual([], first)
+        self.assertEqual([(305.0, 223.0)], second)
+
+
+class BallStaticFilterTests(unittest.TestCase):
+    def test_pitch_coordinates_reject_a_marker_despite_camera_motion(self) -> None:
+        ball_filter = BallStaticFilter(static_hits=3)
+        outputs: list[list[AnalysisObject]] = []
+        for frame_index in range(5):
+            marker = AnalysisObject(
+                track_id=frame_index + 1,
+                raw_track_id=frame_index + 1,
+                class_name="ball",
+                bbox=[100 + frame_index * 18, 170, 132 + frame_index * 18, 184],
+                confidence=0.7,
+            )
+            outputs.append(
+                ball_filter.filter(
+                    frame_index,
+                    [marker],
+                    [],
+                    FRAME_WIDTH,
+                    pitch_transform=lambda _point: (2450.0, 3180.0),
+                )
+            )
+
+        self.assertTrue(all(output == [] for output in outputs))
+        self.assertEqual(5, ball_filter.summary()["filtered_static_candidates"])
+        self.assertEqual([(188.0, 177.0)], ball_filter.static_marker_centers(4))
+
+    def test_moving_ball_is_not_rejected_in_pitch_coordinates(self) -> None:
+        ball_filter = BallStaticFilter(static_hits=3)
+        outputs: list[list[AnalysisObject]] = []
+        for frame_index in range(6):
+            ball = AnalysisObject(
+                track_id=frame_index + 1,
+                raw_track_id=frame_index + 1,
+                class_name="ball",
+                bbox=[100, 170, 116, 186],
+                confidence=0.8,
+            )
+            outputs.append(
+                ball_filter.filter(
+                    frame_index,
+                    [ball],
+                    [],
+                    FRAME_WIDTH,
+                    pitch_transform=lambda _point, index=frame_index: (
+                        900.0 + index * 180.0,
+                        3000.0,
+                    ),
+                )
+            )
+
+        self.assertEqual([], outputs[0])
+        self.assertTrue(all(len(output) == 1 for output in outputs[1:]))
+        self.assertEqual(0, ball_filter.summary()["filtered_static_candidates"])
+
+    def test_ball_near_player_is_kept_immediately(self) -> None:
+        ball_filter = BallStaticFilter(static_hits=3)
+        player = _player(180, 100, 1)
+        ball = AnalysisObject(
+            track_id=1,
+            raw_track_id=1,
+            class_name="ball",
+            bbox=[198, 214, 214, 230],
+            confidence=0.8,
+        )
+
+        output = ball_filter.filter(0, [ball], [player], FRAME_WIDTH)
+
+        self.assertEqual([ball], output)
+
+
+class TeamColorClassifierTests(unittest.TestCase):
+    def test_same_kit_tracks_share_a_team_and_distinct_kit_is_separated(self) -> None:
+        classifier = TeamColorClassifier()
+        yellow_one = _player(100, 100, 1)
+        blue = _player(250, 100, 2)
+        yellow_two = _player(400, 100, 3)
+
+        class State:
+            def __init__(self, jersey_color: tuple[int, int, int]) -> None:
+                self.jersey_color = jersey_color
+
+        states = {
+            1: State((25, 185, 225)),
+            2: State((205, 125, 55)),
+            3: State((35, 175, 215)),
+        }
+        team_by_track: dict[int, int] = {}
+
+        for _ in range(5):
+            classifier.update(
+                [yellow_one, blue, yellow_two],
+                states,  # type: ignore[arg-type]
+                team_by_track,
+            )
+
+        self.assertEqual(team_by_track[1], team_by_track[3])
+        self.assertNotEqual(team_by_track[1], team_by_track[2])
+        self.assertEqual(2, len(classifier.summary()["kit_anchors_bgr"]))
 
 
 if __name__ == "__main__":

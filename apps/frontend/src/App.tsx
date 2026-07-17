@@ -79,7 +79,7 @@ const routes: Array<{
   { key: "matches", label: "Matches", icon: <Video size={18} />, subtitle: "Upload and prepare games" },
   { key: "analysis", label: "Analysis", icon: <Activity size={18} />, subtitle: "Pipeline outputs" },
   { key: "first-analysis", label: "First Analysis", icon: <BarChart3 size={18} />, subtitle: "Annotated football_analysis-main video" },
-  { key: "match-analysis-plus", label: "Match Analysis +", icon: <BarChart3 size={18} />, subtitle: "Saved sports-main worker runs" },
+  { key: "match-analysis-plus", label: "Match Analysis +", icon: <BarChart3 size={18} />, subtitle: "Full player, ball, team, and pitch analysis" },
   { key: "reports", label: "Reports", icon: <FileText size={18} />, subtitle: "Team and player reports" },
   { key: "agent", label: "Agent", icon: <Bot size={18} />, subtitle: "Coach assistant" },
   { key: "recommendations", label: "Recommendations", icon: <Lightbulb size={18} />, subtitle: "Match and season ideas" }
@@ -1402,9 +1402,7 @@ function FirstAnalysisPage() {
 
 function MatchAnalysisPlusPage() {
   const matches = useAsyncData(() => api.listMatches(30), []);
-  const modes = useAsyncData(() => api.getMatchAnalysisPlusModes(), []);
   const [matchId, setMatchId] = useState<number | null>(null);
-  const [mode, setMode] = useState("PLAYER_TRACKING");
   const [maxFrames, setMaxFrames] = useState(450);
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
   const [running, setRunning] = useState(false);
@@ -1427,7 +1425,7 @@ function MatchAnalysisPlusPage() {
     setMessage("Running Match Analysis +...");
     try {
       const response = await api.runMatchAnalysisPlus(activeId, {
-        mode,
+        mode: "FULL_ANALYSIS",
         max_frames: maxFrames
       });
       setSelectedRunId(response.id);
@@ -1449,15 +1447,6 @@ function MatchAnalysisPlusPage() {
           <select className="select" value={activeId || ""} onChange={(event) => { setMatchId(Number(event.target.value)); setSelectedRunId(null); }} style={{ maxWidth: 520 }}>
             {(matches.data?.items || []).map((match) => <option key={match.id} value={match.id}>#{match.id} {match.title}</option>)}
           </select>
-          <select className="select" value={mode} onChange={(event) => setMode(event.target.value)} style={{ maxWidth: 230 }}>
-            {(modes.data?.items || [
-              { value: "PLAYER_TRACKING", label: "Player tracking", description: "" },
-              { value: "PLAYER_DETECTION", label: "Player detection", description: "" },
-              { value: "BALL_DETECTION", label: "Ball detection", description: "" },
-              { value: "TEAM_CLASSIFICATION", label: "Team classification", description: "" },
-              { value: "RADAR", label: "Radar-ready", description: "" }
-            ]).map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
-          </select>
           <label className="toolbar">
             <span className="label">Max frames</span>
             <input
@@ -1478,9 +1467,7 @@ function MatchAnalysisPlusPage() {
           </button>
         </div>
         {message ? <p className="badge">{message}</p> : null}
-        <p className="muted small">
-          Runs are saved in the database. Select a match, run the independent match-analysis-worker, then pick any previous run from the saved list below.
-        </p>
+        <p className="muted small">Full analysis profile. Results are saved per match.</p>
       </div>
 
       <section className="grid two">
@@ -1494,7 +1481,7 @@ function MatchAnalysisPlusPage() {
                 <thead>
                   <tr>
                     <th>Run</th>
-                    <th>Mode</th>
+                    <th>Profile</th>
                     <th>Status</th>
                     <th>Frames</th>
                     <th>Created</th>
@@ -1505,7 +1492,7 @@ function MatchAnalysisPlusPage() {
                   {runs.data.runs.map((run) => (
                     <tr key={run.id}>
                       <td>#{run.id}</td>
-                      <td>{run.mode}</td>
+                      <td>{run.mode === "FULL_ANALYSIS" ? "Full analysis" : "Legacy run"}</td>
                       <td>{statusBadge(run.status)}</td>
                       <td>{run.summary?.frames_processed ?? run.max_frames}</td>
                       <td>{run.created_at ? new Date(run.created_at).toLocaleString() : "-"}</td>
@@ -1530,7 +1517,7 @@ function MatchAnalysisPlusPage() {
                 <tbody>
                   <tr><th>Run</th><td>#{selectedRun.id}</td></tr>
                   <tr><th>Status</th><td>{selectedRun.status}</td></tr>
-                  <tr><th>Mode</th><td>{selectedRun.mode}</td></tr>
+                  <tr><th>Profile</th><td>{selectedRun.mode === "FULL_ANALYSIS" ? "Full analysis" : "Legacy run"}</td></tr>
                   <tr><th>Source</th><td>{selectedRun.source}</td></tr>
                   <tr><th>Worker</th><td>{summary?.worker || "-"}</td></tr>
                   <tr><th>Project</th><td>{summary?.source_project || "apps/match-analysis-worker/sports-main"}</td></tr>
@@ -1549,7 +1536,7 @@ function MatchAnalysisPlusPage() {
           <section className="grid four">
             <StatCard title="Frames" value={summary.frames_processed} label={`max ${summary.max_frames}`} />
             <StatCard title="Tracks" value={summary.tracks_count} label={summary.model_mode || "sports-main worker"} />
-            <StatCard title="Detections" value={summary.detections_count} label={Object.entries(summary.class_counts || {}).map(([key, value]) => `${key}: ${value}`).join(" · ") || "class counts"} />
+            <StatCard title="Detections" value={summary.detections_count} label={Object.entries(summary.class_counts || {}).map(([key, value]) => `${key}: ${value}`).join(" / ") || "class counts"} />
             <StatCard title="Elapsed" value={`${summary.elapsed_ms} ms`} label={summary.output_codec || "codec"} />
           </section>
 
@@ -1583,7 +1570,39 @@ function MatchAnalysisPlusPage() {
                     <tr><th>Model</th><td>{summary.model}</td></tr>
                     <tr><th>Resolution</th><td>{summary.resolution.join(" x ")}</td></tr>
                     <tr><th>FPS</th><td>{summary.fps}</td></tr>
+                    <tr><th>Processing FPS</th><td>{summary.processing_fps ?? "-"}</td></tr>
                     <tr><th>Confidence avg</th><td>{summary.confidence?.avg ?? "-"}</td></tr>
+                    <tr><th>Fixture detections rejected</th><td>{summary.player_filter?.rejected_field_fixtures ?? 0}</td></tr>
+                    <tr><th>Static ball candidates rejected</th><td>{summary.ball_filter?.filtered_static_candidates ?? 0}</td></tr>
+                    <tr><th>Team kit references</th><td>{Object.keys(summary.team_classifier?.kit_anchors_bgr || {}).length}</td></tr>
+                    <tr><th>Pitch calibration</th><td>{summary.radar?.calibration_mode ?? "Not calibrated"}</td></tr>
+                    <tr><th>Radar calibrations</th><td>{summary.radar?.successful_calibrations ?? 0}</td></tr>
+                    <tr>
+                      <th>Line alignment</th>
+                      <td>
+                        {summary.radar?.last_line_alignment_score != null
+                          ? `${(summary.radar.last_line_alignment_score * 100).toFixed(1)}%`
+                          : "-"}
+                      </td>
+                    </tr>
+                    <tr>
+                      <th>Camera tracking</th>
+                      <td>
+                        {summary.radar?.camera_tracking
+                          ? `${summary.radar.camera_tracking.successes}/${summary.radar.camera_tracking.attempts}`
+                          : "-"}
+                      </td>
+                    </tr>
+                    <tr>
+                      <th>Metric pitch</th>
+                      <td>
+                        {summary.radar?.pitch_template
+                          ? `${summary.radar.pitch_template.length_cm / 100} x ${summary.radar.pitch_template.width_cm / 100} m`
+                          : "-"}
+                      </td>
+                    </tr>
+                    <tr><th>Heatmap coordinates</th><td>{summary.metric_tracking?.heatmap_ready ? "Ready" : "Not calibrated"}</td></tr>
+                    <tr><th>Radar frames rendered</th><td>{summary.radar?.rendered_frames ?? 0}</td></tr>
                     <tr><th>Team 1 control</th><td>{summary.team_ball_control?.team_1_percent ?? 0}%</td></tr>
                     <tr><th>Team 2 control</th><td>{summary.team_ball_control?.team_2_percent ?? 0}%</td></tr>
                     <tr><th>Output</th><td>{summary.output_object}</td></tr>

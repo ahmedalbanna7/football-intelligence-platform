@@ -10,7 +10,7 @@ class MatchAnalysisRequest(BaseModel):
     bucket: str
     object_name: str
     artifact_prefix: str
-    mode: str = "PLAYER_TRACKING"
+    mode: str = "FULL_ANALYSIS"
     max_frames: int = 450
 
 

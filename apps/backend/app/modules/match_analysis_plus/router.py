@@ -20,7 +20,7 @@ router = APIRouter()
 
 
 class MatchAnalysisRunRequest(BaseModel):
-    mode: str = "PLAYER_TRACKING"
+    mode: str = "FULL_ANALYSIS"
     max_frames: int = 450
 
 
@@ -58,29 +58,9 @@ def get_match_analysis_modes():
     return {
         "items": [
             {
-                "value": "PLAYER_TRACKING",
-                "label": "Player tracking",
-                "description": "Tracks players and draws IDs, speed, distance, and team color.",
-            },
-            {
-                "value": "PLAYER_DETECTION",
-                "label": "Player detection",
-                "description": "Detects players only.",
-            },
-            {
-                "value": "BALL_DETECTION",
-                "label": "Ball detection",
-                "description": "Detects and marks the ball only.",
-            },
-            {
-                "value": "TEAM_CLASSIFICATION",
-                "label": "Team classification",
-                "description": "Light jersey-color team split with player tracking.",
-            },
-            {
-                "value": "RADAR",
-                "label": "Radar-ready",
-                "description": "Stores the run as radar-ready. Specialized pitch models can be added later.",
+                "value": "FULL_ANALYSIS",
+                "label": "Full match analysis",
+                "description": "Players, ball, stable tracking, teams, movement, possession, and pitch radar.",
             },
         ]
     }
@@ -126,7 +106,7 @@ async def run_match_analysis_plus(
     run = MatchAnalysisRun(
         match_id=match_id,
         video_id=video.id,
-        mode=payload.mode.upper(),
+        mode="FULL_ANALYSIS",
         status="queued",
         source="sports-main",
         max_frames=max(payload.max_frames, 0),

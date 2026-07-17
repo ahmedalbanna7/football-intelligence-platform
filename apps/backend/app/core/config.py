@@ -49,9 +49,12 @@ class Settings(BaseSettings):
     MATCH_ANALYSIS_WORKER_URL: str = "http://match-analysis-worker:8010"
     MATCH_ANALYSIS_WORKER_TIMEOUT_SECONDS: int = 3600
     MATCH_ANALYSIS_AUTO_QUEUE_ON_UPLOAD: bool = True
-    MATCH_ANALYSIS_DEFAULT_MODE: str = "PLAYER_TRACKING"
+    MATCH_ANALYSIS_DEFAULT_MODE: str = "FULL_ANALYSIS"
     MATCH_ANALYSIS_DEFAULT_MAX_FRAMES: int = 450
     MATCH_ANALYSIS_TRACKER: str = "app/match_analysis_plus/trackers/botsort_reid.yaml"
+    MATCH_ANALYSIS_PLAYER_MODEL_PATH: str = "yolo11n.pt"
+    MATCH_ANALYSIS_PITCH_MODEL_PATH: str = "models/football-pitch-detection.pt"
+    MATCH_ANALYSIS_RADAR_STRIDE: int = 12
 
     class Config:
         env_file = ".env"

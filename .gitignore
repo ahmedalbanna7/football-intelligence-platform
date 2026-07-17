@@ -31,3 +31,6 @@ artifacts/
 .ruff_cache/
 .mypy_cache/
 .DS_Store
+
+# Downloaded ML weights
+apps/backend/models/*.pt
