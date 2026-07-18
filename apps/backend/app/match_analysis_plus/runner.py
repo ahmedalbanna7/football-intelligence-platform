@@ -5,6 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import perf_counter
 from typing import Any
+import colorsys
 import io
 import json
 import shutil
@@ -32,6 +33,34 @@ GOAL_AREA_WIDTH_CM = 1832.0
 GOAL_WIDTH_CM = 732.0
 PENALTY_SPOT_DISTANCE_CM = 1100.0
 CENTER_CIRCLE_RADIUS_CM = 915.0
+VISUAL_LAYER_SCHEMA_VERSION = 1
+VISUAL_LAYER_SAMPLE_RATE_HZ = 6.0
+TRACK_VISUAL_PALETTE = (
+    "#ef4444",
+    "#0ea5e9",
+    "#22c55e",
+    "#f59e0b",
+    "#8b5cf6",
+    "#ec4899",
+    "#14b8a6",
+    "#f97316",
+    "#6366f1",
+    "#84cc16",
+    "#06b6d4",
+    "#e11d48",
+    "#a855f7",
+    "#10b981",
+    "#eab308",
+    "#3b82f6",
+    "#d946ef",
+    "#65a30d",
+    "#0891b2",
+    "#dc2626",
+    "#7c3aed",
+    "#059669",
+    "#ca8a04",
+    "#2563eb",
+)
 
 
 @dataclass
@@ -3375,6 +3404,21 @@ class PitchRadar:
             min(PITCH_WIDTH_CM, max(0.0, y_cm)),
         )
 
+    def pitch_to_video_matrix(self) -> np.ndarray | None:
+        """Return the current metric-pitch to source-video projection."""
+        if self.homography is None:
+            return None
+        try:
+            inverse = np.linalg.inv(self.homography)
+        except np.linalg.LinAlgError:
+            return None
+        if not np.all(np.isfinite(inverse)):
+            return None
+        scale = float(inverse[2, 2])
+        if abs(scale) < 1e-9:
+            return None
+        return inverse / scale
+
     def _pitch_vertices(self) -> np.ndarray:
         penalty_width = PENALTY_AREA_WIDTH_CM
         goal_width = GOAL_AREA_WIDTH_CM
@@ -3473,12 +3517,29 @@ class MatchAnalysisPlusRunner:
                 max_frames=max_frames,
             )
 
+            visual_layers_payload = summary.pop("_visual_layers_payload", None)
+
             output_object = f"{artifact_prefix}/output.mp4"
             summary_object = f"{artifact_prefix}/summary.json"
             thumbnail_object = f"{artifact_prefix}/thumbnail.jpg"
+            visual_layers_object = f"{artifact_prefix}/visual_layers.json"
             self._put_file(bucket, output_object, output_path, "video/mp4")
             if thumbnail_path.exists():
                 self._put_file(bucket, thumbnail_object, thumbnail_path, "image/jpeg")
+            if visual_layers_payload is not None:
+                self._put_json(bucket, visual_layers_object, visual_layers_payload)
+                summary["visual_layers"] = {
+                    "status": "ready",
+                    "object_name": visual_layers_object,
+                    "schema_version": visual_layers_payload["schema_version"],
+                    "tracks_count": len(visual_layers_payload["tracks"]),
+                    "movement_sample_rate_hz": visual_layers_payload[
+                        "movement_sample_rate_hz"
+                    ],
+                    "heatmap_sample_rate_hz": visual_layers_payload[
+                        "heatmap_sample_rate_hz"
+                    ],
+                }
 
             payload = {
                 **summary,
@@ -3528,7 +3589,9 @@ class MatchAnalysisPlusRunner:
         track_distance: dict[int, float] = {}
         track_speed: dict[int, float] = {}
         track_frames: dict[int, int] = {}
+        track_video_samples: dict[int, list[list[int]]] = {}
         track_pitch_samples: dict[int, list[dict[str, float | int]]] = {}
+        pitch_to_video_samples: list[list[float | int]] = []
         team_by_track: dict[int, int] = {}
         ball_control: list[int] = []
         class_counts: dict[str, int] = {}
@@ -3568,6 +3631,12 @@ class MatchAnalysisPlusRunner:
                 players=players,
                 static_markers=ball_filter.static_marker_centers(frames_processed),
             )
+            self._record_pitch_projection(
+                frame_index=frames_processed,
+                fps=fps,
+                radar=radar,
+                samples=pitch_to_video_samples,
+            )
             objects = players + balls
             detected_objects = [item for item in objects if not item.is_predicted]
             detections_count += len(detected_objects)
@@ -3586,6 +3655,7 @@ class MatchAnalysisPlusRunner:
                 track_distance=track_distance,
                 track_speed=track_speed,
                 track_frames=track_frames,
+                track_video_samples=track_video_samples,
                 track_pitch_samples=track_pitch_samples,
             )
             current_control = self._ball_control(
@@ -3630,6 +3700,8 @@ class MatchAnalysisPlusRunner:
         tracks: list[dict[str, Any]] = []
         for track_id in sorted(track_frames):
             state = track_stabilizer.tracks.get(track_id)
+            video_samples = track_video_samples.get(track_id, [])
+            pitch_samples = track_pitch_samples.get(track_id, [])
             tracks.append(
                 {
                     "track_id": track_id,
@@ -3650,7 +3722,10 @@ class MatchAnalysisPlusRunner:
                     }
                     if track_id in last_positions
                     else None,
-                    "pitch_samples_cm": track_pitch_samples.get(track_id, []),
+                    "first_frame": video_samples[0][0] if video_samples else None,
+                    "last_frame": video_samples[-1][0] if video_samples else None,
+                    "movement_samples": len(video_samples),
+                    "heatmap_samples": len(pitch_samples),
                     "identity_locked": state.identity_locked if state is not None else False,
                     "identity_confidence": round(track_stabilizer._identity_confidence(state), 4)
                     if state is not None
@@ -3697,6 +3772,17 @@ class MatchAnalysisPlusRunner:
         total_control = max(team_1 + team_2, 1)
         elapsed_ms = round((perf_counter() - start) * 1000, 2)
         processing_fps = round(frames_processed / max(elapsed_ms / 1000, 0.001), 3)
+        visual_layers_payload = self._build_visual_layers_payload(
+            fps=fps,
+            frames_processed=frames_processed,
+            width=width,
+            height=height,
+            track_frames=track_frames,
+            track_video_samples=track_video_samples,
+            track_pitch_samples=track_pitch_samples,
+            pitch_to_video_samples=pitch_to_video_samples,
+            team_by_track=team_by_track,
+        )
 
         return {
             "status": "ok",
@@ -3730,10 +3816,11 @@ class MatchAnalysisPlusRunner:
             "metric_tracking": {
                 "coordinate_system": "pitch_centimeters",
                 "ground_plane_z_cm": 0.0,
-                "trajectory_sample_rate_hz": 4.0,
+                "trajectory_sample_rate_hz": VISUAL_LAYER_SAMPLE_RATE_HZ,
                 "heatmap_ready": radar.homography is not None,
             },
             "tracks": tracks[:250],
+            "_visual_layers_payload": visual_layers_payload,
             "team_ball_control": {
                 "team_1_percent": round(team_1 * 100 / total_control, 2),
                 "team_2_percent": round(team_2 * 100 / total_control, 2),
@@ -3801,17 +3888,28 @@ class MatchAnalysisPlusRunner:
         track_distance: dict[int, float],
         track_speed: dict[int, float],
         track_frames: dict[int, int],
+        track_video_samples: dict[int, list[list[int]]],
         track_pitch_samples: dict[int, list[dict[str, float | int]]],
     ) -> None:
+        sample_interval = max(1, int(round(fps / VISUAL_LAYER_SAMPLE_RATE_HZ)))
         for player in players:
             if player.is_predicted:
                 continue
             foot = ((player.bbox[0] + player.bbox[2]) / 2, player.bbox[3])
+            track_frames[player.track_id] = track_frames.get(player.track_id, 0) + 1
+            video_samples = track_video_samples.setdefault(player.track_id, [])
+            if (
+                not video_samples
+                or frame_index - int(video_samples[-1][0]) >= sample_interval
+            ):
+                video_samples.append(
+                    [frame_index, int(round(foot[0])), int(round(foot[1]))]
+                )
+
             pitch_xy = pitch_transform(foot)
             if pitch_xy is None:
                 continue
             previous = last_positions.get(player.track_id)
-            track_frames[player.track_id] = track_frames.get(player.track_id, 0) + 1
             if previous is not None:
                 frame_delta = max(frame_index - previous[2], 1)
                 distance_m = float(np.hypot(
@@ -3833,9 +3931,8 @@ class MatchAnalysisPlusRunner:
                 pitch_xy[1],
                 frame_index,
             )
-            sample_interval = max(1, int(round(fps / 4.0)))
             samples = track_pitch_samples.setdefault(player.track_id, [])
-            if frame_index % sample_interval == 0 and len(samples) < 2000:
+            if not samples or frame_index - int(samples[-1]["frame"]) >= sample_interval:
                 samples.append(
                     {
                         "frame": frame_index,
@@ -3844,6 +3941,89 @@ class MatchAnalysisPlusRunner:
                         "z": 0.0,
                     }
                 )
+
+    def _record_pitch_projection(
+        self,
+        frame_index: int,
+        fps: float,
+        radar: PitchRadar,
+        samples: list[list[float | int]],
+    ) -> None:
+        sample_interval = max(1, int(round(fps / VISUAL_LAYER_SAMPLE_RATE_HZ)))
+        if samples and frame_index - int(samples[-1][0]) < sample_interval:
+            return
+        matrix = radar.pitch_to_video_matrix()
+        if matrix is None:
+            return
+        samples.append(
+            [frame_index, *[round(float(value), 9) for value in matrix.reshape(-1)]]
+        )
+
+    def _build_visual_layers_payload(
+        self,
+        fps: float,
+        frames_processed: int,
+        width: int,
+        height: int,
+        track_frames: dict[int, int],
+        track_video_samples: dict[int, list[list[int]]],
+        track_pitch_samples: dict[int, list[dict[str, float | int]]],
+        pitch_to_video_samples: list[list[float | int]],
+        team_by_track: dict[int, int],
+    ) -> dict[str, Any]:
+        visual_tracks: list[dict[str, Any]] = []
+        for track_id in sorted(track_frames):
+            video_path = track_video_samples.get(track_id, [])
+            if not video_path:
+                continue
+            pitch_path = [
+                [
+                    int(sample["frame"]),
+                    int(round(float(sample["x"]))),
+                    int(round(float(sample["y"]))),
+                ]
+                for sample in track_pitch_samples.get(track_id, [])
+            ]
+            visual_tracks.append(
+                {
+                    "track_id": track_id,
+                    "team": team_by_track.get(track_id),
+                    "color": self._track_visual_color(track_id),
+                    "frames": track_frames.get(track_id, 0),
+                    "first_frame": int(video_path[0][0]),
+                    "last_frame": int(video_path[-1][0]),
+                    "video_path": video_path,
+                    "pitch_path": pitch_path,
+                }
+            )
+
+        return {
+            "schema_version": VISUAL_LAYER_SCHEMA_VERSION,
+            "coordinate_systems": {
+                "video": "source_pixels",
+                "pitch": "pitch_centimeters",
+                "ground_plane_z_cm": 0.0,
+            },
+            "fps": round(float(fps), 4),
+            "frames_processed": frames_processed,
+            "duration_seconds": round(frames_processed / max(float(fps), 1e-6), 3),
+            "resolution": [width, height],
+            "movement_sample_rate_hz": VISUAL_LAYER_SAMPLE_RATE_HZ,
+            "heatmap_sample_rate_hz": VISUAL_LAYER_SAMPLE_RATE_HZ,
+            "pitch": {
+                "length_cm": int(PITCH_LENGTH_CM),
+                "width_cm": int(PITCH_WIDTH_CM),
+            },
+            "pitch_to_video": pitch_to_video_samples,
+            "tracks": visual_tracks,
+        }
+
+    def _track_visual_color(self, track_id: int) -> str:
+        if 1 <= track_id <= len(TRACK_VISUAL_PALETTE):
+            return TRACK_VISUAL_PALETTE[track_id - 1]
+        hue = (track_id * 0.61803398875) % 1.0
+        red, green, blue = colorsys.hsv_to_rgb(hue, 0.78, 0.94)
+        return f"#{int(red * 255):02x}{int(green * 255):02x}{int(blue * 255):02x}"
 
     def _ball_control(
         self,

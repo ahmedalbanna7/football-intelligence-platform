@@ -4,8 +4,6 @@ export type RouteKey =
   | "my-team"
   | "teams"
   | "matches"
-  | "analysis"
-  | "first-analysis"
   | "match-analysis-plus"
   | "reports"
   | "agent"
@@ -16,7 +14,6 @@ export type MatchSummary = {
   title: string;
   status: string;
   match_context?: MatchContext;
-  latest_processing_job?: ProcessingJob | null;
   latest_match_analysis_run?: MatchAnalysisPlusRun | null;
 };
 
@@ -42,69 +39,6 @@ export type MatchContext = {
   };
 };
 
-export type ProcessingJob = {
-  id: number;
-  video_id: number;
-  status: string;
-  started_at?: string;
-  finished_at?: string;
-  error_message?: string | null;
-  result_summary?: ProcessingSummary | null;
-};
-
-export type ProcessingSummary = {
-  status?: string;
-  detections?: {
-    status?: string;
-    engine?: string | null;
-    model?: string | null;
-    device?: string | null;
-    fallback_reason?: string | null;
-    frames_processed?: number | null;
-    frames_requested?: number | null;
-    frames_skipped?: number | null;
-    detections_count?: number | null;
-    class_counts?: Record<string, number> | null;
-    raw_class_counts?: Record<string, number> | null;
-    confidence?: {
-      min?: number | null;
-      max?: number | null;
-      avg?: number | null;
-    } | null;
-    elapsed_ms?: number | null;
-  };
-  tracking?: {
-    tracks_count?: number | null;
-    engine?: string | null;
-    mode?: string | null;
-    detections_received?: number | null;
-  };
-  events?: {
-    events_count?: number | null;
-    tracks_received?: number | null;
-    event_types?: string[] | null;
-  };
-  tactical_identity?: {
-    engine?: string | null;
-    assignments_count?: number | null;
-    resolved_count?: number | null;
-  };
-  artifacts?: {
-    status?: string | null;
-    storage?: string | null;
-    paths?: Record<string, string> | null;
-    track_observations_count?: number | null;
-    detections_count?: number | null;
-    tracks_count?: number | null;
-  };
-  crops?: {
-    status?: string | null;
-    crops_count?: number | null;
-    jersey_crops_count?: number | null;
-    crops_prefix?: string | null;
-  };
-};
-
 export type Team = {
   id: number;
   name: string;
@@ -126,44 +60,6 @@ export type Player = {
   position_label?: string | null;
   preferred_side?: string | null;
   notes?: string | null;
-};
-
-export type TrackAssignment = {
-  id: number;
-  track_id: number;
-  team_context: string;
-  player_name: string;
-  shirt_number?: number | null;
-  position?: string | null;
-  created_at?: string;
-  updated_at?: string;
-};
-
-export type TrackSummary = {
-  track_id: number;
-  object_key?: string | null;
-  class_name?: string | null;
-  team_context?: string | null;
-  team_assignment_source?: string | null;
-  team_assignment_confidence?: number | null;
-  recognized_shirt_number?: number | null;
-  shirt_number_confidence?: number | null;
-  shirt_number_source?: string | null;
-  frames_count?: number;
-  first_frame?: number | null;
-  last_frame?: number | null;
-  crop_samples?: Array<{
-    frame_index: number;
-    crop_path?: string | null;
-    jersey_crop_path?: string | null;
-  }>;
-  dominant_colors?: Array<{
-    hex?: string;
-    rgb?: number[];
-    coverage?: number;
-  }>;
-  kit_match_score?: number | null;
-  assignment?: TrackAssignment | null;
 };
 
 export type PrimaryTeamProfile = {
@@ -258,29 +154,36 @@ export type ReportResponse = {
   } | null;
 };
 
-export type FirstAnalysisSummary = {
-  status: string;
-  engine: string;
-  model: string;
-  match_id: number;
-  input_object: string;
-  output_object: string;
-  summary_object: string;
-  original_project_path: string;
-  output_codec?: string;
-  output_content_type?: string;
-  frames_processed: number;
-  max_frames: number;
-  fps: number;
-  resolution: number[];
-  detections_count: number;
-  player_tracks_count: number;
-  ball_observations: number;
-  elapsed_ms: number;
-  team_ball_control: {
-    team_1_percent: number;
-    team_2_percent: number;
+export type MatchVisualLayerTrack = {
+  track_id: number;
+  team?: number | null;
+  color: string;
+  frames: number;
+  first_frame?: number | null;
+  last_frame?: number | null;
+  video_path: number[][];
+  pitch_path: number[][];
+};
+
+export type MatchVisualLayers = {
+  schema_version: number;
+  coordinate_systems: {
+    video: string;
+    pitch: string;
+    ground_plane_z_cm: number;
   };
+  fps: number;
+  frames_processed: number;
+  duration_seconds: number;
+  resolution: number[];
+  movement_sample_rate_hz: number;
+  heatmap_sample_rate_hz: number;
+  pitch: {
+    length_cm: number;
+    width_cm: number;
+  };
+  pitch_to_video: number[][];
+  tracks: MatchVisualLayerTrack[];
 };
 
 export type MatchAnalysisPlusSummary = {
@@ -362,12 +265,22 @@ export type MatchAnalysisPlusSummary = {
     trajectory_sample_rate_hz: number;
     heatmap_ready: boolean;
   };
+  visual_layers?: {
+    status: string;
+    object_name: string;
+    schema_version: number;
+    tracks_count: number;
+    movement_sample_rate_hz: number;
+    heatmap_sample_rate_hz: number;
+  };
   tracks?: Array<{
     track_id: number;
     team?: number | null;
     frames?: number;
     distance_m?: number;
     last_speed_kmh?: number;
+    movement_samples?: number;
+    heatmap_samples?: number;
   }>;
   team_ball_control?: {
     team_1_percent: number;

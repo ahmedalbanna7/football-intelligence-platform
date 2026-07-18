@@ -45,7 +45,6 @@ class Settings(BaseSettings):
     CROP_EVERY_N_FRAMES: int = 10
     MAX_CROPS_PER_TRACK: int = 8
 
-    FIRST_ANALYSIS_MAX_FRAMES: int = 450
     MATCH_ANALYSIS_WORKER_URL: str = "http://match-analysis-worker:8010"
     MATCH_ANALYSIS_WORKER_TIMEOUT_SECONDS: int = 3600
     MATCH_ANALYSIS_AUTO_QUEUE_ON_UPLOAD: bool = True

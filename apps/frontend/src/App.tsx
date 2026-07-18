@@ -1,33 +1,34 @@
 import {
-  Activity,
   BarChart3,
   Bot,
   CalendarDays,
   FileText,
   Gauge,
+  Flame,
+  Layers3,
   Lightbulb,
   RefreshCw,
   Settings,
   Shield,
   Upload,
   Users,
-  Video
+  Video,
+  Waypoints,
+  X
 } from "lucide-react";
-import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
+import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
 import type {
-  IdentityAssignment,
+  MatchVisualLayers,
+  MatchVisualLayerTrack,
   MatchSummary,
   Player,
   PrimaryTeamProfile,
-  ProcessingSummary,
-  FirstAnalysisSummary,
   MatchAnalysisPlusRun,
   ReportResponse,
   RouteKey,
   RosterPlayer,
-  Team,
-  TrackSummary
+  Team
 } from "./types";
 
 const zones = [
@@ -77,8 +78,6 @@ const routes: Array<{
   { key: "my-team", label: "My Team", icon: <Shield size={18} />, subtitle: "Primary club identity" },
   { key: "teams", label: "Teams", icon: <Users size={18} />, subtitle: "Opponent history and rosters" },
   { key: "matches", label: "Matches", icon: <Video size={18} />, subtitle: "Upload and prepare games" },
-  { key: "analysis", label: "Analysis", icon: <Activity size={18} />, subtitle: "Pipeline outputs" },
-  { key: "first-analysis", label: "First Analysis", icon: <BarChart3 size={18} />, subtitle: "Annotated football_analysis-main video" },
   { key: "match-analysis-plus", label: "Match Analysis +", icon: <BarChart3 size={18} />, subtitle: "Full player, ball, team, and pitch analysis" },
   { key: "reports", label: "Reports", icon: <FileText size={18} />, subtitle: "Team and player reports" },
   { key: "agent", label: "Agent", icon: <Bot size={18} />, subtitle: "Coach assistant" },
@@ -190,15 +189,15 @@ function AppShell({
 function DashboardPage({ setRoute }: { setRoute: (route: RouteKey) => void }) {
   const matches = useAsyncData(() => api.listMatches(8), []);
   const latest = matches.data?.items?.[0];
-  const summary = latest?.latest_processing_job?.result_summary;
+  const summary = latest?.latest_match_analysis_run?.summary;
 
   return (
     <>
       <section className="grid four">
         <StatCard title="Matches" value={matches.data?.items?.length ?? "-"} label="latest loaded" />
         <StatCard title="Latest status" value={latest ? statusBadge(latest.status) : "-"} label={latest?.title} />
-        <StatCard title="YOLO detections" value={summary?.detections?.detections_count ?? "-"} label={summary?.detections?.engine || "waiting"} />
-        <StatCard title="Identity resolved" value={summary?.tactical_identity?.resolved_count ?? "-"} label="from tactical layer" />
+        <StatCard title="YOLO detections" value={summary?.detections_count ?? "-"} label={summary?.model_mode || "waiting"} />
+        <StatCard title="Stable tracks" value={summary?.tracks_count ?? "-"} label="Match Analysis +" />
       </section>
 
       <section className="split">
@@ -209,7 +208,7 @@ function DashboardPage({ setRoute }: { setRoute: (route: RouteKey) => void }) {
               <RefreshCw size={16} /> Refresh
             </button>
           </div>
-          <MatchesTable matches={matches.data?.items || []} onOpen={() => setRoute("analysis")} />
+          <MatchesTable matches={matches.data?.items || []} onOpen={() => setRoute("match-analysis-plus")} />
         </div>
         <div className="section">
           <h2 className="section-title">Next Actions</h2>
@@ -268,7 +267,7 @@ function MatchesTable({
               <td>
                 {match.latest_match_analysis_run
                   ? `M+ ${match.latest_match_analysis_run.status}`
-                  : match.latest_processing_job?.result_summary?.detections?.engine || "-"}
+                  : "-"}
               </td>
               <td>
                 <button className="button" onClick={() => onOpen?.(match.id)} type="button">
@@ -1025,377 +1024,462 @@ function MatchesPage() {
   );
 }
 
-function AnalysisPage() {
-  const matches = useAsyncData(() => api.listMatches(20), []);
-  const [matchId, setMatchId] = useState<number | null>(null);
-  const activeId = matchId || matches.data?.items?.[0]?.id || null;
-  const processing = useAsyncData(() => (activeId ? api.getProcessing(activeId) : Promise.resolve(null)), [activeId]);
-  const identity = useAsyncData(() => (activeId ? api.getIdentityAssignments(activeId) : Promise.resolve(null)), [activeId]);
-  const tracks = useAsyncData(() => (activeId ? api.getTracks(activeId) : Promise.resolve(null)), [activeId]);
-  const summary = processing.data?.job?.result_summary;
+function TrackLayerPicker({
+  icon,
+  label,
+  tracks,
+  selected,
+  onChange
+}: {
+  icon: ReactNode;
+  label: string;
+  tracks: MatchVisualLayerTrack[];
+  selected: number[];
+  onChange: (trackIds: number[]) => void;
+}) {
+  const selectedSet = new Set(selected);
+
+  function toggle(trackId: number) {
+    onChange(
+      selectedSet.has(trackId)
+        ? selected.filter((item) => item !== trackId)
+        : [...selected, trackId].sort((left, right) => left - right)
+    );
+  }
 
   return (
-    <section className="grid">
-      <div className="card">
-        <div className="toolbar">
-          <select className="select" value={activeId || ""} onChange={(event) => setMatchId(Number(event.target.value))} style={{ maxWidth: 420 }}>
-            {(matches.data?.items || []).map((match) => <option key={match.id} value={match.id}>#{match.id} {match.title}</option>)}
-          </select>
-          <button className="button" onClick={() => { processing.refresh(); identity.refresh(); tracks.refresh(); }} type="button">
-            <RefreshCw size={16} /> Refresh
+    <details className="layer-picker">
+      <summary className="layer-picker-trigger">
+        {icon}
+        <span>{label}</span>
+        <span className="layer-count">{selected.length}</span>
+      </summary>
+      <div className="layer-menu">
+        <div className="layer-menu-header">
+          <strong>{label}</strong>
+          <button
+            aria-label={`Clear ${label}`}
+            className="icon-button"
+            disabled={!selected.length}
+            onClick={() => onChange([])}
+            title={`Clear ${label}`}
+            type="button"
+          >
+            <X size={16} />
           </button>
         </div>
+        <div className="layer-options">
+          {tracks.map((track) => (
+            <label className="layer-option" key={track.track_id}>
+              <input
+                checked={selectedSet.has(track.track_id)}
+                onChange={() => toggle(track.track_id)}
+                type="checkbox"
+              />
+              <span className="track-swatch" style={{ backgroundColor: track.color }} />
+              <span>Track {track.track_id}</span>
+              <span className="muted">Team {track.team ?? "-"}</span>
+            </label>
+          ))}
+        </div>
       </div>
-      <ProcessingCards summary={summary} />
-      <TrackReviewPanel
-        matchId={activeId}
-        tracks={tracks.data?.tracks || []}
-        onSaved={() => {
-          tracks.refresh();
-          identity.refresh();
-        }}
-      />
-      <TacticalIdentityPanel assignments={identity.data?.assignments || []} />
-    </section>
+    </details>
   );
 }
 
-function ProcessingCards({ summary }: { summary?: ProcessingSummary | null }) {
-  const rawClassCounts = summary?.detections?.raw_class_counts || {};
-  const personObservations = rawClassCounts.person ?? summary?.detections?.class_counts?.player ?? 0;
-  const ballObservations = rawClassCounts["sports ball"] ?? summary?.detections?.class_counts?.ball ?? 0;
-  const yoloReady = summary?.detections?.engine === "ultralytics_yolo";
-  const trackingReady = summary?.tracking?.engine === "ultralytics_bytetrack";
-  const artifactsReady = summary?.artifacts?.status === "ok";
-  const cropsReady = Boolean(summary?.crops?.crops_count);
-  const identityReady = Boolean(summary?.tactical_identity?.resolved_count);
-
-  return (
-    <>
-      <section className="grid four">
-        <StatCard title="Detector" value={summary?.detections?.engine || "-"} label={summary?.detections?.model || ""} />
-        <StatCard title="Detection Observations" value={summary?.detections?.detections_count ?? "-"} label={`${summary?.detections?.frames_processed ?? "-"} sampled frames`} />
-        <StatCard title="Tracklets" value={summary?.tracking?.tracks_count ?? "-"} label={summary?.tracking?.mode || summary?.tracking?.engine || "tracker pending"} />
-        <StatCard title="Track Events" value={summary?.events?.events_count ?? "-"} label={`${summary?.events?.tracks_received ?? "-"} tracks received`} />
-      </section>
-      <section className="grid two">
-        <div className="card">
-          <h2 className="section-title">YOLO Observation Counts</h2>
-          <div className="toolbar" style={{ marginTop: 14 }}>
-            <span className="badge">person observations: {personObservations}</span>
-            <span className="badge">ball observations: {ballObservations}</span>
-          </div>
-          <p className="muted small">
-            This is not player count. It means YOLO saw people across sampled frames. Avg confidence: {summary?.detections?.confidence?.avg ?? "-"} · Elapsed: {summary?.detections?.elapsed_ms ?? "-"} ms
-          </p>
-        </div>
-        <div className="card">
-          <h2 className="section-title">Raw Model Classes</h2>
-          <div className="toolbar" style={{ marginTop: 14 }}>
-            {Object.keys(rawClassCounts).length
-              ? Object.entries(rawClassCounts).map(([name, count]) => <span className="badge" key={name}>{name}: {count}</span>)
-              : <span className="muted">No raw class counts yet</span>}
-          </div>
-          <p className="muted small">
-            Device: {summary?.detections?.device || "-"} · Skipped frames: {summary?.detections?.frames_skipped ?? "-"} · Tracking input: {summary?.tracking?.detections_received ?? "-"} observations
-          </p>
-        </div>
-      </section>
-      <section className="grid two">
-        <div className="card">
-          <h2 className="section-title">YOLO Integration Status</h2>
-          <div className="check-list">
-            <span>{yoloReady ? "Done" : "Pending"}: real YOLO detections</span>
-            <span>{trackingReady ? "Done" : "Partial"}: ByteTrack tracking</span>
-            <span>{artifactsReady ? "Done" : "Pending"}: detections/tracks JSONL artifacts</span>
-            <span>{cropsReady ? "Done" : "Pending"}: player and jersey crops</span>
-            <span>{identityReady ? "Done" : "Pending"}: resolved player identities</span>
-          </div>
-        </div>
-        <div className="card">
-          <h2 className="section-title">Stored Artifacts</h2>
-          {summary?.artifacts?.paths ? (
-            <div className="artifact-list">
-              {Object.entries(summary.artifacts.paths).map(([name, path]) => (
-                <p className="muted small" key={name}>{name}: {path}</p>
-              ))}
-            </div>
-          ) : (
-            <p className="muted small">Artifacts will appear after the next processing run with the completed YOLO contract.</p>
-          )}
-          <p className="muted small">
-            Crops: {summary?.crops?.crops_count ?? 0} player · {summary?.crops?.jersey_crops_count ?? 0} jersey
-          </p>
-        </div>
-      </section>
-    </>
-  );
-}
-
-function TrackReviewPanel({
-  matchId,
-  tracks,
-  onSaved
-}: {
-  matchId: number | null;
-  tracks: TrackSummary[];
-  onSaved: () => void;
-}) {
-  const [message, setMessage] = useState<string | null>(null);
-  const visibleTracks = tracks.filter((track) => track.class_name === "player").slice(0, 80);
-
-  async function assignTrack(event: FormEvent<HTMLFormElement>, track: TrackSummary) {
-    event.preventDefault();
-    if (!matchId) return;
-    const form = new FormData(event.currentTarget);
-    const shirtNumber = String(form.get("shirt_number") || "").trim();
-    await api.saveTrackAssignment(matchId, {
-      track_id: track.track_id,
-      player_name: String(form.get("player_name") || ""),
-      team_context: String(form.get("team_context") || track.team_context || "unknown"),
-      shirt_number: shirtNumber ? Number(shirtNumber) : null,
-      position: String(form.get("position") || "")
-    });
-    setMessage(`Track ${track.track_id} assigned.`);
-    onSaved();
+function nearestPitchProjection(samples: number[][], frame: number): number[] | null {
+  if (!samples.length) return null;
+  let low = 0;
+  let high = samples.length - 1;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    if (samples[middle][0] <= frame) low = middle + 1;
+    else high = middle - 1;
   }
+  const before = samples[Math.max(0, high)];
+  const after = samples[Math.min(samples.length - 1, low)];
+  const nearest = Math.abs(before[0] - frame) <= Math.abs(after[0] - frame) ? before : after;
+  return nearest.length === 10 ? nearest.slice(1) : null;
+}
 
-  async function autoAssign() {
-    if (!matchId) return;
-    await api.autoAssignTracks(matchId);
-    setMessage("Auto assignment finished.");
-    onSaved();
+function projectPitchPoint(matrix: number[], x: number, y: number): [number, number] | null {
+  if (matrix.length !== 9) return null;
+  const denominator = matrix[6] * x + matrix[7] * y + matrix[8];
+  if (Math.abs(denominator) < 1e-9) return null;
+  const projectedX = (matrix[0] * x + matrix[1] * y + matrix[2]) / denominator;
+  const projectedY = (matrix[3] * x + matrix[4] * y + matrix[5]) / denominator;
+  return Number.isFinite(projectedX) && Number.isFinite(projectedY)
+    ? [projectedX, projectedY]
+    : null;
+}
+
+function drawMovementOverlay(
+  canvas: HTMLCanvasElement,
+  video: HTMLVideoElement,
+  layers: MatchVisualLayers,
+  selectedTrackIds: number[]
+) {
+  const cssWidth = canvas.clientWidth;
+  const cssHeight = canvas.clientHeight;
+  if (!cssWidth || !cssHeight) return;
+  const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+  const targetWidth = Math.round(cssWidth * pixelRatio);
+  const targetHeight = Math.round(cssHeight * pixelRatio);
+  if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
+    canvas.width = targetWidth;
+    canvas.height = targetHeight;
   }
+  const context = canvas.getContext("2d");
+  if (!context) return;
+  context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+  context.clearRect(0, 0, cssWidth, cssHeight);
+  if (!selectedTrackIds.length) return;
 
-  if (!matchId) return null;
-
-  return (
-    <div className="card">
-      <div className="section-header">
-        <div>
-          <h2 className="section-title">Track Review</h2>
-          <p className="muted small">Review random crop samples and confirm only OCR/roster matches you trust.</p>
-        </div>
-        <button className="button" onClick={autoAssign} type="button">
-          <RefreshCw size={16} /> Auto assign by number
-        </button>
-      </div>
-      {message ? <p className="badge">{message}</p> : null}
-      {!visibleTracks.length ? (
-        <Empty>No player tracks available. Reprocess a match after YOLO/ByteTrack completes.</Empty>
-      ) : (
-        <div className="track-grid">
-          {visibleTracks.map((track) => {
-            const sample = track.crop_samples?.find((item) => item.crop_path) || track.crop_samples?.[0];
-            const imagePath = sample?.crop_path || sample?.jersey_crop_path;
-            return (
-              <div className="track-card" key={track.track_id}>
-                <div className="track-media">
-                  {imagePath ? (
-                    <img src={api.objectUrl(imagePath)} alt={`Track ${track.track_id}`} />
-                  ) : (
-                    <div className="empty">No crop</div>
-                  )}
-                </div>
-                <div className="track-meta">
-                  <div className="toolbar">
-                    <span className="badge">Track {track.track_id}</span>
-                    <span className="badge">{track.team_context || "unknown"}</span>
-                    <span className="badge">OCR #{track.recognized_shirt_number ?? "not verified"}</span>
-                  </div>
-                  <p className="muted small">
-                    {track.frames_count ?? 0} frames · team confidence {track.team_assignment_confidence ?? "-"} · OCR {track.shirt_number_confidence ?? "-"} · {track.shirt_number_source || "no_ocr"}
-                  </p>
-                  <form className="form-grid compact" onSubmit={(event) => assignTrack(event, track)}>
-                    <label className="field full">
-                      <span className="label">Player name</span>
-                      <input className="input" name="player_name" defaultValue={track.assignment?.player_name || ""} required />
-                    </label>
-                    <label className="field">
-                      <span className="label">Team</span>
-                      <select className="select" name="team_context" defaultValue={track.assignment?.team_context || track.team_context || "unknown"}>
-                        <option value="primary_team">primary_team</option>
-                        <option value="opponent_team">opponent_team</option>
-                        <option value="club_internal">club_internal</option>
-                      </select>
-                    </label>
-                    <label className="field">
-                      <span className="label">Number</span>
-                      <input className="input" name="shirt_number" type="number" defaultValue={track.assignment?.shirt_number ?? track.recognized_shirt_number ?? ""} />
-                    </label>
-                    <label className="field full">
-                      <span className="label">Position</span>
-                      <input className="input" name="position" defaultValue={track.assignment?.position || ""} />
-                    </label>
-                    <button className="button primary" type="submit">Save identity</button>
-                  </form>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </div>
+  const sourceWidth = layers.resolution[0] || video.videoWidth || 1;
+  const sourceHeight = layers.resolution[1] || video.videoHeight || 1;
+  const currentFrame = Math.min(
+    layers.frames_processed - 1,
+    Math.max(0, Math.round(video.currentTime * layers.fps))
   );
-}
+  const projection = nearestPitchProjection(layers.pitch_to_video, currentFrame);
+  const selected = new Set(selectedTrackIds);
 
-function TacticalIdentityPanel({ assignments }: { assignments: IdentityAssignment[] }) {
-  const visibleAssignments = assignments.slice(0, 80);
+  for (const track of layers.tracks) {
+    if (!selected.has(track.track_id)) continue;
+    const useMetricPath = Boolean(projection && track.pitch_path.length);
+    const path = useMetricPath ? track.pitch_path : track.video_path;
+    let previous: { frame: number; x: number; y: number; metricX: number; metricY: number } | null = null;
+    let latest: { x: number; y: number } | null = null;
 
-  return (
-    <div className="card">
-      <h2 className="section-title">Tactical Identity Tracklets</h2>
-      {!assignments.length ? (
-        <Empty>No identity assignments yet. Add lineup before processing or reprocess this match later.</Empty>
-      ) : (
-        <div className="table-wrap" style={{ marginTop: 14 }}>
-          <p className="muted small">
-            Showing {visibleAssignments.length} of {assignments.length} tracklet assignments. These are not final player identities until real tracking and player re-identification are connected.
-          </p>
-          <table className="table">
-            <thead>
-              <tr>
-                <th>Track</th>
-                <th>Player</th>
-                <th>Zone</th>
-                <th>Confidence</th>
-                <th>Top reasons</th>
-              </tr>
-            </thead>
-            <tbody>
-              {visibleAssignments.map((item) => (
-                <tr key={item.track_id}>
-                  <td>{item.track_id}</td>
-                  <td>{item.resolved_player?.name || item.resolved_player_id || "-"}</td>
-                  <td>{item.zone || item.resolved_player?.zone || "-"}</td>
-                  <td>{item.confidence ?? "-"}</td>
-                  <td>
-                    {item.candidates?.[0]?.reasons
-                      ? Object.entries(item.candidates[0].reasons)
-                          .map(([key, value]) => `${key}: ${value}`)
-                          .join(", ")
-                      : "-"}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </div>
-  );
-}
+    for (const point of path) {
+      const frame = point[0];
+      if (frame > currentFrame) break;
+      const projected = useMetricPath
+        ? projectPitchPoint(projection as number[], point[1], point[2])
+        : [point[1], point[2]] as [number, number];
+      if (!projected) {
+        previous = null;
+        continue;
+      }
+      const x = projected[0] * cssWidth / sourceWidth;
+      const y = projected[1] * cssHeight / sourceHeight;
+      if (x < -cssWidth || x > cssWidth * 2 || y < -cssHeight || y > cssHeight * 2) {
+        previous = null;
+        continue;
+      }
 
-function FirstAnalysisPage() {
-  const matches = useAsyncData(() => api.listMatches(20), []);
-  const [matchId, setMatchId] = useState<number | null>(null);
-  const [maxFrames, setMaxFrames] = useState(450);
-  const [running, setRunning] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
-  const [videoError, setVideoError] = useState<string | null>(null);
-  const [result, setResult] = useState<FirstAnalysisSummary | null>(null);
-  const activeId = matchId || matches.data?.items?.[0]?.id || null;
-  const saved = useAsyncData(
-    () => (activeId ? api.getFirstAnalysis(activeId) : Promise.resolve({ exists: false, summary: null })),
-    [activeId]
-  );
-  const summary = result || saved.data?.summary || null;
+      if (previous) {
+        const frameGap = frame - previous.frame;
+        const metricJump = useMetricPath
+          ? Math.hypot(point[1] - previous.metricX, point[2] - previous.metricY)
+          : 0;
+        if (frameGap <= layers.fps * 2 && (!useMetricPath || metricJump <= 2500)) {
+          const recency = currentFrame > 0 ? frame / currentFrame : 1;
+          context.save();
+          context.globalAlpha = 0.28 + Math.min(1, recency) * 0.68;
+          context.strokeStyle = track.color;
+          context.lineWidth = 3;
+          context.lineCap = "round";
+          context.lineJoin = "round";
+          context.shadowColor = "rgba(0, 0, 0, 0.55)";
+          context.shadowBlur = 3;
+          context.beginPath();
+          context.moveTo(previous.x, previous.y);
+          context.lineTo(x, y);
+          context.stroke();
+          context.restore();
+        }
+      }
+      previous = { frame, x, y, metricX: point[1], metricY: point[2] };
+      latest = { x, y };
+    }
 
-  async function runAnalysis() {
-    if (!activeId) return;
-    setRunning(true);
-    setMessage("Running first analysis...");
-    try {
-      const response = await api.runFirstAnalysis(activeId, maxFrames);
-      setResult(response);
-      setVideoError(null);
-      setMessage("First analysis video generated.");
-      saved.refresh();
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "First analysis failed.");
-    } finally {
-      setRunning(false);
+    if (latest) {
+      context.save();
+      context.fillStyle = track.color;
+      context.strokeStyle = "#ffffff";
+      context.lineWidth = 2;
+      context.beginPath();
+      context.arc(latest.x, latest.y, 5, 0, Math.PI * 2);
+      context.fill();
+      context.stroke();
+      context.restore();
     }
   }
+}
+
+function InteractiveAnalysisViewer({
+  layers,
+  layersError,
+  layersLoading,
+  onVideoError,
+  videoError,
+  videoObject
+}: {
+  layers: MatchVisualLayers | null;
+  layersError: string | null;
+  layersLoading: boolean;
+  onVideoError: () => void;
+  videoError: string | null;
+  videoObject: string;
+}) {
+  const [movementTracks, setMovementTracks] = useState<number[]>([]);
+  const [heatmapTracks, setHeatmapTracks] = useState<number[]>([]);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const tracks = useMemo(
+    () => [...(layers?.tracks || [])].sort((left, right) => left.track_id - right.track_id),
+    [layers]
+  );
+
+  useEffect(() => {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (!video || !canvas || !layers) return;
+    let animationFrame = 0;
+    const render = () => drawMovementOverlay(canvas, video, layers, movementTracks);
+    const animate = () => {
+      render();
+      if (!video.paused && !video.ended) animationFrame = requestAnimationFrame(animate);
+    };
+    const begin = () => {
+      cancelAnimationFrame(animationFrame);
+      animationFrame = requestAnimationFrame(animate);
+    };
+    const observer = new ResizeObserver(render);
+    observer.observe(canvas);
+    video.addEventListener("loadedmetadata", render);
+    video.addEventListener("play", begin);
+    video.addEventListener("pause", render);
+    video.addEventListener("seeked", render);
+    video.addEventListener("timeupdate", render);
+    video.addEventListener("ended", render);
+    render();
+    return () => {
+      cancelAnimationFrame(animationFrame);
+      observer.disconnect();
+      video.removeEventListener("loadedmetadata", render);
+      video.removeEventListener("play", begin);
+      video.removeEventListener("pause", render);
+      video.removeEventListener("seeked", render);
+      video.removeEventListener("timeupdate", render);
+      video.removeEventListener("ended", render);
+    };
+  }, [layers, movementTracks]);
+
+  const aspectRatio = layers?.resolution?.[0] && layers?.resolution?.[1]
+    ? layers.resolution[0] / layers.resolution[1]
+    : 16 / 9;
 
   return (
-    <section className="grid">
-      <div className="card">
-        <div className="toolbar">
-          <select className="select" value={activeId || ""} onChange={(event) => setMatchId(Number(event.target.value))} style={{ maxWidth: 520 }}>
-            {(matches.data?.items || []).map((match) => <option key={match.id} value={match.id}>#{match.id} {match.title}</option>)}
-          </select>
-          <label className="toolbar">
-            <span className="label">Max frames</span>
-            <input
-              className="input"
-              min="0"
-              max="200000"
-              onChange={(event) => setMaxFrames(Number(event.target.value))}
-              style={{ maxWidth: 120 }}
-              type="number"
-              value={maxFrames}
-            />
-          </label>
-          <button className="button primary" disabled={!activeId || running} onClick={runAnalysis} type="button">
-            <BarChart3 size={16} /> {running ? "Running..." : "Run first analysis"}
-          </button>
-          <button className="button" onClick={() => { saved.refresh(); matches.refresh(); }} type="button">
-            <RefreshCw size={16} /> Refresh
+    <div className="card analysis-workspace">
+      <div className="section-header">
+        <div>
+          <h2 className="section-title">Interactive Analysis Video</h2>
+          <div className="toolbar compact-toolbar">
+            <span className="badge">{layers?.frames_processed ?? "-"} frames</span>
+            <span className="badge">{layers ? `${layers.duration_seconds}s` : "layers pending"}</span>
+          </div>
+        </div>
+        <div className="analysis-layer-controls">
+          <TrackLayerPicker
+            icon={<Waypoints size={16} />}
+            label="Track line movement"
+            onChange={setMovementTracks}
+            selected={movementTracks}
+            tracks={tracks.filter((track) => track.pitch_path.length || track.video_path.length)}
+          />
+          <TrackLayerPicker
+            icon={<Flame size={16} />}
+            label="Player heatmap"
+            onChange={setHeatmapTracks}
+            selected={heatmapTracks}
+            tracks={tracks.filter((track) => track.pitch_path.length)}
+          />
+          <button
+            aria-label="Clear visual layers"
+            className="icon-button"
+            disabled={!movementTracks.length && !heatmapTracks.length}
+            onClick={() => {
+              setMovementTracks([]);
+              setHeatmapTracks([]);
+            }}
+            title="Clear visual layers"
+            type="button"
+          >
+            <Layers3 size={17} />
           </button>
         </div>
-        {message ? <p className="badge">{message}</p> : null}
-        <p className="muted small">
-          Uses the copied football_analysis-main idea to draw tracks, camera movement, ball control, speed, and distance. Set Max frames to 0 for the full video; 450 frames is about 18 seconds at 25fps.
-        </p>
       </div>
 
-      {summary ? (
-        <>
-          <section className="grid four">
-            <StatCard title="Frames" value={summary.frames_processed} label={`max ${summary.max_frames}`} />
-            <StatCard title="Tracks" value={summary.player_tracks_count} label="player track ids" />
-            <StatCard title="Detections" value={summary.detections_count} label={`${summary.ball_observations} ball observations`} />
-            <StatCard title="Elapsed" value={`${summary.elapsed_ms} ms`} label={summary.engine} />
-          </section>
-          <section className="grid two">
-            <div className="card">
-              <h2 className="section-title">Output Video</h2>
-              <video
-                className="analysis-video"
-                controls
-                onError={() => setVideoError("Browser could not play this generated video. Run first analysis again to regenerate it as WebM.")}
-                src={api.objectUrl(summary.output_object)}
-              />
-              {videoError ? <p className="badge error">{videoError}</p> : null}
-              <div className="toolbar" style={{ marginTop: 14 }}>
-                <a className="button" href={api.objectUrl(summary.output_object)} target="_blank" rel="noreferrer">
-                  Open video
-                </a>
-              </div>
-            </div>
-            <div className="card">
-              <h2 className="section-title">First Analysis Summary</h2>
-              <div className="table-wrap" style={{ marginTop: 14 }}>
-                <table className="table">
-                  <tbody>
-                    <tr><th>Model</th><td>{summary.model}</td></tr>
-                    <tr><th>Output codec</th><td>{summary.output_codec || "-"}</td></tr>
-                    <tr><th>Resolution</th><td>{summary.resolution.join(" x ")}</td></tr>
-                    <tr><th>FPS</th><td>{summary.fps}</td></tr>
-                    <tr><th>Team 1 ball control</th><td>{summary.team_ball_control.team_1_percent}%</td></tr>
-                    <tr><th>Team 2 ball control</th><td>{summary.team_ball_control.team_2_percent}%</td></tr>
-                    <tr><th>Original project</th><td>{summary.original_project_path}</td></tr>
-                    <tr><th>Artifact</th><td>{summary.output_object}</td></tr>
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </section>
-        </>
-      ) : (
-        <Empty>Select an uploaded match and run first analysis to generate an annotated video.</Empty>
-      )}
+      {layersLoading ? <div className="layer-state">Loading visual layers...</div> : null}
+      {layersError ? <div className="layer-state error">{layersError}</div> : null}
+      {!layersLoading && !layersError && !layers ? (
+        <div className="layer-state">Visual layers were not generated for this run.</div>
+      ) : null}
+
+      <div
+        className="analysis-video-stage"
+        style={{ aspectRatio: `${aspectRatio}`, maxWidth: `${72 * aspectRatio}vh` }}
+      >
+        <video
+          className="analysis-video interactive"
+          controls
+          onError={onVideoError}
+          ref={videoRef}
+          src={api.objectUrl(videoObject)}
+        />
+        <canvas aria-hidden="true" className="movement-overlay" ref={canvasRef} />
+        {movementTracks.length ? (
+          <div className="video-layer-legend">
+            {tracks.filter((track) => movementTracks.includes(track.track_id)).map((track) => (
+              <span key={track.track_id}>
+                <i style={{ backgroundColor: track.color }} /> T{track.track_id}
+              </span>
+            ))}
+          </div>
+        ) : null}
+      </div>
+      {videoError ? <p className="badge error">{videoError}</p> : null}
+
+      {layers && heatmapTracks.length ? (
+        <PitchHeatmap layers={layers} selectedTrackIds={heatmapTracks} />
+      ) : null}
+    </div>
+  );
+}
+
+function hexToRgba(hex: string, alpha: number) {
+  const normalized = hex.replace("#", "");
+  const value = Number.parseInt(normalized, 16);
+  const red = (value >> 16) & 255;
+  const green = (value >> 8) & 255;
+  const blue = value & 255;
+  return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
+}
+
+function drawMetricPitch(
+  context: CanvasRenderingContext2D,
+  field: { x: number; y: number; width: number; height: number },
+  pitchLength: number,
+  pitchWidth: number
+) {
+  const x = (value: number) => field.x + value / pitchLength * field.width;
+  const y = (value: number) => field.y + value / pitchWidth * field.height;
+  const penaltyWidth = 4032;
+  const goalAreaWidth = 1832;
+  context.save();
+  context.strokeStyle = "rgba(255, 255, 255, 0.86)";
+  context.fillStyle = "rgba(255, 255, 255, 0.92)";
+  context.lineWidth = 1.4;
+  context.strokeRect(field.x, field.y, field.width, field.height);
+  context.beginPath();
+  context.moveTo(x(pitchLength / 2), field.y);
+  context.lineTo(x(pitchLength / 2), field.y + field.height);
+  context.stroke();
+  context.beginPath();
+  context.arc(x(pitchLength / 2), y(pitchWidth / 2), 915 / pitchLength * field.width, 0, Math.PI * 2);
+  context.stroke();
+  context.strokeRect(x(0), y((pitchWidth - penaltyWidth) / 2), x(1650) - x(0), y((pitchWidth + penaltyWidth) / 2) - y((pitchWidth - penaltyWidth) / 2));
+  context.strokeRect(x(pitchLength - 1650), y((pitchWidth - penaltyWidth) / 2), x(pitchLength) - x(pitchLength - 1650), y((pitchWidth + penaltyWidth) / 2) - y((pitchWidth - penaltyWidth) / 2));
+  context.strokeRect(x(0), y((pitchWidth - goalAreaWidth) / 2), x(550) - x(0), y((pitchWidth + goalAreaWidth) / 2) - y((pitchWidth - goalAreaWidth) / 2));
+  context.strokeRect(x(pitchLength - 550), y((pitchWidth - goalAreaWidth) / 2), x(pitchLength) - x(pitchLength - 550), y((pitchWidth + goalAreaWidth) / 2) - y((pitchWidth - goalAreaWidth) / 2));
+  for (const spotX of [1100, pitchLength - 1100]) {
+    context.beginPath();
+    context.arc(x(spotX), y(pitchWidth / 2), 2.5, 0, Math.PI * 2);
+    context.fill();
+  }
+  context.restore();
+}
+
+function drawHeatmapCanvas(
+  canvas: HTMLCanvasElement,
+  layers: MatchVisualLayers,
+  selectedTrackIds: number[]
+) {
+  const cssWidth = canvas.clientWidth;
+  const cssHeight = canvas.clientHeight;
+  if (!cssWidth || !cssHeight) return;
+  const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = Math.round(cssWidth * pixelRatio);
+  canvas.height = Math.round(cssHeight * pixelRatio);
+  const context = canvas.getContext("2d");
+  if (!context) return;
+  context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+  context.clearRect(0, 0, cssWidth, cssHeight);
+  context.fillStyle = "#166534";
+  context.fillRect(0, 0, cssWidth, cssHeight);
+  const padding = Math.max(14, cssWidth * 0.025);
+  const field = { x: padding, y: padding, width: cssWidth - padding * 2, height: cssHeight - padding * 2 };
+  const selected = new Set(selectedTrackIds);
+  const columns = 56;
+  const rows = 36;
+
+  context.save();
+  context.beginPath();
+  context.rect(field.x, field.y, field.width, field.height);
+  context.clip();
+  context.globalCompositeOperation = "screen";
+  for (const track of layers.tracks) {
+    if (!selected.has(track.track_id) || !track.pitch_path.length) continue;
+    const density = new Float32Array(columns * rows);
+    for (const point of track.pitch_path) {
+      const column = Math.min(columns - 1, Math.max(0, Math.floor(point[1] / layers.pitch.length_cm * columns)));
+      const row = Math.min(rows - 1, Math.max(0, Math.floor(point[2] / layers.pitch.width_cm * rows)));
+      density[row * columns + column] += 1;
+    }
+    const peak = Math.max(...density, 1);
+    const radius = Math.max(18, field.width / 17);
+    for (let row = 0; row < rows; row += 1) {
+      for (let column = 0; column < columns; column += 1) {
+        const count = density[row * columns + column];
+        if (!count) continue;
+        const intensity = Math.sqrt(count / peak);
+        const centerX = field.x + (column + 0.5) / columns * field.width;
+        const centerY = field.y + (row + 0.5) / rows * field.height;
+        const gradient = context.createRadialGradient(centerX, centerY, 0, centerX, centerY, radius);
+        gradient.addColorStop(0, hexToRgba(track.color, 0.18 + intensity * 0.58));
+        gradient.addColorStop(0.48, hexToRgba(track.color, 0.09 + intensity * 0.26));
+        gradient.addColorStop(1, hexToRgba(track.color, 0));
+        context.fillStyle = gradient;
+        context.fillRect(centerX - radius, centerY - radius, radius * 2, radius * 2);
+      }
+    }
+  }
+  context.restore();
+  drawMetricPitch(context, field, layers.pitch.length_cm, layers.pitch.width_cm);
+}
+
+function PitchHeatmap({ layers, selectedTrackIds }: { layers: MatchVisualLayers; selectedTrackIds: number[] }) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const selectedTracks = layers.tracks.filter((track) => selectedTrackIds.includes(track.track_id));
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const render = () => drawHeatmapCanvas(canvas, layers, selectedTrackIds);
+    const observer = new ResizeObserver(render);
+    observer.observe(canvas);
+    render();
+    return () => observer.disconnect();
+  }, [layers, selectedTrackIds]);
+
+  return (
+    <section className="heatmap-workspace">
+      <div className="section-header">
+        <h3 className="card-title">Metric player heatmap</h3>
+        <span className="badge">{layers.frames_processed} analyzed frames</span>
+      </div>
+      <div className="pitch-heatmap-stage">
+        <canvas ref={canvasRef} />
+      </div>
+      <div className="heatmap-legend">
+        {selectedTracks.map((track) => (
+          <span key={track.track_id}>
+            <i style={{ backgroundColor: track.color }} /> Track {track.track_id}
+          </span>
+        ))}
+      </div>
     </section>
   );
 }
@@ -1418,6 +1502,13 @@ function MatchAnalysisPlusPage() {
     runs.data?.latest ||
     null;
   const summary = selectedRun?.summary || null;
+  const visualLayersObject = summary?.visual_layers?.object_name || null;
+  const visualLayers = useAsyncData<MatchVisualLayers | null>(
+    () => visualLayersObject
+      ? api.getMatchVisualLayers(visualLayersObject)
+      : Promise.resolve(null),
+    [visualLayersObject]
+  );
 
   async function runAnalysis() {
     if (!activeId) return;
@@ -1540,28 +1631,17 @@ function MatchAnalysisPlusPage() {
             <StatCard title="Elapsed" value={`${summary.elapsed_ms} ms`} label={summary.output_codec || "codec"} />
           </section>
 
-          <section className="grid two">
-            <div className="card">
-              <h2 className="section-title">Output Video</h2>
-              <video
-                className="analysis-video"
-                controls
-                onError={() => setVideoError("Browser could not play this generated video. Re-run the analysis or check the worker logs.")}
-                src={api.objectUrl(selectedRun.output_object)}
-              />
-              {videoError ? <p className="badge error">{videoError}</p> : null}
-              <div className="toolbar" style={{ marginTop: 14 }}>
-                <a className="button" href={api.objectUrl(selectedRun.output_object)} target="_blank" rel="noreferrer">
-                  Open video
-                </a>
-                {selectedRun.summary_object ? (
-                  <a className="button" href={api.objectUrl(selectedRun.summary_object)} target="_blank" rel="noreferrer">
-                    Open JSON
-                  </a>
-                ) : null}
-              </div>
-            </div>
+          <InteractiveAnalysisViewer
+            key={selectedRun.id}
+            layers={visualLayers.data}
+            layersError={visualLayers.error}
+            layersLoading={visualLayers.loading}
+            onVideoError={() => setVideoError("Browser could not play this generated video. Re-run the analysis or check the worker logs.")}
+            videoError={videoError}
+            videoObject={selectedRun.output_object}
+          />
 
+          <section className="grid two">
             <div className="card">
               <h2 className="section-title">Visible Data</h2>
               <div className="table-wrap" style={{ marginTop: 14 }}>
@@ -1602,12 +1682,36 @@ function MatchAnalysisPlusPage() {
                       </td>
                     </tr>
                     <tr><th>Heatmap coordinates</th><td>{summary.metric_tracking?.heatmap_ready ? "Ready" : "Not calibrated"}</td></tr>
+                    <tr><th>Interactive layers</th><td>{summary.visual_layers?.status || "Not generated"}</td></tr>
                     <tr><th>Radar frames rendered</th><td>{summary.radar?.rendered_frames ?? 0}</td></tr>
                     <tr><th>Team 1 control</th><td>{summary.team_ball_control?.team_1_percent ?? 0}%</td></tr>
                     <tr><th>Team 2 control</th><td>{summary.team_ball_control?.team_2_percent ?? 0}%</td></tr>
                     <tr><th>Output</th><td>{summary.output_object}</td></tr>
                   </tbody>
                 </table>
+              </div>
+            </div>
+            <div className="card">
+              <h2 className="section-title">Artifacts</h2>
+              <div className="artifact-actions">
+                <a className="button" href={api.objectUrl(selectedRun.output_object)} target="_blank" rel="noreferrer">
+                  Open video
+                </a>
+                {selectedRun.summary_object ? (
+                  <a className="button" href={api.objectUrl(selectedRun.summary_object)} target="_blank" rel="noreferrer">
+                    Open JSON
+                  </a>
+                ) : null}
+                {summary.visual_layers?.object_name ? (
+                  <a className="button" href={api.objectUrl(summary.visual_layers.object_name)} target="_blank" rel="noreferrer">
+                    Open layer data
+                  </a>
+                ) : null}
+              </div>
+              <div className="layer-run-stats">
+                <span><strong>{summary.visual_layers?.tracks_count ?? 0}</strong> selectable tracks</span>
+                <span><strong>{summary.visual_layers?.movement_sample_rate_hz ?? 0} Hz</strong> movement paths</span>
+                <span><strong>{summary.visual_layers?.heatmap_sample_rate_hz ?? 0} Hz</strong> heatmaps</span>
               </div>
             </div>
           </section>
@@ -1748,7 +1852,7 @@ function MiniDataTable({
 
 function AgentPage() {
   const [messages, setMessages] = useState([
-    { role: "agent", text: "Select a match in Analysis or Reports, then ask for a tactical explanation, player plan, or training idea." }
+    { role: "agent", text: "Select a match in Match Analysis + or Reports, then ask for a tactical explanation, player plan, or training idea." }
   ]);
   const [text, setText] = useState("");
 
@@ -1869,10 +1973,6 @@ export function App() {
         return <TeamsPage />;
       case "matches":
         return <MatchesPage />;
-      case "analysis":
-        return <AnalysisPage />;
-      case "first-analysis":
-        return <FirstAnalysisPage />;
       case "match-analysis-plus":
         return <MatchAnalysisPlusPage />;
       case "reports":

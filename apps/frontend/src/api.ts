@@ -1,15 +1,12 @@
 import type {
-  IdentityAssignment,
+  MatchVisualLayers,
   MatchSummary,
   Player,
   PrimaryTeamProfile,
-  ProcessingJob,
-  FirstAnalysisSummary,
   MatchAnalysisPlusRun,
   ReportResponse,
   RosterPlayer,
   Team,
-  TrackSummary,
   YoloStatus
 } from "./types";
 
@@ -61,61 +58,12 @@ export const api = {
     return request<YoloStatus>("/ai/yolo/status");
   },
 
-  getProcessing(matchId: number) {
-    return request<{
-      match_id: number;
-      match_status: string;
-      job: ProcessingJob | null;
-    }>(`/matches/${matchId}/processing`);
-  },
-
   getReport(matchId: number) {
     return request<ReportResponse>(`/matches/${matchId}/report`);
   },
 
   reportPdfUrl(matchId: number) {
     return `${API_BASE_URL}/matches/${matchId}/report.pdf`;
-  },
-
-  getIdentityAssignments(matchId: number) {
-    return request<{
-      match_id: number;
-      source: string;
-      job_id?: number | null;
-      assignments: IdentityAssignment[];
-    }>(`/matches/${matchId}/identity-assignments`);
-  },
-
-  getTracks(matchId: number) {
-    return request<{
-      match_id: number;
-      match_status: string;
-      job_id: number;
-      job_status: string;
-      tracks: TrackSummary[];
-    }>(`/matches/${matchId}/tracks`);
-  },
-
-  saveTrackAssignment(
-    matchId: number,
-    payload: {
-      track_id: number;
-      player_name: string;
-      team_context?: string | null;
-      shirt_number?: number | null;
-      position?: string | null;
-    }
-  ) {
-    return request(`/matches/${matchId}/track-assignments`, {
-      method: "POST",
-      json: payload
-    });
-  },
-
-  autoAssignTracks(matchId: number) {
-    return request(`/matches/${matchId}/auto-assign-tracks`, {
-      method: "POST"
-    });
   },
 
   objectUrl(objectName: string) {
@@ -141,21 +89,6 @@ export const api = {
     );
   },
 
-  getFirstAnalysis(matchId: number) {
-    return request<{ exists: boolean; summary: FirstAnalysisSummary | null }>(
-      `/first-analysis/${matchId}`
-    );
-  },
-
-  runFirstAnalysis(matchId: number, maxFrames = 450) {
-    return request<FirstAnalysisSummary>(
-      `/first-analysis/${matchId}/run?max_frames=${encodeURIComponent(maxFrames)}`,
-      {
-        method: "POST"
-      }
-    );
-  },
-
   getMatchAnalysisPlus(matchId: number) {
     return request<{
       match_id: number;
@@ -176,6 +109,12 @@ export const api = {
     return request<{
       items: Array<{ value: string; label: string; description: string }>;
     }>("/match-analysis-plus/options/modes");
+  },
+
+  getMatchVisualLayers(objectName: string) {
+    return request<MatchVisualLayers>(
+      `/matches/artifacts/object?object_name=${encodeURIComponent(objectName)}`
+    );
   },
 
   getPrimaryTeam() {

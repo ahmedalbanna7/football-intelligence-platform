@@ -16,9 +16,9 @@ The project is built as a practical foundation for football clubs, academies, an
 - Static-field-marker ball filtering to reduce false ball detections.
 - Team profile and opponent team management.
 - Player roster, shirt number, tactical zone, and assignment data models.
-- First-analysis integration inspired by an external football analysis project.
 - Match analysis run history with saved artifacts.
-- React + TypeScript dashboard for uploads, teams, analysis, reports, and agent workflows.
+- Interactive per-player movement paths and metric heatmaps for saved analysis runs.
+- React + TypeScript dashboard for uploads, teams, Match Analysis +, reports, and agent workflows.
 - Open-source architecture designed for extension.
 
 ## Product Surface
@@ -30,9 +30,7 @@ The frontend is organized around the workflows an analyst naturally needs:
 - **My Team**: primary club profile, kits, roster, player metadata.
 - **Teams**: opponent and external team history, profiles, kits, players, and related matches.
 - **Matches**: video upload and match metadata.
-- **Analysis**: pipeline outputs, detections, tracks, tactical identity, and processing summaries.
-- **First Analysis**: lightweight annotated-video analysis flow.
-- **Match Analysis +**: primary worker-based match analysis flow with saved runs.
+- **Match Analysis +**: primary worker-based analysis, saved runs, video overlays, and metric heatmaps.
 - **Reports**: JSON/PDF/reporting foundation.
 - **Agent**: future coach/analyst assistant surface.
 - **Recommendations**: future season, team, player, and match recommendation area.
@@ -201,7 +199,6 @@ flowchart LR
 | Reports | `GET /matches/{id}/report`, `GET /matches/{id}/report.pdf` |
 | Primary team | `GET /primary-team`, `POST /primary-team`, `POST /primary-team/players` |
 | Teams | `GET /teams`, `POST /teams`, `POST /teams/{id}/players` |
-| First analysis | `POST /first-analysis/{match_id}/run`, `GET /first-analysis/{match_id}` |
 | Match Analysis + | `POST /match-analysis-plus/{match_id}/run`, `GET /match-analysis-plus/{match_id}` |
 | AI status | `GET /ai/yolo/status` |
 
@@ -220,7 +217,7 @@ flowchart LR
 │   │   │   ├── services
 │   │   │   └── workers
 │   │   ├── alembic
-│   │   └── football_analysis-main
+│   │   └── test_track_id_stabilizer.py
 │   ├── frontend
 │   │   └── src
 │   └── match-analysis-worker
@@ -258,7 +255,7 @@ YOLO_IMAGE_SIZE=640
 YOLO_DEVICE=cpu
 
 MATCH_ANALYSIS_AUTO_QUEUE_ON_UPLOAD=true
-MATCH_ANALYSIS_DEFAULT_MODE=PLAYER_TRACKING
+MATCH_ANALYSIS_DEFAULT_MODE=FULL_ANALYSIS
 MATCH_ANALYSIS_DEFAULT_MAX_FRAMES=450
 ```
 

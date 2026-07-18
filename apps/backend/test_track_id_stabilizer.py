@@ -476,5 +476,51 @@ class TeamColorClassifierTests(unittest.TestCase):
         self.assertEqual(2, len(classifier.summary()["kit_anchors_bgr"]))
 
 
+class VisualLayerArtifactTests(unittest.TestCase):
+    def test_visual_layer_payload_keeps_video_and_metric_paths_separate(self) -> None:
+        runner = MatchAnalysisPlusRunner()
+        payload = runner._build_visual_layers_payload(
+            fps=25.0,
+            frames_processed=100,
+            width=1920,
+            height=1080,
+            track_frames={7: 80},
+            track_video_samples={7: [[0, 500, 700], [5, 520, 705]]},
+            track_pitch_samples={
+                7: [
+                    {"frame": 0, "x": 9050.0, "y": 3100.0, "z": 0.0},
+                    {"frame": 5, "x": 9100.0, "y": 3125.0, "z": 0.0},
+                ]
+            },
+            pitch_to_video_samples=[
+                [0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+            ],
+            team_by_track={7: 2},
+        )
+
+        self.assertEqual(1, payload["schema_version"])
+        self.assertEqual([1920, 1080], payload["resolution"])
+        self.assertEqual(4.0, payload["duration_seconds"])
+        self.assertEqual([[0, 500, 700], [5, 520, 705]], payload["tracks"][0]["video_path"])
+        self.assertEqual([[0, 9050, 3100], [5, 9100, 3125]], payload["tracks"][0]["pitch_path"])
+        self.assertEqual(2, payload["tracks"][0]["team"])
+
+    def test_pitch_projection_is_inverse_of_metric_calibration(self) -> None:
+        radar = PitchRadar(None)
+        radar.homography = np.array(
+            [[5.0, 0.0, 100.0], [0.0, 5.0, 200.0], [0.0, 0.0, 1.0]],
+            dtype=np.float64,
+        )
+
+        inverse = radar.pitch_to_video_matrix()
+
+        self.assertIsNotNone(inverse)
+        projected = cv2.perspectiveTransform(
+            np.array([[[600.0, 700.0]]], dtype=np.float32),
+            inverse,
+        ).reshape(2)
+        self.assertTrue(np.allclose(projected, [100.0, 100.0], atol=1e-4))
+
+
 if __name__ == "__main__":
     unittest.main()

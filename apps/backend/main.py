@@ -6,7 +6,6 @@ from app.modules.matches.router import router as matches_router
 from app.modules.primary_team.router import router as primary_team_router
 from app.modules.teams.router import router as teams_router
 from app.modules.ai.router import router as ai_router
-from app.modules.first_analysis.router import router as first_analysis_router
 from app.modules.match_analysis_plus.router import router as match_analysis_plus_router
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
@@ -59,12 +58,6 @@ app.include_router(
     ai_router,
     prefix="/ai",
     tags=["AI"]
-)
-
-app.include_router(
-    first_analysis_router,
-    prefix="/first-analysis",
-    tags=["First Analysis"]
 )
 
 app.include_router(
