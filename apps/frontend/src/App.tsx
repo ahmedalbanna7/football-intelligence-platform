@@ -2,17 +2,25 @@ import {
   BarChart3,
   Bot,
   CalendarDays,
+  Clock3,
   FileText,
   Gauge,
   Flame,
   Layers3,
   Lightbulb,
+  Maximize2,
+  Minimize2,
+  Pause,
+  Play,
   RefreshCw,
+  RotateCcw,
   Settings,
   Shield,
   Upload,
   Users,
   Video,
+  Volume2,
+  VolumeX,
   Waypoints,
   X
 } from "lucide-react";
@@ -1024,20 +1032,35 @@ function MatchesPage() {
   );
 }
 
+type VisualWindowMode = "progress" | "range";
+
+function formatAnalysisTime(seconds: number) {
+  const safeSeconds = Math.max(0, Number.isFinite(seconds) ? seconds : 0);
+  const minutes = Math.floor(safeSeconds / 60);
+  const remaining = Math.floor(safeSeconds % 60);
+  return `${String(minutes).padStart(2, "0")}:${String(remaining).padStart(2, "0")}`;
+}
+
 function TrackLayerPicker({
   icon,
   label,
   tracks,
   selected,
-  onChange
+  onChange,
+  open,
+  onOpenChange
 }: {
   icon: ReactNode;
   label: string;
   tracks: MatchVisualLayerTrack[];
   selected: number[];
   onChange: (trackIds: number[]) => void;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
 }) {
   const selectedSet = new Set(selected);
+  const teamGroups = Array.from(new Set(tracks.map((track) => track.team).filter((team) => team != null)))
+    .sort((left, right) => Number(left) - Number(right));
 
   function toggle(trackId: number) {
     onChange(
@@ -1047,43 +1070,214 @@ function TrackLayerPicker({
     );
   }
 
+  function selectGroup(trackIds: number[]) {
+    onChange([...trackIds].sort((left, right) => left - right));
+  }
+
   return (
-    <details className="layer-picker">
-      <summary className="layer-picker-trigger">
+    <div className={`layer-picker${open ? " open" : ""}`}>
+      <button
+        aria-expanded={open}
+        className="layer-picker-trigger"
+        onClick={() => onOpenChange(!open)}
+        type="button"
+      >
         {icon}
         <span>{label}</span>
         <span className="layer-count">{selected.length}</span>
-      </summary>
-      <div className="layer-menu">
-        <div className="layer-menu-header">
-          <strong>{label}</strong>
-          <button
-            aria-label={`Clear ${label}`}
-            className="icon-button"
-            disabled={!selected.length}
-            onClick={() => onChange([])}
-            title={`Clear ${label}`}
-            type="button"
-          >
-            <X size={16} />
-          </button>
+      </button>
+      {open ? (
+        <div className="layer-menu">
+          <div className="layer-menu-header">
+            <strong>{label}</strong>
+            <button
+              aria-label={`Close ${label}`}
+              className="icon-button"
+              onClick={() => onOpenChange(false)}
+              title={`Close ${label}`}
+              type="button"
+            >
+              <X size={16} />
+            </button>
+          </div>
+          <div className="layer-quick-actions" aria-label={`${label} quick selection`}>
+            <button onClick={() => selectGroup(tracks.map((track) => track.track_id))} type="button">
+              All players
+            </button>
+            {teamGroups.map((team) => (
+              <button
+                key={team}
+                onClick={() => selectGroup(tracks.filter((track) => track.team === team).map((track) => track.track_id))}
+                type="button"
+              >
+                Team {team}
+              </button>
+            ))}
+            <button disabled={!selected.length} onClick={() => onChange([])} type="button">
+              Clear
+            </button>
+          </div>
+          <div className="layer-options">
+            {tracks.map((track) => (
+              <label className="layer-option" key={track.track_id}>
+                <input
+                  checked={selectedSet.has(track.track_id)}
+                  onChange={() => toggle(track.track_id)}
+                  type="checkbox"
+                />
+                <span className="track-swatch" style={{ backgroundColor: track.color }} />
+                <span>Track {track.track_id}</span>
+                <span className="muted">Team {track.team ?? "-"}</span>
+              </label>
+            ))}
+          </div>
         </div>
-        <div className="layer-options">
-          {tracks.map((track) => (
-            <label className="layer-option" key={track.track_id}>
-              <input
-                checked={selectedSet.has(track.track_id)}
-                onChange={() => toggle(track.track_id)}
-                type="checkbox"
-              />
-              <span className="track-swatch" style={{ backgroundColor: track.color }} />
-              <span>Track {track.track_id}</span>
-              <span className="muted">Team {track.team ?? "-"}</span>
-            </label>
-          ))}
+      ) : null}
+    </div>
+  );
+}
+
+function TimeWindowPicker({
+  duration,
+  mode,
+  onModeChange,
+  rangeStart,
+  rangeEnd,
+  onRangeChange,
+  onPlayRange,
+  open,
+  onOpenChange
+}: {
+  duration: number;
+  mode: VisualWindowMode;
+  onModeChange: (mode: VisualWindowMode) => void;
+  rangeStart: number;
+  rangeEnd: number;
+  onRangeChange: (start: number, end: number) => void;
+  onPlayRange: () => void;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const safeDuration = Math.max(0.1, duration);
+  const minimumGap = Math.min(0.25, safeDuration);
+
+  function updateStart(value: number) {
+    onRangeChange(Math.max(0, Math.min(value, rangeEnd - minimumGap)), rangeEnd);
+  }
+
+  function updateEnd(value: number) {
+    onRangeChange(rangeStart, Math.min(safeDuration, Math.max(value, rangeStart + minimumGap)));
+  }
+
+  return (
+    <div className={`layer-picker time-window-picker${open ? " open" : ""}`}>
+      <button
+        aria-expanded={open}
+        className="layer-picker-trigger"
+        onClick={() => onOpenChange(!open)}
+        type="button"
+      >
+        <Clock3 size={16} />
+        <span>{mode === "progress" ? "Live progress" : "Time range"}</span>
+        <span className="time-window-summary">
+          {mode === "progress" ? "LIVE" : `${formatAnalysisTime(rangeStart)}-${formatAnalysisTime(rangeEnd)}`}
+        </span>
+      </button>
+      {open ? (
+        <div className="layer-menu time-window-menu">
+          <div className="layer-menu-header">
+            <strong>Analysis time window</strong>
+            <button
+              aria-label="Close time window"
+              className="icon-button"
+              onClick={() => onOpenChange(false)}
+              title="Close time window"
+              type="button"
+            >
+              <X size={16} />
+            </button>
+          </div>
+          <div className="time-window-content">
+            <div className="segmented-control" role="group" aria-label="Visualization time mode">
+              <button
+                className={mode === "progress" ? "active" : ""}
+                onClick={() => onModeChange("progress")}
+                type="button"
+              >
+                Live progress
+              </button>
+              <button
+                className={mode === "range" ? "active" : ""}
+                onClick={() => onModeChange("range")}
+                type="button"
+              >
+                Fixed range
+              </button>
+            </div>
+            {mode === "range" ? (
+              <>
+                <label className="time-range-field">
+                  <span>From <strong>{formatAnalysisTime(rangeStart)}</strong></span>
+                  <input
+                    max={safeDuration}
+                    min={0}
+                    onChange={(event) => updateStart(Number(event.target.value))}
+                    step="0.1"
+                    type="range"
+                    value={rangeStart}
+                  />
+                  <input
+                    className="input"
+                    max={safeDuration}
+                    min={0}
+                    onChange={(event) => updateStart(Number(event.target.value))}
+                    step="0.1"
+                    type="number"
+                    value={Number(rangeStart.toFixed(1))}
+                  />
+                </label>
+                <label className="time-range-field">
+                  <span>To <strong>{formatAnalysisTime(rangeEnd)}</strong></span>
+                  <input
+                    max={safeDuration}
+                    min={0}
+                    onChange={(event) => updateEnd(Number(event.target.value))}
+                    step="0.1"
+                    type="range"
+                    value={rangeEnd}
+                  />
+                  <input
+                    className="input"
+                    max={safeDuration}
+                    min={0}
+                    onChange={(event) => updateEnd(Number(event.target.value))}
+                    step="0.1"
+                    type="number"
+                    value={Number(rangeEnd.toFixed(1))}
+                  />
+                </label>
+                <div className="time-window-actions">
+                  <button className="button primary" onClick={onPlayRange} type="button">
+                    <Play size={15} /> Play range
+                  </button>
+                  <button
+                    aria-label="Reset time range"
+                    className="icon-button"
+                    onClick={() => onRangeChange(0, safeDuration)}
+                    title="Reset time range"
+                    type="button"
+                  >
+                    <RotateCcw size={16} />
+                  </button>
+                </div>
+              </>
+            ) : (
+              <p className="time-window-note">Movement paths and heatmaps accumulate with video playback.</p>
+            )}
+          </div>
         </div>
-      </div>
-    </details>
+      ) : null}
+    </div>
   );
 }
 
@@ -1117,7 +1311,9 @@ function drawMovementOverlay(
   canvas: HTMLCanvasElement,
   video: HTMLVideoElement,
   layers: MatchVisualLayers,
-  selectedTrackIds: number[]
+  selectedTrackIds: number[],
+  startFrame: number,
+  endFrame: number
 ) {
   const cssWidth = canvas.clientWidth;
   const cssHeight = canvas.clientHeight;
@@ -1143,6 +1339,13 @@ function drawMovementOverlay(
   );
   const projection = nearestPitchProjection(layers.pitch_to_video, currentFrame);
   const selected = new Set(selectedTrackIds);
+  const firstVisibleFrame = Math.max(0, Math.min(startFrame, endFrame));
+  const lastVisibleFrame = Math.min(layers.frames_processed - 1, Math.max(startFrame, endFrame));
+  const renderScale = Math.min(cssWidth / sourceWidth, cssHeight / sourceHeight);
+  const renderedWidth = sourceWidth * renderScale;
+  const renderedHeight = sourceHeight * renderScale;
+  const offsetX = (cssWidth - renderedWidth) / 2;
+  const offsetY = (cssHeight - renderedHeight) / 2;
 
   for (const track of layers.tracks) {
     if (!selected.has(track.track_id)) continue;
@@ -1153,7 +1356,8 @@ function drawMovementOverlay(
 
     for (const point of path) {
       const frame = point[0];
-      if (frame > currentFrame) break;
+      if (frame < firstVisibleFrame) continue;
+      if (frame > lastVisibleFrame) break;
       const projected = useMetricPath
         ? projectPitchPoint(projection as number[], point[1], point[2])
         : [point[1], point[2]] as [number, number];
@@ -1161,8 +1365,8 @@ function drawMovementOverlay(
         previous = null;
         continue;
       }
-      const x = projected[0] * cssWidth / sourceWidth;
-      const y = projected[1] * cssHeight / sourceHeight;
+      const x = offsetX + projected[0] * renderScale;
+      const y = offsetY + projected[1] * renderScale;
       if (x < -cssWidth || x > cssWidth * 2 || y < -cssHeight || y > cssHeight * 2) {
         previous = null;
         continue;
@@ -1174,7 +1378,9 @@ function drawMovementOverlay(
           ? Math.hypot(point[1] - previous.metricX, point[2] - previous.metricY)
           : 0;
         if (frameGap <= layers.fps * 2 && (!useMetricPath || metricJump <= 2500)) {
-          const recency = currentFrame > 0 ? frame / currentFrame : 1;
+          const recency = lastVisibleFrame > firstVisibleFrame
+            ? (frame - firstVisibleFrame) / (lastVisibleFrame - firstVisibleFrame)
+            : 1;
           context.save();
           context.globalAlpha = 0.28 + Math.min(1, recency) * 0.68;
           context.strokeStyle = track.color;
@@ -1225,19 +1431,67 @@ function InteractiveAnalysisViewer({
 }) {
   const [movementTracks, setMovementTracks] = useState<number[]>([]);
   const [heatmapTracks, setHeatmapTracks] = useState<number[]>([]);
+  const [openPanel, setOpenPanel] = useState<"movement" | "heatmap" | "time" | null>(null);
+  const [windowMode, setWindowMode] = useState<VisualWindowMode>("progress");
+  const [rangeStart, setRangeStart] = useState(0);
+  const [rangeEnd, setRangeEnd] = useState(0.1);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0.1);
+  const [playing, setPlaying] = useState(false);
+  const [muted, setMuted] = useState(false);
+  const [volume, setVolume] = useState(1);
+  const [fullscreen, setFullscreen] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const stageRef = useRef<HTMLDivElement | null>(null);
   const tracks = useMemo(
     () => [...(layers?.tracks || [])].sort((left, right) => left.track_id - right.track_id),
     [layers]
   );
+  const movementOptions = tracks.filter((track) => track.pitch_path.length || track.video_path.length);
+  const heatmapOptions = tracks.filter((track) => track.pitch_path.length);
+  const totalFrames = Math.max(0, (layers?.frames_processed || 1) - 1);
+  const currentFrame = layers
+    ? Math.min(totalFrames, Math.max(0, Math.round(currentTime * layers.fps)))
+    : 0;
+  const activeStartFrame = layers && windowMode === "range"
+    ? Math.min(totalFrames, Math.max(0, Math.round(rangeStart * layers.fps)))
+    : 0;
+  const activeEndFrame = layers && windowMode === "range"
+    ? Math.min(totalFrames, Math.max(activeStartFrame, Math.round(rangeEnd * layers.fps)))
+    : currentFrame;
+
+  useEffect(() => {
+    if (!layers) return;
+    const layerDuration = Math.max(0.1, layers.duration_seconds || layers.frames_processed / Math.max(1, layers.fps));
+    setDuration(layerDuration);
+    setRangeStart(0);
+    setRangeEnd(layerDuration);
+  }, [layers]);
+
+  useEffect(() => {
+    function handleFullscreenChange() {
+      setFullscreen(document.fullscreenElement === stageRef.current);
+      setOpenPanel(null);
+    }
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    return () => document.removeEventListener("fullscreenchange", handleFullscreenChange);
+  }, []);
 
   useEffect(() => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
     if (!video || !canvas || !layers) return;
     let animationFrame = 0;
-    const render = () => drawMovementOverlay(canvas, video, layers, movementTracks);
+    const render = () => {
+      const liveFrame = Math.min(
+        layers.frames_processed - 1,
+        Math.max(0, Math.round(video.currentTime * layers.fps))
+      );
+      const firstFrame = windowMode === "range" ? Math.round(rangeStart * layers.fps) : 0;
+      const lastFrame = windowMode === "range" ? Math.round(rangeEnd * layers.fps) : liveFrame;
+      drawMovementOverlay(canvas, video, layers, movementTracks, firstFrame, lastFrame);
+    };
     const animate = () => {
       render();
       if (!video.paused && !video.ended) animationFrame = requestAnimationFrame(animate);
@@ -1265,7 +1519,95 @@ function InteractiveAnalysisViewer({
       video.removeEventListener("timeupdate", render);
       video.removeEventListener("ended", render);
     };
-  }, [layers, movementTracks]);
+  }, [layers, movementTracks, rangeEnd, rangeStart, windowMode]);
+
+  function updatePlaybackTime() {
+    const video = videoRef.current;
+    if (!video) return;
+    const nextTime = video.currentTime;
+    setCurrentTime(nextTime);
+    if (windowMode === "range" && !video.paused && nextTime >= rangeEnd - 0.03) {
+      video.pause();
+      video.currentTime = rangeEnd;
+      setCurrentTime(rangeEnd);
+    }
+  }
+
+  function handleLoadedMetadata() {
+    const video = videoRef.current;
+    if (!video) return;
+    const mediaDuration = Number.isFinite(video.duration) && video.duration > 0
+      ? video.duration
+      : layers?.duration_seconds || 0.1;
+    setDuration(mediaDuration);
+    if (!layers || rangeEnd <= 0.1) setRangeEnd(mediaDuration);
+  }
+
+  async function playSelectedRange() {
+    const video = videoRef.current;
+    if (!video) return;
+    setWindowMode("range");
+    video.currentTime = rangeStart;
+    setCurrentTime(rangeStart);
+    try {
+      await video.play();
+    } catch {
+      setPlaying(false);
+    }
+  }
+
+  async function togglePlayback() {
+    const video = videoRef.current;
+    if (!video) return;
+    if (!video.paused) {
+      video.pause();
+      return;
+    }
+    if (windowMode === "range" && (video.currentTime < rangeStart || video.currentTime >= rangeEnd)) {
+      video.currentTime = rangeStart;
+      setCurrentTime(rangeStart);
+    }
+    try {
+      await video.play();
+    } catch {
+      setPlaying(false);
+    }
+  }
+
+  function seekVideo(nextTime: number) {
+    const video = videoRef.current;
+    if (!video) return;
+    const boundedTime = Math.max(0, Math.min(duration, nextTime));
+    video.currentTime = boundedTime;
+    setCurrentTime(boundedTime);
+  }
+
+  function toggleMute() {
+    const video = videoRef.current;
+    if (!video) return;
+    video.muted = !video.muted;
+    setMuted(video.muted);
+  }
+
+  function updateVolume(nextVolume: number) {
+    const video = videoRef.current;
+    if (!video) return;
+    const boundedVolume = Math.max(0, Math.min(1, nextVolume));
+    video.volume = boundedVolume;
+    video.muted = boundedVolume === 0;
+    setVolume(boundedVolume);
+    setMuted(video.muted);
+  }
+
+  async function toggleFullscreen() {
+    const stage = stageRef.current;
+    if (!stage) return;
+    if (document.fullscreenElement === stage) {
+      await document.exitFullscreen();
+      return;
+    }
+    await stage.requestFullscreen();
+  }
 
   const aspectRatio = layers?.resolution?.[0] && layers?.resolution?.[1]
     ? layers.resolution[0] / layers.resolution[1]
@@ -1279,36 +1621,12 @@ function InteractiveAnalysisViewer({
           <div className="toolbar compact-toolbar">
             <span className="badge">{layers?.frames_processed ?? "-"} frames</span>
             <span className="badge">{layers ? `${layers.duration_seconds}s` : "layers pending"}</span>
+            <span className="badge">
+              {windowMode === "progress"
+                ? `Live 00:00-${formatAnalysisTime(currentTime)}`
+                : `Range ${formatAnalysisTime(rangeStart)}-${formatAnalysisTime(rangeEnd)}`}
+            </span>
           </div>
-        </div>
-        <div className="analysis-layer-controls">
-          <TrackLayerPicker
-            icon={<Waypoints size={16} />}
-            label="Track line movement"
-            onChange={setMovementTracks}
-            selected={movementTracks}
-            tracks={tracks.filter((track) => track.pitch_path.length || track.video_path.length)}
-          />
-          <TrackLayerPicker
-            icon={<Flame size={16} />}
-            label="Player heatmap"
-            onChange={setHeatmapTracks}
-            selected={heatmapTracks}
-            tracks={tracks.filter((track) => track.pitch_path.length)}
-          />
-          <button
-            aria-label="Clear visual layers"
-            className="icon-button"
-            disabled={!movementTracks.length && !heatmapTracks.length}
-            onClick={() => {
-              setMovementTracks([]);
-              setHeatmapTracks([]);
-            }}
-            title="Clear visual layers"
-            type="button"
-          >
-            <Layers3 size={17} />
-          </button>
         </div>
       </div>
 
@@ -1318,32 +1636,168 @@ function InteractiveAnalysisViewer({
         <div className="layer-state">Visual layers were not generated for this run.</div>
       ) : null}
 
-      <div
-        className="analysis-video-stage"
-        style={{ aspectRatio: `${aspectRatio}`, maxWidth: `${72 * aspectRatio}vh` }}
-      >
-        <video
-          className="analysis-video interactive"
-          controls
-          onError={onVideoError}
-          ref={videoRef}
-          src={api.objectUrl(videoObject)}
-        />
-        <canvas aria-hidden="true" className="movement-overlay" ref={canvasRef} />
-        {movementTracks.length ? (
-          <div className="video-layer-legend">
-            {tracks.filter((track) => movementTracks.includes(track.track_id)).map((track) => (
-              <span key={track.track_id}>
-                <i style={{ backgroundColor: track.color }} /> T{track.track_id}
-              </span>
-            ))}
+      <div className={`analysis-live-layout${layers && heatmapTracks.length ? " has-side-map" : ""}`}>
+        <div
+          className="analysis-video-stage"
+          ref={stageRef}
+          style={{ aspectRatio: `${aspectRatio}` }}
+        >
+          <video
+            className="analysis-video interactive"
+            onClick={togglePlayback}
+            onDoubleClick={toggleFullscreen}
+            onDurationChange={handleLoadedMetadata}
+            onEnded={() => setPlaying(false)}
+            onError={onVideoError}
+            onLoadedMetadata={handleLoadedMetadata}
+            onPause={() => setPlaying(false)}
+            onPlay={() => setPlaying(true)}
+            onTimeUpdate={updatePlaybackTime}
+            playsInline
+            preload="metadata"
+            ref={videoRef}
+            src={api.objectUrl(videoObject)}
+          />
+          <canvas aria-hidden="true" className="movement-overlay" ref={canvasRef} />
+
+          <div className="stage-layer-toolbar">
+            <TrackLayerPicker
+              icon={<Waypoints size={16} />}
+              label="Track lines"
+              onChange={setMovementTracks}
+              onOpenChange={(open) => setOpenPanel(open ? "movement" : null)}
+              open={openPanel === "movement"}
+              selected={movementTracks}
+              tracks={movementOptions}
+            />
+            <TrackLayerPicker
+              icon={<Flame size={16} />}
+              label="Heatmap"
+              onChange={setHeatmapTracks}
+              onOpenChange={(open) => setOpenPanel(open ? "heatmap" : null)}
+              open={openPanel === "heatmap"}
+              selected={heatmapTracks}
+              tracks={heatmapOptions}
+            />
+            <TimeWindowPicker
+              duration={duration}
+              mode={windowMode}
+              onModeChange={setWindowMode}
+              onOpenChange={(open) => setOpenPanel(open ? "time" : null)}
+              onPlayRange={playSelectedRange}
+              onRangeChange={(start, end) => {
+                setRangeStart(start);
+                setRangeEnd(end);
+              }}
+              open={openPanel === "time"}
+              rangeEnd={rangeEnd}
+              rangeStart={rangeStart}
+            />
+            <button
+              aria-label="Clear visual layers"
+              className="stage-icon-button"
+              disabled={!movementTracks.length && !heatmapTracks.length}
+              onClick={() => {
+                setMovementTracks([]);
+                setHeatmapTracks([]);
+                setOpenPanel(null);
+              }}
+              title="Clear visual layers"
+              type="button"
+            >
+              <Layers3 size={17} />
+            </button>
           </div>
+
+          {movementTracks.length ? (
+            <div className="video-layer-legend">
+              {tracks.filter((track) => movementTracks.includes(track.track_id)).map((track) => (
+                <span key={track.track_id}>
+                  <i style={{ backgroundColor: track.color }} /> T{track.track_id}
+                </span>
+              ))}
+            </div>
+          ) : null}
+
+          {layers && heatmapTracks.length ? (
+            <CompactPitchHeatmap
+              currentFrame={currentFrame}
+              endFrame={activeEndFrame}
+              layers={layers}
+              selectedTrackIds={heatmapTracks}
+              startFrame={activeStartFrame}
+            />
+          ) : null}
+
+          <div className="analysis-player-controls">
+            <button
+              aria-label={playing ? "Pause video" : "Play video"}
+              onClick={togglePlayback}
+              title={playing ? "Pause" : "Play"}
+              type="button"
+            >
+              {playing ? <Pause size={18} /> : <Play size={18} />}
+            </button>
+            <span className="player-time">{formatAnalysisTime(currentTime)}</span>
+            <input
+              aria-label="Video timeline"
+              className="player-seek"
+              max={Math.max(0.1, duration)}
+              min={0}
+              onChange={(event) => seekVideo(Number(event.target.value))}
+              step="0.05"
+              type="range"
+              value={Math.min(currentTime, duration)}
+            />
+            <span className="player-time">{formatAnalysisTime(duration)}</span>
+            <button
+              aria-label={muted ? "Unmute video" : "Mute video"}
+              onClick={toggleMute}
+              title={muted ? "Unmute" : "Mute"}
+              type="button"
+            >
+              {muted ? <VolumeX size={18} /> : <Volume2 size={18} />}
+            </button>
+            <input
+              aria-label="Video volume"
+              className="player-volume"
+              max={1}
+              min={0}
+              onChange={(event) => updateVolume(Number(event.target.value))}
+              step="0.05"
+              type="range"
+              value={muted ? 0 : volume}
+            />
+            <button
+              aria-label={fullscreen ? "Exit full screen" : "Enter full screen"}
+              onClick={toggleFullscreen}
+              title={fullscreen ? "Exit full screen" : "Full screen"}
+              type="button"
+            >
+              {fullscreen ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
+            </button>
+          </div>
+        </div>
+
+        {layers && heatmapTracks.length ? (
+          <LivePitchHeatmap
+            currentFrame={currentFrame}
+            endFrame={activeEndFrame}
+            layers={layers}
+            mode={windowMode}
+            selectedTrackIds={heatmapTracks}
+            startFrame={activeStartFrame}
+          />
         ) : null}
       </div>
       {videoError ? <p className="badge error">{videoError}</p> : null}
 
-      {layers && heatmapTracks.length ? (
-        <PitchHeatmap layers={layers} selectedTrackIds={heatmapTracks} />
+      {layers ? (
+        <FullMatchVisualReview
+          heatmapTrackIds={heatmapTracks}
+          layers={layers}
+          movementTrackIds={movementTracks}
+        />
       ) : null}
     </div>
   );
@@ -1395,7 +1849,10 @@ function drawMetricPitch(
 function drawHeatmapCanvas(
   canvas: HTMLCanvasElement,
   layers: MatchVisualLayers,
-  selectedTrackIds: number[]
+  selectedTrackIds: number[],
+  startFrame: number,
+  endFrame: number,
+  markerFrame?: number
 ) {
   const cssWidth = canvas.clientWidth;
   const cssHeight = canvas.clientHeight;
@@ -1412,6 +1869,8 @@ function drawHeatmapCanvas(
   const padding = Math.max(14, cssWidth * 0.025);
   const field = { x: padding, y: padding, width: cssWidth - padding * 2, height: cssHeight - padding * 2 };
   const selected = new Set(selectedTrackIds);
+  const firstVisibleFrame = Math.max(0, Math.min(startFrame, endFrame));
+  const lastVisibleFrame = Math.min(layers.frames_processed - 1, Math.max(startFrame, endFrame));
   const columns = 56;
   const rows = 36;
 
@@ -1424,6 +1883,8 @@ function drawHeatmapCanvas(
     if (!selected.has(track.track_id) || !track.pitch_path.length) continue;
     const density = new Float32Array(columns * rows);
     for (const point of track.pitch_path) {
+      if (point[0] < firstVisibleFrame) continue;
+      if (point[0] > lastVisibleFrame) break;
       const column = Math.min(columns - 1, Math.max(0, Math.floor(point[1] / layers.pitch.length_cm * columns)));
       const row = Math.min(rows - 1, Math.max(0, Math.floor(point[2] / layers.pitch.width_cm * rows)));
       density[row * columns + column] += 1;
@@ -1448,37 +1909,323 @@ function drawHeatmapCanvas(
   }
   context.restore();
   drawMetricPitch(context, field, layers.pitch.length_cm, layers.pitch.width_cm);
+
+  if (markerFrame != null) {
+    const targetFrame = Math.min(lastVisibleFrame, Math.max(firstVisibleFrame, markerFrame));
+    for (const track of layers.tracks) {
+      if (!selected.has(track.track_id) || !track.pitch_path.length) continue;
+      let marker: number[] | null = null;
+      for (const point of track.pitch_path) {
+        if (point[0] < firstVisibleFrame) continue;
+        if (point[0] > targetFrame) break;
+        marker = point;
+      }
+      if (!marker) continue;
+      const markerX = field.x + marker[1] / layers.pitch.length_cm * field.width;
+      const markerY = field.y + marker[2] / layers.pitch.width_cm * field.height;
+      const markerRadius = Math.max(7, Math.min(12, cssWidth / 42));
+      context.save();
+      context.fillStyle = track.color;
+      context.strokeStyle = "#ffffff";
+      context.lineWidth = 1.6;
+      context.beginPath();
+      context.arc(markerX, markerY, markerRadius, 0, Math.PI * 2);
+      context.fill();
+      context.stroke();
+      context.fillStyle = "#ffffff";
+      context.font = `800 ${Math.max(8, markerRadius)}px system-ui, sans-serif`;
+      context.textAlign = "center";
+      context.textBaseline = "middle";
+      context.fillText(String(track.track_id), markerX, markerY + 0.5);
+      context.restore();
+    }
+  }
 }
 
-function PitchHeatmap({ layers, selectedTrackIds }: { layers: MatchVisualLayers; selectedTrackIds: number[] }) {
+function PitchHeatmapCanvas({
+  layers,
+  selectedTrackIds,
+  startFrame,
+  endFrame,
+  markerFrame
+}: {
+  layers: MatchVisualLayers;
+  selectedTrackIds: number[];
+  startFrame: number;
+  endFrame: number;
+  markerFrame?: number;
+}) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const selectedTracks = layers.tracks.filter((track) => selectedTrackIds.includes(track.track_id));
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const render = () => drawHeatmapCanvas(canvas, layers, selectedTrackIds);
+    const render = () => drawHeatmapCanvas(canvas, layers, selectedTrackIds, startFrame, endFrame, markerFrame);
     const observer = new ResizeObserver(render);
     observer.observe(canvas);
     render();
     return () => observer.disconnect();
-  }, [layers, selectedTrackIds]);
+  }, [endFrame, layers, markerFrame, selectedTrackIds, startFrame]);
+
+  return <canvas ref={canvasRef} />;
+}
+
+function TrackLegend({ layers, selectedTrackIds }: { layers: MatchVisualLayers; selectedTrackIds: number[] }) {
+  const selectedTracks = layers.tracks.filter((track) => selectedTrackIds.includes(track.track_id));
 
   return (
-    <section className="heatmap-workspace">
+    <div className="heatmap-legend">
+      {selectedTracks.map((track) => (
+        <span key={track.track_id}>
+          <i style={{ backgroundColor: track.color }} /> T{track.track_id}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function CompactPitchHeatmap({
+  layers,
+  selectedTrackIds,
+  startFrame,
+  endFrame,
+  currentFrame
+}: {
+  layers: MatchVisualLayers;
+  selectedTrackIds: number[];
+  startFrame: number;
+  endFrame: number;
+  currentFrame: number;
+}) {
+  return (
+    <aside className="compact-heatmap-overlay" aria-label="Selected player heatmap radar">
+      <div className="compact-heatmap-title"><Flame size={13} /> Selected heatmap</div>
+      <div className="compact-heatmap-body">
+        <div className="compact-pitch-stage">
+          <PitchHeatmapCanvas
+            endFrame={endFrame}
+            layers={layers}
+            markerFrame={currentFrame}
+            selectedTrackIds={selectedTrackIds}
+            startFrame={startFrame}
+          />
+        </div>
+        <TrackLegend layers={layers} selectedTrackIds={selectedTrackIds} />
+      </div>
+    </aside>
+  );
+}
+
+function LivePitchHeatmap({
+  layers,
+  selectedTrackIds,
+  startFrame,
+  endFrame,
+  currentFrame,
+  mode
+}: {
+  layers: MatchVisualLayers;
+  selectedTrackIds: number[];
+  startFrame: number;
+  endFrame: number;
+  currentFrame: number;
+  mode: VisualWindowMode;
+}) {
+  const startSeconds = startFrame / Math.max(1, layers.fps);
+  const endSeconds = endFrame / Math.max(1, layers.fps);
+
+  return (
+    <aside className="live-heatmap-panel">
+      <div className="live-map-header">
+        <div>
+          <span className="eyebrow">Metric player heatmap</span>
+          <strong>{mode === "progress" ? "Live progression" : "Selected interval"}</strong>
+        </div>
+        <span className="badge">{formatAnalysisTime(startSeconds)}-{formatAnalysisTime(endSeconds)}</span>
+      </div>
+      <div className="live-pitch-stage">
+        <PitchHeatmapCanvas
+          endFrame={endFrame}
+          layers={layers}
+          markerFrame={currentFrame}
+          selectedTrackIds={selectedTrackIds}
+          startFrame={startFrame}
+        />
+      </div>
+      <TrackLegend layers={layers} selectedTrackIds={selectedTrackIds} />
+    </aside>
+  );
+}
+
+function drawMovementPitchCanvas(
+  canvas: HTMLCanvasElement,
+  layers: MatchVisualLayers,
+  selectedTrackIds: number[],
+  startFrame: number,
+  endFrame: number
+) {
+  const cssWidth = canvas.clientWidth;
+  const cssHeight = canvas.clientHeight;
+  if (!cssWidth || !cssHeight) return;
+  const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = Math.round(cssWidth * pixelRatio);
+  canvas.height = Math.round(cssHeight * pixelRatio);
+  const context = canvas.getContext("2d");
+  if (!context) return;
+  context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+  context.clearRect(0, 0, cssWidth, cssHeight);
+  context.fillStyle = "#166534";
+  context.fillRect(0, 0, cssWidth, cssHeight);
+  const padding = Math.max(14, cssWidth * 0.025);
+  const field = { x: padding, y: padding, width: cssWidth - padding * 2, height: cssHeight - padding * 2 };
+  const selected = new Set(selectedTrackIds);
+  const firstVisibleFrame = Math.max(0, Math.min(startFrame, endFrame));
+  const lastVisibleFrame = Math.min(layers.frames_processed - 1, Math.max(startFrame, endFrame));
+  const mapX = (value: number) => field.x + value / layers.pitch.length_cm * field.width;
+  const mapY = (value: number) => field.y + value / layers.pitch.width_cm * field.height;
+
+  context.save();
+  context.beginPath();
+  context.rect(field.x, field.y, field.width, field.height);
+  context.clip();
+  for (const track of layers.tracks) {
+    if (!selected.has(track.track_id)) continue;
+    let previous: number[] | null = null;
+    let latest: number[] | null = null;
+    for (const point of track.pitch_path) {
+      if (point[0] < firstVisibleFrame) continue;
+      if (point[0] > lastVisibleFrame) break;
+      if (previous) {
+        const frameGap = point[0] - previous[0];
+        const distance = Math.hypot(point[1] - previous[1], point[2] - previous[2]);
+        if (frameGap <= layers.fps * 2 && distance <= 2500) {
+          context.save();
+          context.strokeStyle = track.color;
+          context.globalAlpha = 0.88;
+          context.lineWidth = 2.4;
+          context.lineCap = "round";
+          context.beginPath();
+          context.moveTo(mapX(previous[1]), mapY(previous[2]));
+          context.lineTo(mapX(point[1]), mapY(point[2]));
+          context.stroke();
+          context.restore();
+        }
+      }
+      previous = point;
+      latest = point;
+    }
+    if (latest) {
+      const x = mapX(latest[1]);
+      const y = mapY(latest[2]);
+      context.save();
+      context.fillStyle = track.color;
+      context.strokeStyle = "#ffffff";
+      context.lineWidth = 1.5;
+      context.beginPath();
+      context.arc(x, y, 9, 0, Math.PI * 2);
+      context.fill();
+      context.stroke();
+      context.fillStyle = "#ffffff";
+      context.font = "800 9px system-ui, sans-serif";
+      context.textAlign = "center";
+      context.textBaseline = "middle";
+      context.fillText(String(track.track_id), x, y + 0.5);
+      context.restore();
+    }
+  }
+  context.restore();
+  drawMetricPitch(context, field, layers.pitch.length_cm, layers.pitch.width_cm);
+}
+
+function MovementPitchMap({
+  layers,
+  selectedTrackIds,
+  startFrame,
+  endFrame
+}: {
+  layers: MatchVisualLayers;
+  selectedTrackIds: number[];
+  startFrame: number;
+  endFrame: number;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const render = () => drawMovementPitchCanvas(canvas, layers, selectedTrackIds, startFrame, endFrame);
+    const observer = new ResizeObserver(render);
+    observer.observe(canvas);
+    render();
+    return () => observer.disconnect();
+  }, [endFrame, layers, selectedTrackIds, startFrame]);
+
+  return <canvas ref={canvasRef} />;
+}
+
+function FullMatchVisualReview({
+  layers,
+  movementTrackIds,
+  heatmapTrackIds
+}: {
+  layers: MatchVisualLayers;
+  movementTrackIds: number[];
+  heatmapTrackIds: number[];
+}) {
+  const finalFrame = Math.max(0, layers.frames_processed - 1);
+
+  return (
+    <section className="full-match-visuals">
       <div className="section-header">
-        <h3 className="card-title">Metric player heatmap</h3>
-        <span className="badge">{layers.frames_processed} analyzed frames</span>
+        <div>
+          <h3 className="card-title">Full match visual review</h3>
+          <p className="muted small">Complete analyzed interval, independent from video playback.</p>
+        </div>
+        <span className="badge">{formatAnalysisTime(layers.duration_seconds)}</span>
       </div>
-      <div className="pitch-heatmap-stage">
-        <canvas ref={canvasRef} />
-      </div>
-      <div className="heatmap-legend">
-        {selectedTracks.map((track) => (
-          <span key={track.track_id}>
-            <i style={{ backgroundColor: track.color }} /> Track {track.track_id}
-          </span>
-        ))}
+      <div className="full-match-visual-grid">
+        <section className="analysis-visual-panel">
+          <div className="visual-panel-header">
+            <strong>Full match movement paths</strong>
+            <span>{movementTrackIds.length} selected</span>
+          </div>
+          {movementTrackIds.length ? (
+            <>
+              <div className="full-pitch-stage">
+                <MovementPitchMap
+                  endFrame={finalFrame}
+                  layers={layers}
+                  selectedTrackIds={movementTrackIds}
+                  startFrame={0}
+                />
+              </div>
+              <TrackLegend layers={layers} selectedTrackIds={movementTrackIds} />
+            </>
+          ) : (
+            <div className="visual-empty">Select players or a team from Track lines above.</div>
+          )}
+        </section>
+        <section className="analysis-visual-panel">
+          <div className="visual-panel-header">
+            <strong>Full match heatmap</strong>
+            <span>{heatmapTrackIds.length} selected</span>
+          </div>
+          {heatmapTrackIds.length ? (
+            <>
+              <div className="full-pitch-stage">
+                <PitchHeatmapCanvas
+                  endFrame={finalFrame}
+                  layers={layers}
+                  selectedTrackIds={heatmapTrackIds}
+                  startFrame={0}
+                />
+              </div>
+              <TrackLegend layers={layers} selectedTrackIds={heatmapTrackIds} />
+            </>
+          ) : (
+            <div className="visual-empty">Select players or a team from Heatmap above.</div>
+          )}
+        </section>
       </div>
     </section>
   );
