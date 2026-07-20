@@ -1,4 +1,5 @@
 import {
+  AlertTriangle,
   BarChart3,
   Bot,
   CalendarDays,
@@ -26,6 +27,7 @@ import {
 } from "lucide-react";
 import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
+import { TrackingQualityPanel } from "./TrackingQualityPanel";
 import type {
   MatchVisualLayers,
   MatchVisualLayerTrack,
@@ -2321,6 +2323,7 @@ function MatchAnalysisPlusPage() {
                     <th>Run</th>
                     <th>Profile</th>
                     <th>Status</th>
+                    <th>Quality</th>
                     <th>Frames</th>
                     <th>Created</th>
                     <th>Open</th>
@@ -2332,6 +2335,15 @@ function MatchAnalysisPlusPage() {
                       <td>#{run.id}</td>
                       <td>{run.mode === "FULL_ANALYSIS" ? "Full analysis" : "Legacy run"}</td>
                       <td>{statusBadge(run.status)}</td>
+                      <td>
+                        {run.quality ? (
+                          <span className={`quality-state ${run.quality.status}`}>
+                            {run.quality.status === "approved" ? <Shield size={14} /> : <AlertTriangle size={14} />}
+                            {run.quality.status.replaceAll("_", " ")}
+                            {run.quality.tracks_needing_review > 0 ? ` (${run.quality.tracks_needing_review})` : ""}
+                          </span>
+                        ) : "-"}
+                      </td>
                       <td>{run.summary?.frames_processed ?? run.max_frames}</td>
                       <td>{run.created_at ? new Date(run.created_at).toLocaleString() : "-"}</td>
                       <td>
@@ -2355,6 +2367,7 @@ function MatchAnalysisPlusPage() {
                 <tbody>
                   <tr><th>Run</th><td>#{selectedRun.id}</td></tr>
                   <tr><th>Status</th><td>{selectedRun.status}</td></tr>
+                  <tr><th>Quality gate</th><td>{selectedRun.quality?.status?.replaceAll("_", " ") || "Not evaluated"}</td></tr>
                   <tr><th>Profile</th><td>{selectedRun.mode === "FULL_ANALYSIS" ? "Full analysis" : "Legacy run"}</td></tr>
                   <tr><th>Source</th><td>{selectedRun.source}</td></tr>
                   <tr><th>Worker</th><td>{summary?.worker || "-"}</td></tr>
@@ -2385,6 +2398,14 @@ function MatchAnalysisPlusPage() {
             layersLoading={visualLayers.loading}
             onVideoError={() => setVideoError("Browser could not play this generated video. Re-run the analysis or check the worker logs.")}
             videoError={videoError}
+            videoObject={selectedRun.output_object}
+          />
+
+          <TrackingQualityPanel
+            fps={summary.fps}
+            matchId={activeId || selectedRun.match_id}
+            onLayersChanged={() => runs.refresh()}
+            runId={selectedRun.id}
             videoObject={selectedRun.output_object}
           />
 

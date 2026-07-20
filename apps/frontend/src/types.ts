@@ -163,6 +163,11 @@ export type MatchVisualLayerTrack = {
   last_frame?: number | null;
   video_path: number[][];
   pitch_path: number[][];
+  identity_confidence?: number | null;
+  switch_risk?: "low" | "medium" | "high" | null;
+  player_id?: number | null;
+  player_name?: string | null;
+  jersey_number?: number | null;
 };
 
 export type MatchVisualLayers = {
@@ -311,6 +316,104 @@ export type MatchAnalysisPlusRun = {
   created_at?: string;
   started_at?: string | null;
   finished_at?: string | null;
+  quality?: {
+    status: string;
+    average_identity_confidence?: number | null;
+    tracks_needing_review: number;
+    benchmark_status: string;
+    idf1?: number | null;
+    hota?: number | null;
+  } | null;
+};
+
+export type TrackingQualityAssessment = {
+  id: number;
+  status: string;
+  tracker_engine?: string | null;
+  reid_enabled: boolean;
+  reid_model?: string | null;
+  average_identity_confidence?: number | null;
+  suspected_id_switches: number;
+  fragmented_tracks: number;
+  tracks_needing_review: number;
+  benchmark_status: string;
+  id_switches?: number | null;
+  idf1?: number | null;
+  hota?: number | null;
+  fragmentation?: number | null;
+  predictions_object?: string | null;
+  ground_truth_object?: string | null;
+  metrics?: Record<string, unknown> | null;
+  thresholds?: Record<string, number> | null;
+  updated_at?: string;
+  reviewed_at?: string | null;
+};
+
+export type TrackReviewItem = {
+  id: number;
+  track_id: number;
+  canonical_track_id: number;
+  team?: number | null;
+  assigned_player_id?: number | null;
+  assigned_player?: {
+    id: number;
+    name: string;
+    jersey_number?: number | null;
+  } | null;
+  status: string;
+  identity_confidence: number;
+  reid_confidence: number;
+  motion_consistency: number;
+  team_consistency: number;
+  switch_risk: "low" | "medium" | "high";
+  fragment_count: number;
+  raw_id_transitions: number;
+  first_frame?: number | null;
+  last_frame?: number | null;
+  observation_count: number;
+  raw_track_ids: number[];
+  issue_codes: string[];
+  crop_objects: Array<{
+    frame: number;
+    object_name: string;
+    confidence?: number | null;
+  }>;
+  observations: Array<{
+    frame: number;
+    track_id: number;
+    raw_track_id?: number | null;
+    bbox: number[];
+    confidence?: number | null;
+  }>;
+};
+
+export type TrackReviewCorrection = {
+  id: number;
+  action: string;
+  source_track_id?: number | null;
+  target_track_id?: number | null;
+  split_frame?: number | null;
+  assigned_player_id?: number | null;
+  assigned_team_number?: number | null;
+  note?: string | null;
+  undone: boolean;
+  created_at?: string;
+};
+
+export type TrackingQualityResponse = {
+  run_id: number;
+  match_id: number;
+  assessment: TrackingQualityAssessment;
+  tracks: TrackReviewItem[];
+  corrections: TrackReviewCorrection[];
+  players: Array<{
+    id: number;
+    name: string;
+    jersey_number?: number | null;
+    team_id: number;
+  }>;
+  correction_id?: number;
+  recalculation?: Record<string, unknown> | null;
 };
 
 export type YoloStatus = {

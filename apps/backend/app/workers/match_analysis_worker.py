@@ -10,6 +10,10 @@ from app.models.match import Match
 from app.models.match_analysis_run import MatchAnalysisRun
 from app.queues.consumer import consume_match_analysis_requested_events
 from app.queues.events import MatchAnalysisRequestedEvent
+from app.tracking_quality.service import TrackingQualityService
+
+
+quality_service = TrackingQualityService()
 
 
 def update_match_status(db: Session, match_id: int, status: str) -> None:
@@ -49,6 +53,8 @@ def finish_run(
         run.thumbnail_object = summary.get("thumbnail_object")
         run.summary_json = summary
     db.commit()
+    if summary is not None and status == "processed":
+        quality_service.sync_from_summary(db, run, summary)
 
 
 async def run_worker() -> None:

@@ -498,7 +498,7 @@ class VisualLayerArtifactTests(unittest.TestCase):
             team_by_track={7: 2},
         )
 
-        self.assertEqual(1, payload["schema_version"])
+        self.assertEqual(2, payload["schema_version"])
         self.assertEqual([1920, 1080], payload["resolution"])
         self.assertEqual(4.0, payload["duration_seconds"])
         self.assertEqual([[0, 500, 700], [5, 520, 705]], payload["tracks"][0]["video_path"])

@@ -13,6 +13,9 @@ The project is built as a practical foundation for football clubs, academies, an
 - Dedicated `Match Analysis +` worker flow.
 - YOLO / Ultralytics integration for player and ball observations.
 - Stable track ID layer on top of detector/tracker outputs.
+- BoT-SORT Re-ID runtime diagnostics and per-track identity confidence.
+- Tracking Quality Gate with ID-switch risk, fragmentation review, crops, merge/split corrections, and undo history.
+- Ground-truth evaluation for IDF1, HOTA, exact ID switches, and track fragmentation.
 - Static-field-marker ball filtering to reduce false ball detections.
 - Team profile and opponent team management.
 - Player roster, shirt number, tactical zone, and assignment data models.
@@ -88,9 +91,10 @@ flowchart TD
     FrameRead --> Detector["YOLO Detector"]
     Detector --> RawObjects["Frame Observations"]
     RawObjects --> BallFilter["Ball Static Marker Filter"]
-    RawObjects --> Tracker["YOLO/ByteTrack Output"]
+    RawObjects --> Tracker["BoT-SORT + Re-ID"]
     Tracker --> Stabilizer["Stable Track ID Layer"]
-    Stabilizer --> TeamClassifier["Team Classifier"]
+    Stabilizer --> QualityGate["Tracking Quality Gate"]
+    QualityGate --> TeamClassifier["Team Classifier"]
     TeamClassifier --> TacticalIdentity["Tactical Identity Layer"]
     TacticalIdentity --> Analytics["Analytics Engine"]
     Analytics --> Reports["Reports + Artifacts"]
@@ -103,6 +107,9 @@ flowchart TD
 erDiagram
     MATCH ||--o{ MATCH_VIDEO : has
     MATCH ||--o{ MATCH_ANALYSIS_RUN : produces
+    MATCH_ANALYSIS_RUN ||--|| TRACKING_QUALITY_ASSESSMENT : evaluates
+    MATCH_ANALYSIS_RUN ||--o{ TRACK_REVIEW_ITEM : reviews
+    MATCH_ANALYSIS_RUN ||--o{ TRACK_REVIEW_CORRECTION : corrects
     MATCH ||--o{ VIDEO_PROCESSING_JOB : queues
     MATCH ||--o{ TRACK_PLAYER_ASSIGNMENT : maps
     MATCH ||--o{ TRACK_IDENTITY_ASSIGNMENT : resolves
@@ -200,7 +207,10 @@ flowchart LR
 | Primary team | `GET /primary-team`, `POST /primary-team`, `POST /primary-team/players` |
 | Teams | `GET /teams`, `POST /teams`, `POST /teams/{id}/players` |
 | Match Analysis + | `POST /match-analysis-plus/{match_id}/run`, `GET /match-analysis-plus/{match_id}` |
+| Tracking quality | `GET /match-analysis-plus/{match_id}/runs/{run_id}/quality`, corrections, recalculation, benchmark |
 | AI status | `GET /ai/yolo/status` |
+
+Detailed quality-gate behavior and the ground-truth JSON contract are documented in [docs/TRACKING_QUALITY_GATE.md](docs/TRACKING_QUALITY_GATE.md).
 
 ## Repository Layout
 

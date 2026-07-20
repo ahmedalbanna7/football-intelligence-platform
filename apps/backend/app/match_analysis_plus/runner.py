@@ -33,8 +33,18 @@ GOAL_AREA_WIDTH_CM = 1832.0
 GOAL_WIDTH_CM = 732.0
 PENALTY_SPOT_DISTANCE_CM = 1100.0
 CENTER_CIRCLE_RADIUS_CM = 915.0
-VISUAL_LAYER_SCHEMA_VERSION = 1
+VISUAL_LAYER_SCHEMA_VERSION = 2
 VISUAL_LAYER_SAMPLE_RATE_HZ = 6.0
+QUALITY_REVIEW_SAMPLE_RATE_HZ = 2.0
+QUALITY_MAX_CROPS_PER_TRACK = 6
+QUALITY_MAX_REVIEW_OBSERVATIONS_PER_TRACK = 600
+QUALITY_THRESHOLDS = {
+    "approve_identity_confidence": 0.82,
+    "review_identity_confidence": 0.68,
+    "high_risk_identity_confidence": 0.52,
+    "high_risk_fragments": 2,
+    "high_risk_raw_id_transitions": 4,
+}
 TRACK_VISUAL_PALETTE = (
     "#ef4444",
     "#0ea5e9",
@@ -98,6 +108,13 @@ class StableTrackState:
     hits: int = 1
     consecutive_hits: int = 1
     confirmed: bool = False
+    first_frame: int = 0
+    last_raw_id: int | None = None
+    raw_id_transitions: int = 0
+    fragments: int = 1
+    max_observation_gap: int = 0
+    assignment_scores: list[float] = field(default_factory=list)
+    detection_confidences: list[float] = field(default_factory=list)
 
 
 class PlayerValidityFilter:
@@ -383,6 +400,7 @@ class TrackIdStabilizer:
                     appearance_hist,
                     jersey_color,
                     visual_reliable,
+                    assigned_scores.get(candidate_index),
                 )
             updated_stable_ids.add(stable_id)
             state = self.tracks[stable_id]
@@ -839,6 +857,11 @@ class TrackIdStabilizer:
             depth_proxy=self._depth_proxy(player.bbox),
             last_reliable_frame=frame_index if appearance_hist is not None else 0,
             reliable_hits=1 if appearance_hist is not None else 0,
+            first_frame=frame_index,
+            last_raw_id=raw_id,
+            detection_confidences=[player.confidence]
+            if player.confidence is not None
+            else [],
         )
         self.raw_to_stable[raw_id] = stable_id
         return stable_id
@@ -852,12 +875,27 @@ class TrackIdStabilizer:
         appearance_hist: np.ndarray | None,
         jersey_color: tuple[int, int, int] | None,
         visual_reliable: bool,
+        assignment_score: float | None,
     ) -> None:
         state = self.tracks[stable_id]
         new_center = self._center(player.bbox)
         new_foot = self._foot(player.bbox)
         new_depth = self._depth_proxy(player.bbox)
         frame_delta = max(frame_index - state.last_frame, 1)
+        state.max_observation_gap = max(state.max_observation_gap, frame_delta)
+        if frame_delta > 2:
+            state.fragments += 1
+        if state.last_raw_id is not None and raw_id != state.last_raw_id:
+            state.raw_id_transitions += 1
+        state.last_raw_id = raw_id
+        if assignment_score is not None:
+            state.assignment_scores.append(float(assignment_score))
+            if len(state.assignment_scores) > 240:
+                state.assignment_scores.pop(0)
+        if player.confidence is not None:
+            state.detection_confidences.append(float(player.confidence))
+            if len(state.detection_confidences) > 240:
+                state.detection_confidences.pop(0)
         instant_velocity = (
             (new_center[0] - state.center[0]) / frame_delta,
             (new_center[1] - state.center[1]) / frame_delta,
@@ -1272,7 +1310,140 @@ class TrackIdStabilizer:
         occlusion_ratio = state.occlusion_hits / max(state.hits, 1)
         continuity = max(0.0, 1.0 - min(occlusion_ratio, 0.65))
         lock_bonus = 0.12 if state.identity_locked else 0.0
-        return float(np.clip(history * 0.42 + appearance * 0.28 + continuity * 0.30 + lock_bonus, 0.0, 1.0))
+        fragment_penalty = min(0.22, max(0, state.fragments - 1) * 0.055)
+        transition_penalty = min(0.16, state.raw_id_transitions * 0.018)
+        return float(
+            np.clip(
+                history * 0.42
+                + appearance * 0.28
+                + continuity * 0.30
+                + lock_bonus
+                - fragment_penalty
+                - transition_penalty,
+                0.0,
+                1.0,
+            )
+        )
+
+    def quality_report(
+        self,
+        track_frames: dict[int, int],
+        team_by_track: dict[int, int],
+        review_observations: dict[int, list[dict[str, Any]]],
+        crop_files: dict[int, list[dict[str, Any]]],
+        tracker_runtime: dict[str, Any],
+    ) -> dict[str, Any]:
+        tracks: list[dict[str, Any]] = []
+        for track_id in sorted(track_frames):
+            state = self.tracks.get(track_id)
+            if state is None or not state.confirmed:
+                continue
+            identity_confidence = self._identity_confidence(state)
+            appearance_consistency = self._appearance_consistency(state)
+            gallery_coverage = min(1.0, len(state.appearance_gallery) / 6.0)
+            reid_confidence = appearance_consistency * 0.72 + gallery_coverage * 0.28
+            motion_consistency = self._motion_consistency(state)
+            team_consistency = self._jersey_family_confidence(state)
+            fragment_count = max(0, state.fragments - 1)
+            issues: list[str] = []
+            if identity_confidence < QUALITY_THRESHOLDS["review_identity_confidence"]:
+                issues.append("low_identity_confidence")
+            if fragment_count > 0:
+                issues.append("fragmented_track")
+            if state.raw_id_transitions >= QUALITY_THRESHOLDS["high_risk_raw_id_transitions"]:
+                issues.append("frequent_raw_id_transitions")
+            if team_consistency < 0.62:
+                issues.append("team_color_unstable")
+            if reid_confidence < 0.58:
+                issues.append("appearance_inconsistent")
+            if track_frames.get(track_id, 0) < self.confirmation_hits * 3:
+                issues.append("short_track")
+
+            high_risk = (
+                identity_confidence < QUALITY_THRESHOLDS["high_risk_identity_confidence"]
+                or fragment_count >= QUALITY_THRESHOLDS["high_risk_fragments"]
+                or state.raw_id_transitions >= QUALITY_THRESHOLDS["high_risk_raw_id_transitions"]
+            )
+            medium_risk = (
+                identity_confidence < QUALITY_THRESHOLDS["approve_identity_confidence"]
+                or fragment_count > 0
+                or reid_confidence < 0.72
+                or team_consistency < 0.72
+            )
+            switch_risk = "high" if high_risk else "medium" if medium_risk else "low"
+            observations = review_observations.get(track_id, [])
+            tracks.append(
+                {
+                    "track_id": track_id,
+                    "team": team_by_track.get(track_id),
+                    "identity_confidence": round(identity_confidence, 4),
+                    "reid_confidence": round(float(np.clip(reid_confidence, 0.0, 1.0)), 4),
+                    "motion_consistency": round(motion_consistency, 4),
+                    "team_consistency": round(team_consistency, 4),
+                    "switch_risk": switch_risk,
+                    "fragment_count": fragment_count,
+                    "raw_id_transitions": state.raw_id_transitions,
+                    "first_frame": state.first_frame,
+                    "last_frame": state.last_frame,
+                    "observation_count": track_frames.get(track_id, 0),
+                    "raw_track_ids": sorted(state.raw_ids_seen),
+                    "issue_codes": issues,
+                    "crop_files": crop_files.get(track_id, []),
+                    "review_observations": observations,
+                }
+            )
+
+        confidences = [float(track["identity_confidence"]) for track in tracks]
+        review_tracks = [track for track in tracks if track["switch_risk"] != "low"]
+        high_risk_tracks = [track for track in tracks if track["switch_risk"] == "high"]
+        fragmented_tracks = [track for track in tracks if int(track["fragment_count"]) > 0]
+        return {
+            "engine": "tracking_quality_gate_v1",
+            "tracker_runtime": tracker_runtime,
+            "overview": {
+                "status": "needs_review" if review_tracks else "quality_check_passed",
+                "tracks_evaluated": len(tracks),
+                "average_identity_confidence": round(float(np.mean(confidences)), 4)
+                if confidences
+                else None,
+                "suspected_id_switches": len(high_risk_tracks),
+                "fragmented_tracks": len(fragmented_tracks),
+                "tracks_needing_review": len(review_tracks),
+                "low_risk_tracks": len(tracks) - len(review_tracks),
+            },
+            "benchmark": {
+                "status": "ground_truth_required",
+                "id_switches": None,
+                "idf1": None,
+                "hota": None,
+                "fragmentation": None,
+                "message": "Upload frame-level ground truth to measure IDF1, HOTA, exact ID switches, and fragmentation.",
+            },
+            "thresholds": QUALITY_THRESHOLDS,
+            "tracks": tracks,
+        }
+
+    def _appearance_consistency(self, state: StableTrackState) -> float:
+        if not state.appearance_gallery or state.appearance_hist is None:
+            return 0.0
+        similarities = [
+            self._appearance_similarity(reference, state.appearance_hist)
+            for reference in state.appearance_gallery
+        ]
+        return float(np.clip(np.mean(similarities), 0.0, 1.0))
+
+    def _motion_consistency(self, state: StableTrackState) -> float:
+        if state.assignment_scores:
+            score_quality = float(
+                np.clip((np.mean(state.assignment_scores) - 3.5) / 3.5, 0.0, 1.0)
+            )
+        else:
+            score_quality = 0.45
+        gap_quality = max(0.0, 1.0 - min(state.max_observation_gap, 30) / 30.0)
+        fragment_quality = max(0.0, 1.0 - max(0, state.fragments - 1) * 0.16)
+        return float(
+            np.clip(score_quality * 0.52 + gap_quality * 0.24 + fragment_quality * 0.24, 0.0, 1.0)
+        )
 
     def _center(self, bbox: list[float]) -> tuple[float, float]:
         return ((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2)
@@ -3506,6 +3677,9 @@ class MatchAnalysisPlusRunner:
             raw_output_path = temp_path / "match_analysis_plus.avi"
             output_path = temp_path / "match_analysis_plus.mp4"
             thumbnail_path = temp_path / "thumbnail.jpg"
+            quality_crops_dir = temp_path / "tracking-quality-crops"
+            quality_predictions_path = temp_path / "tracking_quality_predictions.jsonl"
+            quality_crops_dir.mkdir(parents=True, exist_ok=True)
 
             self._download_video(bucket, object_name, input_path)
             summary = self._process_video(
@@ -3513,6 +3687,8 @@ class MatchAnalysisPlusRunner:
                 raw_output_path=raw_output_path,
                 output_path=output_path,
                 thumbnail_path=thumbnail_path,
+                quality_crops_dir=quality_crops_dir,
+                quality_predictions_path=quality_predictions_path,
                 mode=normalized_mode,
                 max_frames=max_frames,
             )
@@ -3523,6 +3699,9 @@ class MatchAnalysisPlusRunner:
             summary_object = f"{artifact_prefix}/summary.json"
             thumbnail_object = f"{artifact_prefix}/thumbnail.jpg"
             visual_layers_object = f"{artifact_prefix}/visual_layers.json"
+            quality_predictions_object = (
+                f"{artifact_prefix}/tracking-quality/predictions.jsonl"
+            )
             self._put_file(bucket, output_object, output_path, "video/mp4")
             if thumbnail_path.exists():
                 self._put_file(bucket, thumbnail_object, thumbnail_path, "image/jpeg")
@@ -3540,6 +3719,34 @@ class MatchAnalysisPlusRunner:
                         "heatmap_sample_rate_hz"
                     ],
                 }
+            tracking_quality = summary.get("tracking_quality")
+            if tracking_quality is not None:
+                for track in tracking_quality.get("tracks", []):
+                    crop_objects: list[dict[str, Any]] = []
+                    for crop in track.pop("crop_files", []):
+                        crop_path = quality_crops_dir / str(crop["file_name"])
+                        if not crop_path.exists():
+                            continue
+                        crop_object = (
+                            f"{artifact_prefix}/tracking-quality/crops/{crop_path.name}"
+                        )
+                        self._put_file(bucket, crop_object, crop_path, "image/jpeg")
+                        crop_objects.append(
+                            {
+                                "frame": int(crop["frame"]),
+                                "object_name": crop_object,
+                                "confidence": crop.get("confidence"),
+                            }
+                        )
+                    track["crop_objects"] = crop_objects
+                if quality_predictions_path.exists():
+                    self._put_file(
+                        bucket,
+                        quality_predictions_object,
+                        quality_predictions_path,
+                        "application/x-ndjson",
+                    )
+                    tracking_quality["predictions_object"] = quality_predictions_object
 
             payload = {
                 **summary,
@@ -3562,11 +3769,14 @@ class MatchAnalysisPlusRunner:
         raw_output_path: Path,
         output_path: Path,
         thumbnail_path: Path,
+        quality_crops_dir: Path,
+        quality_predictions_path: Path,
         mode: str,
         max_frames: int,
     ) -> dict[str, Any]:
         start = perf_counter()
         model = self._load_model()
+        self._reset_tracker_state(model)
         pitch_model = self._load_pitch_model()
         capture = cv2.VideoCapture(str(input_path))
         if not capture.isOpened():
@@ -3593,6 +3803,9 @@ class MatchAnalysisPlusRunner:
         track_pitch_samples: dict[int, list[dict[str, float | int]]] = {}
         pitch_to_video_samples: list[list[float | int]] = []
         team_by_track: dict[int, int] = {}
+        quality_review_observations: dict[int, list[dict[str, Any]]] = {}
+        quality_crop_files: dict[int, list[dict[str, Any]]] = {}
+        tracker_runtime: dict[str, Any] = {}
         ball_control: list[int] = []
         class_counts: dict[str, int] = {}
         confidence_values: list[float] = []
@@ -3604,6 +3817,20 @@ class MatchAnalysisPlusRunner:
         frames_processed = 0
         detections_count = 0
         raw_detections_count = 0
+        source_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        expected_frames = (
+            min(source_frames, max_frames)
+            if source_frames > 0 and max_frames > 0
+            else max(source_frames, max_frames)
+        )
+        quality_review_interval = max(
+            1,
+            int(round(fps / QUALITY_REVIEW_SAMPLE_RATE_HZ)),
+            int(np.ceil(expected_frames / QUALITY_MAX_REVIEW_OBSERVATIONS_PER_TRACK))
+            if expected_frames > 0
+            else 1,
+        )
+        quality_predictions_file = quality_predictions_path.open("w", encoding="utf-8")
 
         while max_frames <= 0 or frames_processed < max_frames:
             ok, frame = capture.read()
@@ -3611,6 +3838,8 @@ class MatchAnalysisPlusRunner:
                 break
 
             raw_objects = self._detect_and_track(model, frame, mode)
+            if not tracker_runtime:
+                tracker_runtime = self._tracker_runtime_diagnostics(model)
             raw_detections_count += len(raw_objects)
             raw_players = player_filter.filter(
                 [item for item in raw_objects if item.class_name == "player"],
@@ -3646,6 +3875,17 @@ class MatchAnalysisPlusRunner:
                     confidence_values.append(item.confidence)
 
             team_classifier.update(players, track_stabilizer.tracks, team_by_track)
+            self._record_tracking_quality(
+                frame=frame,
+                frame_index=frames_processed,
+                fps=fps,
+                players=players,
+                predictions_file=quality_predictions_file,
+                review_interval=quality_review_interval,
+                review_observations=quality_review_observations,
+                crop_files=quality_crop_files,
+                crops_dir=quality_crops_dir,
+            )
             self._update_movement(
                 players=players,
                 frame_index=frames_processed,
@@ -3691,6 +3931,7 @@ class MatchAnalysisPlusRunner:
             writer.write(annotated)
             frames_processed += 1
 
+        quality_predictions_file.close()
         capture.release()
         writer.release()
         if frames_processed == 0:
@@ -3772,6 +4013,17 @@ class MatchAnalysisPlusRunner:
         total_control = max(team_1 + team_2, 1)
         elapsed_ms = round((perf_counter() - start) * 1000, 2)
         processing_fps = round(frames_processed / max(elapsed_ms / 1000, 0.001), 3)
+        tracking_quality = track_stabilizer.quality_report(
+            track_frames=track_frames,
+            team_by_track=team_by_track,
+            review_observations=quality_review_observations,
+            crop_files=quality_crop_files,
+            tracker_runtime=tracker_runtime or self._tracker_runtime_diagnostics(model),
+        )
+        quality_by_track = {
+            int(track["track_id"]): track
+            for track in tracking_quality.get("tracks", [])
+        }
         visual_layers_payload = self._build_visual_layers_payload(
             fps=fps,
             frames_processed=frames_processed,
@@ -3782,6 +4034,7 @@ class MatchAnalysisPlusRunner:
             track_pitch_samples=track_pitch_samples,
             pitch_to_video_samples=pitch_to_video_samples,
             team_by_track=team_by_track,
+            quality_by_track=quality_by_track,
         )
 
         return {
@@ -3811,6 +4064,7 @@ class MatchAnalysisPlusRunner:
             "player_filter": player_filter.summary(),
             "team_classifier": team_classifier.summary(),
             "id_stabilizer": track_stabilizer.summary(),
+            "tracking_quality": tracking_quality,
             "ball_filter": ball_filter.summary(),
             "radar": radar.summary(),
             "metric_tracking": {
@@ -3833,6 +4087,112 @@ class MatchAnalysisPlusRunner:
             ],
             "elapsed_ms": elapsed_ms,
         }
+
+    def _record_tracking_quality(
+        self,
+        frame: np.ndarray,
+        frame_index: int,
+        fps: float,
+        players: list[AnalysisObject],
+        predictions_file: Any,
+        review_interval: int,
+        review_observations: dict[int, list[dict[str, Any]]],
+        crop_files: dict[int, list[dict[str, Any]]],
+        crops_dir: Path,
+    ) -> None:
+        crop_interval = max(1, int(round(fps * 1.5)))
+        frame_height, frame_width = frame.shape[:2]
+        for player in players:
+            if player.is_predicted:
+                continue
+            bbox = [round(float(value), 2) for value in player.bbox]
+            observation = {
+                "frame": frame_index,
+                "track_id": player.track_id,
+                "raw_track_id": player.raw_track_id,
+                "bbox": bbox,
+                "confidence": round(float(player.confidence), 4)
+                if player.confidence is not None
+                else None,
+            }
+            predictions_file.write(json.dumps(observation, separators=(",", ":")) + "\n")
+            sampled = review_observations.setdefault(player.track_id, [])
+            if not sampled or frame_index - int(sampled[-1]["frame"]) >= review_interval:
+                sampled.append(observation)
+
+            track_crops = crop_files.setdefault(player.track_id, [])
+            if len(track_crops) >= QUALITY_MAX_CROPS_PER_TRACK:
+                continue
+            if track_crops and frame_index - int(track_crops[-1]["frame"]) < crop_interval:
+                continue
+            x1, y1, x2, y2 = player.bbox
+            width = max(1.0, x2 - x1)
+            height = max(1.0, y2 - y1)
+            if width < 18 or height < 42:
+                continue
+            pad_x = width * 0.08
+            pad_y = height * 0.05
+            left = max(0, int(round(x1 - pad_x)))
+            top = max(0, int(round(y1 - pad_y)))
+            right = min(frame_width, int(round(x2 + pad_x)))
+            bottom = min(frame_height, int(round(y2 + pad_y)))
+            crop = frame[top:bottom, left:right]
+            if crop.size == 0:
+                continue
+            file_name = f"track_{player.track_id:04d}_frame_{frame_index:07d}.jpg"
+            if cv2.imwrite(
+                str(crops_dir / file_name),
+                crop,
+                [cv2.IMWRITE_JPEG_QUALITY, 90],
+            ):
+                track_crops.append(
+                    {
+                        "frame": frame_index,
+                        "file_name": file_name,
+                        "confidence": observation["confidence"],
+                    }
+                )
+
+    def _tracker_runtime_diagnostics(self, model: Any) -> dict[str, Any]:
+        predictor = getattr(model, "predictor", None)
+        trackers = getattr(predictor, "trackers", None) or []
+        tracker = trackers[0] if trackers else None
+        args = getattr(tracker, "args", None)
+        requested_reid = bool(getattr(args, "with_reid", False))
+        reid_model = getattr(args, "model", None)
+        encoder = getattr(tracker, "encoder", None)
+        native_features = requested_reid and str(reid_model).lower() == "auto"
+        try:
+            import ultralytics
+
+            ultralytics_version = getattr(ultralytics, "__version__", None)
+        except ImportError:
+            ultralytics_version = None
+        return {
+            "engine": type(tracker).__name__ if tracker is not None else "unavailable",
+            "ultralytics_version": ultralytics_version,
+            "config": self._resolve_tracker_config(),
+            "global_motion_compensation": getattr(args, "gmc_method", None),
+            "track_buffer": getattr(args, "track_buffer", None),
+            "reid": {
+                "requested": requested_reid,
+                "active": bool(requested_reid and (encoder is not None or native_features)),
+                "model": str(reid_model) if reid_model is not None else None,
+                "encoder": type(encoder).__name__ if encoder is not None else None,
+                "native_detector_features": native_features,
+            },
+            "stable_identity_layer": "identity_isolation_stabilizer_v4_observation_only",
+        }
+
+    def _reset_tracker_state(self, model: Any) -> None:
+        predictor = getattr(model, "predictor", None)
+        trackers = getattr(predictor, "trackers", None) or []
+        for tracker in trackers:
+            reset = getattr(tracker, "reset", None)
+            if callable(reset):
+                reset()
+        if predictor is not None and hasattr(predictor, "vid_path"):
+            predictor.vid_path = [None for _ in getattr(predictor, "vid_path", [None])]
 
     def _detect_and_track(self, model: Any, frame: np.ndarray, mode: str) -> list[AnalysisObject]:
         classes = self._target_class_ids(model)
@@ -3970,7 +4330,9 @@ class MatchAnalysisPlusRunner:
         track_pitch_samples: dict[int, list[dict[str, float | int]]],
         pitch_to_video_samples: list[list[float | int]],
         team_by_track: dict[int, int],
+        quality_by_track: dict[int, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
+        quality_by_track = quality_by_track or {}
         visual_tracks: list[dict[str, Any]] = []
         for track_id in sorted(track_frames):
             video_path = track_video_samples.get(track_id, [])
@@ -3994,6 +4356,10 @@ class MatchAnalysisPlusRunner:
                     "last_frame": int(video_path[-1][0]),
                     "video_path": video_path,
                     "pitch_path": pitch_path,
+                    "identity_confidence": quality_by_track.get(track_id, {}).get(
+                        "identity_confidence"
+                    ),
+                    "switch_risk": quality_by_track.get(track_id, {}).get("switch_risk"),
                 }
             )
 
@@ -4282,8 +4648,13 @@ class MatchAnalysisPlusRunner:
 
     def _put_file(self, bucket: str, object_name: str, path: Path, content_type: str) -> None:
         with path.open("rb") as file:
-            data = file.read()
-        client.put_object(bucket, object_name, io.BytesIO(data), length=len(data), content_type=content_type)
+            client.put_object(
+                bucket,
+                object_name,
+                file,
+                length=path.stat().st_size,
+                content_type=content_type,
+            )
 
     def _put_json(self, bucket: str, object_name: str, payload: dict[str, Any]) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")

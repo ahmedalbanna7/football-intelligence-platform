@@ -35,3 +35,19 @@ class MatchAnalysisRun(Base):
 
     match = relationship("Match")
     video = relationship("MatchVideo")
+    quality_assessment = relationship(
+        "TrackingQualityAssessment",
+        back_populates="run",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+    track_review_items = relationship(
+        "TrackReviewItem",
+        back_populates="run",
+        cascade="all, delete-orphan",
+    )
+    track_review_corrections = relationship(
+        "TrackReviewCorrection",
+        back_populates="run",
+        cascade="all, delete-orphan",
+    )

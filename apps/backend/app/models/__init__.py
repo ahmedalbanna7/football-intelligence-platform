@@ -12,3 +12,8 @@ from app.models.match_lineup import MatchLineup
 from app.models.match_substitution import MatchSubstitution
 from app.models.track_identity_assignment import TrackIdentityAssignment
 from app.models.match_analysis_run import MatchAnalysisRun
+from app.models.tracking_quality import (
+    TrackReviewCorrection,
+    TrackReviewItem,
+    TrackingQualityAssessment,
+)

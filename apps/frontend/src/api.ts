@@ -7,6 +7,7 @@ import type {
   ReportResponse,
   RosterPlayer,
   Team,
+  TrackingQualityResponse,
   YoloStatus
 } from "./types";
 
@@ -115,6 +116,65 @@ export const api = {
     return request<MatchVisualLayers>(
       `/matches/artifacts/object?object_name=${encodeURIComponent(objectName)}`
     );
+  },
+
+  getTrackingQuality(matchId: number, runId: number) {
+    return request<TrackingQualityResponse>(
+      `/match-analysis-plus/${matchId}/runs/${runId}/quality`
+    );
+  },
+
+  createTrackCorrection(
+    matchId: number,
+    runId: number,
+    payload: {
+      action: string;
+      source_track_id: number;
+      target_track_id?: number | null;
+      split_frame?: number | null;
+      assigned_player_id?: number | null;
+      assigned_team_number?: number | null;
+      note?: string | null;
+    }
+  ) {
+    return request<TrackingQualityResponse>(
+      `/match-analysis-plus/${matchId}/runs/${runId}/quality/corrections`,
+      { method: "POST", json: payload }
+    );
+  },
+
+  undoTrackCorrection(matchId: number, runId: number, correctionId: number) {
+    return request<TrackingQualityResponse>(
+      `/match-analysis-plus/${matchId}/runs/${runId}/quality/corrections/${correctionId}/undo`,
+      { method: "POST" }
+    );
+  },
+
+  recalculateTrackingQuality(matchId: number, runId: number) {
+    return request<{
+      run_id: number;
+      object_name: string;
+      corrections_applied: number;
+      tracks_count: number;
+      quality: TrackingQualityResponse;
+    }>(`/match-analysis-plus/${matchId}/runs/${runId}/quality/recalculate`, {
+      method: "POST"
+    });
+  },
+
+  benchmarkTrackingQuality(
+    matchId: number,
+    runId: number,
+    groundTruth: Record<string, unknown>,
+    iouThreshold = 0.5
+  ) {
+    return request<{
+      metrics: Record<string, unknown>;
+      quality: TrackingQualityResponse;
+    }>(`/match-analysis-plus/${matchId}/runs/${runId}/quality/benchmark`, {
+      method: "POST",
+      json: { ground_truth: groundTruth, iou_threshold: iouThreshold }
+    });
   },
 
   getPrimaryTeam() {
