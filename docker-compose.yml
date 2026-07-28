@@ -92,6 +92,23 @@ services:
       minio:
         condition: service_started
 
+  model-trainer:
+    profiles:
+      - training
+    build:
+      context: .
+      dockerfile: training/Dockerfile
+    working_dir: /workspace
+    environment:
+      YOLO_CONFIG_DIR: /workspace/training/cache/ultralytics
+      TORCH_HOME: /workspace/training/cache/torch
+    volumes:
+      - .:/workspace
+    gpus: all
+    ipc: host
+    shm_size: 8gb
+    command: sleep infinity
+
   postgres:
     image: postgres:16
     environment:
@@ -108,6 +125,8 @@ services:
 
   rabbitmq:
     image: rabbitmq:3-management
+    environment:
+      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "-rabbit consumer_timeout 86400000"
     ports:
       - "5672:5672"
       - "15672:15672"

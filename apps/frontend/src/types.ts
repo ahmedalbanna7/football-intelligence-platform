@@ -157,6 +157,8 @@ export type ReportResponse = {
 export type MatchVisualLayerTrack = {
   track_id: number;
   team?: number | null;
+  role_name?: string | null;
+  team_confidence?: number | null;
   color: string;
   frames: number;
   first_frame?: number | null;
@@ -188,6 +190,22 @@ export type MatchVisualLayers = {
     width_cm: number;
   };
   pitch_to_video: number[][];
+  pitch_calibration?: Array<{
+    frame: number;
+    confidence: number;
+    source: string;
+    reliable: boolean;
+  }>;
+  ball?: {
+    track_id: number;
+    pitch_path: Array<{
+      frame: number;
+      x: number;
+      y: number;
+      predicted: boolean;
+      confidence: number;
+    }>;
+  };
   tracks: MatchVisualLayerTrack[];
 };
 
@@ -196,15 +214,50 @@ export type MatchAnalysisPlusSummary = {
   engine: string;
   model: string;
   model_mode?: string;
+  model_selection?: {
+    strategy: string;
+    selected: string;
+    reason: string;
+    preview_image_size: number;
+    analysis_image_size: number;
+    candidates: Record<string, {
+      valid_players?: number;
+      raw_players?: number;
+      confidence_sum?: number;
+      error?: string;
+    }>;
+  };
+  ball_model?: string;
+  ball_detection_mode?: string;
+  pitch_model?: string;
+  pitch_model_selection?: {
+    strategy: string;
+    selected?: string | null;
+    reason?: string;
+    preview_frames?: number[];
+    candidates: Record<string, {
+      path?: string;
+      wide_view_frames?: number;
+      valid_homographies?: number;
+      visible_keypoints_total?: number;
+      mean_inlier_ratio?: number;
+      median_reprojection_error_cm?: number | null;
+      error?: string;
+    }>;
+  };
   output_codec?: string;
   output_content_type?: string;
   frames_processed: number;
   max_frames: number;
+  source_start_frame?: number;
+  source_end_frame?: number;
   fps: number;
   processing_fps?: number;
   resolution: number[];
   detections_count: number;
   class_counts?: Record<string, number>;
+  participant_role_counts?: Record<string, number>;
+  track_role_counts?: Record<string, number>;
   confidence?: {
     avg?: number | null;
     min?: number | null;
@@ -218,6 +271,16 @@ export type MatchAnalysisPlusSummary = {
     kept_player_detections: number;
     rejected_implausible_shape: number;
     rejected_field_fixtures: number;
+    specialized_detector_observations?: number;
+  };
+  pitch_occupancy_filter?: {
+    engine: string;
+    raw_player_candidates: number;
+    kept_player_candidates: number;
+    rejected_outside_pitch: number;
+    rejected_non_field_foot: number;
+    metric_decisions: number;
+    visual_fallback_decisions: number;
   };
   ball_filter?: {
     engine: string;
@@ -226,18 +289,49 @@ export type MatchAnalysisPlusSummary = {
     filtered_static_candidates: number;
     static_hits_threshold: number;
     pitch_stabilized_observations?: number;
+    penalty_spot_rejections?: number;
+    outside_pitch_rejections?: number;
+    tracker?: {
+      engine: string;
+      observed_frames: number;
+      interpolated_frames: number;
+      rejected_motion_gate: number;
+      current_confidence: number;
+    };
   };
   team_classifier?: {
     engine: string;
     kit_anchors_bgr: Record<string, number[]>;
     classified_tracks: number;
+    track_confidence?: Record<string, number>;
     color_observations: number;
+    ambiguous_observations?: number;
+    official_tracks?: number[];
+    goalkeeper_tracks?: number[];
     anchor_initializations: number;
+  };
+  kit_references?: {
+    source: string;
+    teams?: Record<string, {
+      label?: string;
+      loaded?: string[];
+      missing?: string[];
+      colors?: number[][];
+    }>;
   };
   radar?: {
     engine: string;
     model_available: boolean;
     calibration_mode?: string | null;
+    calibration_source?: string;
+    confidence?: {
+      current: number;
+      average: number;
+      minimum: number;
+      reliable_frames: number;
+      total_frames: number;
+      threshold: number;
+    };
     calibration_attempts: number;
     successful_calibrations: number;
     goal_geometry_calibrations?: number;
@@ -291,6 +385,14 @@ export type MatchAnalysisPlusSummary = {
     team_1_percent: number;
     team_2_percent: number;
   };
+  possession?: {
+    engine: string;
+    team_1_percent: number;
+    team_2_percent: number;
+    player_frames: Record<string, number>;
+    transitions: number;
+    unassigned_frames: number;
+  };
   elapsed_ms: number;
   output_object?: string;
   summary_object?: string;
@@ -308,6 +410,15 @@ export type MatchAnalysisPlusRun = {
   status: string;
   source: string;
   max_frames: number;
+  analysis_config?: {
+    start_frame?: number;
+    calibration_points?: Array<{
+      image_x: number;
+      image_y: number;
+      pitch_x: number;
+      pitch_y: number;
+    }>;
+  };
   output_object?: string | null;
   summary_object?: string | null;
   thumbnail_object?: string | null;

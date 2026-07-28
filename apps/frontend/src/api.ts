@@ -99,11 +99,25 @@ export const api = {
     }>(`/match-analysis-plus/${matchId}`);
   },
 
-  runMatchAnalysisPlus(matchId: number, payload: { mode: string; max_frames: number }) {
+  runMatchAnalysisPlus(matchId: number, payload: {
+    mode: string;
+    max_frames: number;
+    start_frame?: number;
+    calibration_points?: Array<{
+      image_x: number;
+      image_y: number;
+      pitch_x: number;
+      pitch_y: number;
+    }>;
+  }) {
     return request<MatchAnalysisPlusRun>(`/match-analysis-plus/${matchId}/run`, {
       method: "POST",
       json: payload
     });
+  },
+
+  calibrationFrameUrl(matchId: number, frameIndex: number) {
+    return `${API_BASE_URL}/match-analysis-plus/${matchId}/calibration-frame?frame_index=${Math.max(0, frameIndex)}`;
   },
 
   getMatchAnalysisPlusModes() {

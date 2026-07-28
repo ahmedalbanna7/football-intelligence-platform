@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 .pycache-check/
+.codex-test-frames/
 .env
 apps/backend/.env
 
@@ -34,3 +35,13 @@ artifacts/
 
 # Downloaded ML weights
 apps/backend/models/*.pt
+/yolo*.pt
+/runs/
+
+# Local model training data and generated runs
+training/downloads/
+training/datasets/
+training/runs/
+training/cache/
+training/**/*.pt
+training/.venv/

@@ -1,0 +1,4 @@
+ultralytics==8.4.102
+lap==0.5.13
+PyYAML==6.0.2
+opencv-python-headless==4.12.0.88

@@ -1,7 +1,9 @@
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+import json
+import subprocess
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query, Response
 from fastapi import Depends
 from fastapi import HTTPException
 from pydantic import BaseModel
@@ -15,7 +17,7 @@ from app.models.match_analysis_run import MatchAnalysisRun
 from app.models.match_video import MatchVideo
 from app.queues.events import MatchAnalysisRequestedEvent
 from app.queues.publisher import publish_match_analysis_requested
-from app.services.minio_client import BUCKET_NAME
+from app.services.minio_client import BUCKET_NAME, client
 from app.tracking_quality.service import TrackingQualityService
 
 router = APIRouter()
@@ -24,6 +26,8 @@ router = APIRouter()
 class MatchAnalysisRunRequest(BaseModel):
     mode: str = "FULL_ANALYSIS"
     max_frames: int = 450
+    start_frame: int = Field(default=0, ge=0)
+    calibration_points: list[dict[str, float]] = Field(default_factory=list)
 
 
 class TrackCorrectionRequest(BaseModel):
@@ -63,6 +67,7 @@ def serialize_run(run: MatchAnalysisRun) -> dict[str, Any]:
         "status": run.status,
         "source": run.source,
         "max_frames": run.max_frames,
+        "analysis_config": run.analysis_config_json or {},
         "output_object": run.output_object,
         "summary_object": run.summary_object,
         "thumbnail_object": run.thumbnail_object,
@@ -153,6 +158,10 @@ async def run_match_analysis_plus(
         status="queued",
         source="sports-main",
         max_frames=max(payload.max_frames, 0),
+        analysis_config_json={
+            "start_frame": max(payload.start_frame, 0),
+            "calibration_points": payload.calibration_points,
+        },
     )
     db.add(run)
     db.commit()
@@ -170,12 +179,14 @@ async def run_match_analysis_plus(
                 artifact_prefix=artifact_prefix,
                 mode=run.mode,
                 max_frames=run.max_frames,
+                start_frame=max(payload.start_frame, 0),
+                calibration_points=payload.calibration_points,
             )
         )
     except Exception as exc:
         run.status = "failed"
         run.error_message = str(exc)
-        run.finished_at = datetime.utcnow()
+        run.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
         db.commit()
         db.refresh(run)
         raise HTTPException(
@@ -187,6 +198,62 @@ async def run_match_analysis_plus(
     db.commit()
     db.refresh(run)
     return serialize_run(run)
+
+
+@router.get("/{match_id}/calibration-frame")
+def get_calibration_frame(
+    match_id: int,
+    frame_index: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
+    video = get_latest_video(db, match_id)
+    if video is None:
+        raise HTTPException(status_code=404, detail="No uploaded video found for this match")
+
+    source_url = client.presigned_get_object(
+        BUCKET_NAME,
+        video.object_name,
+        expires=timedelta(minutes=10),
+    )
+    probe = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=avg_frame_rate,nb_frames,width,height",
+            "-of", "json", source_url,
+        ],
+        capture_output=True,
+        check=False,
+        timeout=45,
+    )
+    if probe.returncode != 0:
+        raise HTTPException(status_code=422, detail="Could not inspect match video")
+    stream = (json.loads(probe.stdout.decode("utf-8")) or {}).get("streams", [{}])[0]
+    rate_parts = str(stream.get("avg_frame_rate") or "25/1").split("/", 1)
+    fps = float(rate_parts[0]) / max(float(rate_parts[1]) if len(rate_parts) > 1 else 1.0, 1e-6)
+    source_frames = int(stream.get("nb_frames") or 0)
+    selected_frame = min(frame_index, max(0, source_frames - 1)) if source_frames else frame_index
+    timestamp = selected_frame / max(fps, 1e-6)
+    extraction = subprocess.run(
+        [
+            "ffmpeg", "-v", "error", "-ss", f"{timestamp:.6f}", "-i", source_url,
+            "-frames:v", "1", "-q:v", "2", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1",
+        ],
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+    if extraction.returncode != 0 or not extraction.stdout:
+        raise HTTPException(status_code=422, detail="Could not read calibration frame")
+    return Response(
+        content=extraction.stdout,
+        media_type="image/jpeg",
+        headers={
+            "X-Frame-Index": str(selected_frame),
+            "X-Video-Width": str(stream.get("width") or 0),
+            "X-Video-Height": str(stream.get("height") or 0),
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @router.get("/{match_id}/runs/{run_id}")

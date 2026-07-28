@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 from time import perf_counter
 from typing import Any
 import colorsys
+import gc
 import io
 import json
 import shutil
@@ -15,12 +16,16 @@ import cv2
 import numpy as np
 
 from app.core.config import settings
-from app.services.minio_client import client
+from app.services.minio_client import BUCKET_NAME, client
 
 
-PERSON_ALIASES = {"person", "player", "goalkeeper"}
+PLAYER_ALIASES = {"person", "player"}
+GOALKEEPER_ALIASES = {"goalkeeper", "goal keeper"}
+REFEREE_ALIASES = {"referee", "official"}
+PERSON_ALIASES = PLAYER_ALIASES | GOALKEEPER_ALIASES | REFEREE_ALIASES
 BALL_ALIASES = {"sports ball", "ball"}
 TEAM_DISPLAY_COLORS = {
+    0: (0, 215, 255),
     1: (245, 245, 245),
     2: (48, 72, 224),
 }
@@ -81,6 +86,7 @@ class AnalysisObject:
     confidence: float | None = None
     raw_track_id: int | None = None
     is_predicted: bool = False
+    role_name: str = "player"
 
 
 @dataclass
@@ -98,6 +104,8 @@ class StableTrackState:
     jersey_color: tuple[int, int, int] | None = None
     jersey_family: str | None = None
     jersey_family_votes: dict[str, int] = field(default_factory=dict)
+    role_name: str = "player"
+    role_votes: dict[str, float] = field(default_factory=dict)
     bbox_height: float = 0.0
     depth_proxy: float = 0.0
     depth_velocity: float = 0.0
@@ -126,11 +134,13 @@ class PlayerValidityFilter:
         self.rejected_implausible_shape = 0
         self.rejected_field_fixture = 0
         self.rejected_sparse_foreground = 0
+        self.specialized_observations = 0
 
     def filter(
         self,
         players: list[AnalysisObject],
         frame: np.ndarray,
+        specialized_detector: bool = False,
     ) -> list[AnalysisObject]:
         kept: list[AnalysisObject] = []
         for player in players:
@@ -141,7 +151,9 @@ class PlayerValidityFilter:
             if aspect_ratio < 0.105 or aspect_ratio > 1.18:
                 self.rejected_implausible_shape += 1
                 continue
-            if self._looks_like_thin_field_fixture(frame, player.bbox, aspect_ratio):
+            if specialized_detector:
+                self.specialized_observations += 1
+            elif self._looks_like_thin_field_fixture(frame, player.bbox, aspect_ratio):
                 self.rejected_field_fixture += 1
                 continue
             kept.append(player)
@@ -156,6 +168,7 @@ class PlayerValidityFilter:
             "rejected_implausible_shape": self.rejected_implausible_shape,
             "rejected_field_fixtures": self.rejected_field_fixture,
             "rejected_sparse_foreground": self.rejected_sparse_foreground,
+            "specialized_detector_observations": self.specialized_observations,
         }
 
     def _looks_like_thin_field_fixture(
@@ -251,6 +264,87 @@ class PlayerValidityFilter:
             float(np.mean(middle)) if middle.size else 1.0,
             float(np.median(np.mean(middle, axis=1))) if middle.size else 1.0,
         )
+
+
+class PitchOccupancyFilter:
+    """Keep only people whose ground contact point belongs to the playing surface."""
+
+    def __init__(self, grace_frames: int = 3) -> None:
+        self.grace_frames = grace_frames
+        self.last_inside_by_raw_id: dict[int, int] = {}
+        self.raw_seen = 0
+        self.kept = 0
+        self.rejected_outside_pitch = 0
+        self.rejected_non_field_foot = 0
+        self.metric_decisions = 0
+        self.visual_fallback_decisions = 0
+
+    def filter(
+        self,
+        frame_index: int,
+        players: list[AnalysisObject],
+        frame: np.ndarray,
+        radar: "PitchRadar",
+    ) -> list[AnalysisObject]:
+        kept: list[AnalysisObject] = []
+        visual_mask = radar.playing_surface_mask(frame)
+        for player in players:
+            self.raw_seen += 1
+            raw_id = player.raw_track_id if player.raw_track_id is not None else player.track_id
+            foot = ((player.bbox[0] + player.bbox[2]) / 2, player.bbox[3])
+            metric_available = radar.is_reliable(0.52)
+            if metric_available:
+                self.metric_decisions += 1
+                inside = radar.contains_image_point(foot, margin_cm=90.0)
+            else:
+                self.visual_fallback_decisions += 1
+                inside = self._mask_contains(visual_mask, foot)
+
+            if inside:
+                self.last_inside_by_raw_id[raw_id] = frame_index
+                kept.append(player)
+                self.kept += 1
+                continue
+
+            last_inside = self.last_inside_by_raw_id.get(raw_id)
+            if last_inside is not None and frame_index - last_inside <= self.grace_frames:
+                kept.append(player)
+                self.kept += 1
+                continue
+
+            if metric_available:
+                self.rejected_outside_pitch += 1
+            else:
+                self.rejected_non_field_foot += 1
+        return kept
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "engine": "metric_pitch_occupancy_filter_v2",
+            "raw_player_candidates": self.raw_seen,
+            "kept_player_candidates": self.kept,
+            "rejected_outside_pitch": self.rejected_outside_pitch,
+            "rejected_non_field_foot": self.rejected_non_field_foot,
+            "metric_decisions": self.metric_decisions,
+            "visual_fallback_decisions": self.visual_fallback_decisions,
+            "grace_frames": self.grace_frames,
+        }
+
+    def _mask_contains(
+        self,
+        mask: np.ndarray | None,
+        point: tuple[float, float],
+    ) -> bool:
+        if mask is None:
+            return True
+        x = int(round(point[0]))
+        y = int(round(point[1]))
+        if x < 0 or y < 0 or x >= mask.shape[1] or y >= mask.shape[0]:
+            return False
+        radius = max(5, int(round(mask.shape[1] * 0.004)))
+        y1, y2 = max(0, y - radius), min(mask.shape[0], y + radius + 1)
+        x1, x2 = max(0, x - radius), min(mask.shape[1], x + radius + 1)
+        return float(np.mean(mask[y1:y2, x1:x2] > 0)) >= 0.20
 
 
 class TrackIdStabilizer:
@@ -414,6 +508,7 @@ class TrackIdStabilizer:
                     bbox=player.bbox,
                     confidence=player.confidence,
                     raw_track_id=raw_id,
+                    role_name=state.role_name,
                 )
             )
 
@@ -839,6 +934,7 @@ class TrackIdStabilizer:
         stable_id = self.next_stable_id
         self.next_stable_id += 1
         jersey_family = self._jersey_family(jersey_color)
+        role_name = self._normalized_role(player.role_name)
         self.tracks[stable_id] = StableTrackState(
             stable_id=stable_id,
             bbox=player.bbox,
@@ -853,6 +949,8 @@ class TrackIdStabilizer:
             jersey_color=jersey_color,
             jersey_family=jersey_family,
             jersey_family_votes={jersey_family: 1} if jersey_family is not None else {},
+            role_name=role_name,
+            role_votes={role_name: self._role_vote_weight(role_name)},
             bbox_height=self._bbox_height(player.bbox),
             depth_proxy=self._depth_proxy(player.bbox),
             last_reliable_frame=frame_index if appearance_hist is not None else 0,
@@ -926,6 +1024,12 @@ class TrackIdStabilizer:
         state.bbox_height = state.bbox_height * 0.82 + self._bbox_height(player.bbox) * 0.18
         state.hits += 1
         state.consecutive_hits = state.consecutive_hits + 1 if frame_delta <= 2 else 1
+        observed_role = self._normalized_role(player.role_name)
+        state.role_votes[observed_role] = (
+            state.role_votes.get(observed_role, 0.0)
+            + self._role_vote_weight(observed_role)
+        )
+        state.role_name = max(state.role_votes, key=state.role_votes.get)
         if not visual_reliable:
             state.occlusion_hits += 1
         if visual_reliable and appearance_hist is not None:
@@ -976,6 +1080,17 @@ class TrackIdStabilizer:
             and state.reliable_hits >= 2
         )
         self.raw_to_stable[raw_id] = stable_id
+
+    def _normalized_role(self, role_name: str | None) -> str:
+        normalized = str(role_name or "player").lower()
+        if normalized in GOALKEEPER_ALIASES:
+            return "goalkeeper"
+        if normalized in REFEREE_ALIASES:
+            return "referee"
+        return "player"
+
+    def _role_vote_weight(self, role_name: str) -> float:
+        return 2.0 if role_name in {"goalkeeper", "referee"} else 1.0
 
     def _is_compatible(
         self,
@@ -1535,13 +1650,36 @@ class TrackIdStabilizer:
 
 
 class TeamColorClassifier:
-    """Keep two stable kit-color anchors and vote per stable player identity."""
+    """Separate the two outfield kits without letting officials move the anchors."""
 
-    def __init__(self) -> None:
-        self.anchors: dict[int, tuple[int, int, int]] = {}
+    def __init__(
+        self,
+        reference_palettes_bgr: dict[int, list[tuple[int, int, int]]] | None = None,
+        team_labels: dict[int, str] | None = None,
+    ) -> None:
+        self.reference_palettes_bgr = {
+            int(team): list(colors)
+            for team, colors in (reference_palettes_bgr or {}).items()
+            if colors
+        }
+        self.reference_seeded_teams = set(self.reference_palettes_bgr)
+        self.team_labels = {
+            int(team): str(label)
+            for team, label in (team_labels or {}).items()
+            if label
+        }
+        self.anchors: dict[int, tuple[int, int, int]] = {
+            team: colors[0]
+            for team, colors in self.reference_palettes_bgr.items()
+        }
+        self.appearance_anchors: dict[int, np.ndarray] = {}
         self.track_votes: dict[int, dict[int, float]] = {}
+        self.track_confidence: dict[int, float] = {}
         self.observations = 0
         self.anchor_initializations = 0
+        self.ambiguous_observations = 0
+        self.official_tracks: set[int] = set()
+        self.goalkeeper_tracks: set[int] = set()
 
     def update(
         self,
@@ -1549,104 +1687,265 @@ class TeamColorClassifier:
         track_states: dict[int, StableTrackState],
         team_by_track: dict[int, int],
     ) -> None:
-        colors: dict[int, tuple[int, int, int]] = {}
+        samples: dict[int, tuple[tuple[int, int, int], np.ndarray | None]] = {}
+        outfield_track_ids: set[int] = set()
         for player in players:
             state = track_states.get(player.track_id)
             if state is None or state.jersey_color is None:
                 continue
-            colors[player.track_id] = state.jersey_color
+            role_name = str(getattr(state, "role_name", player.role_name or "player"))
+            if role_name == "referee":
+                team_by_track[player.track_id] = 0
+                self.track_confidence[player.track_id] = 1.0
+                self.official_tracks.add(player.track_id)
+                continue
+            if role_name == "goalkeeper":
+                self.goalkeeper_tracks.add(player.track_id)
+            else:
+                outfield_track_ids.add(player.track_id)
+            samples[player.track_id] = (
+                state.jersey_color,
+                getattr(state, "appearance_hist", None),
+            )
             self.observations += 1
 
-        if not colors:
+        if not samples:
             return
-        created_second_anchor = self._ensure_anchors(list(colors.values()))
+        anchor_samples = [
+            samples[track_id]
+            for track_id in outfield_track_ids
+            if track_id in samples
+        ]
+        if not anchor_samples:
+            anchor_samples = list(samples.values())
+        created_second_anchor = self._ensure_anchors(anchor_samples)
         if created_second_anchor:
             self.track_votes.clear()
 
         assignments: dict[int, int] = {}
-        for track_id, color in colors.items():
-            team = self._nearest_team(color)
+        for track_id, (color, appearance) in samples.items():
+            team, confidence = self._nearest_team(color, appearance)
             assignments[track_id] = team
             votes = self.track_votes.setdefault(track_id, {1: 0.0, 2: 0.0})
-            votes[1] *= 0.86
-            votes[2] *= 0.86
-            votes[team] += 1.0
+            votes[1] *= 0.90
+            votes[2] *= 0.90
+            votes[team] += 0.50 + confidence
             team_by_track[track_id] = max(votes, key=votes.get)
+            total_votes = max(votes[1] + votes[2], 1e-6)
+            vote_confidence = abs(votes[1] - votes[2]) / total_votes
+            self.track_confidence[track_id] = round(
+                min(1.0, confidence * 0.55 + vote_confidence * 0.45),
+                4,
+            )
+            if confidence < 0.58:
+                self.ambiguous_observations += 1
 
         if len(self.anchors) == 2:
-            self._update_anchors(colors, assignments)
+            self._update_anchors(
+                samples,
+                assignments,
+                outfield_track_ids,
+            )
 
     def summary(self) -> dict[str, Any]:
         return {
-            "engine": "stable_kit_color_classifier_v2",
+            "engine": "stable_kit_appearance_classifier_v3",
             "kit_anchors_bgr": {
                 str(team): list(color)
                 for team, color in sorted(self.anchors.items())
             },
+            "reference_palettes_bgr": {
+                str(team): [list(color) for color in colors]
+                for team, colors in sorted(self.reference_palettes_bgr.items())
+            },
+            "reference_seeded_teams": sorted(self.reference_seeded_teams),
+            "reference_source": (
+                "stored_kit_images"
+                if self.reference_seeded_teams
+                else "online_appearance_clustering"
+            ),
+            "team_labels": {
+                str(team): label
+                for team, label in sorted(self.team_labels.items())
+            },
+            "appearance_anchor_dimensions": {
+                str(team): int(anchor.size)
+                for team, anchor in sorted(self.appearance_anchors.items())
+            },
             "classified_tracks": len(self.track_votes),
+            "track_confidence": {
+                str(track_id): confidence
+                for track_id, confidence in sorted(self.track_confidence.items())
+            },
             "color_observations": self.observations,
+            "ambiguous_observations": self.ambiguous_observations,
+            "official_tracks": sorted(self.official_tracks),
+            "goalkeeper_tracks": sorted(self.goalkeeper_tracks),
             "anchor_initializations": self.anchor_initializations,
         }
 
-    def _ensure_anchors(self, colors: list[tuple[int, int, int]]) -> bool:
+    def _ensure_anchors(
+        self,
+        samples: list[tuple[tuple[int, int, int], np.ndarray | None]],
+    ) -> bool:
         if not self.anchors:
-            if len(colors) == 1:
-                self.anchors[1] = colors[0]
+            if len(samples) == 1:
+                color, appearance = samples[0]
+                self.anchors[1] = color
+                if appearance is not None:
+                    self.appearance_anchors[1] = appearance.copy()
                 self.anchor_initializations += 1
                 return False
-            best_pair: tuple[tuple[int, int, int], tuple[int, int, int]] | None = None
+            best_pair: tuple[
+                tuple[tuple[int, int, int], np.ndarray | None],
+                tuple[tuple[int, int, int], np.ndarray | None],
+            ] | None = None
             best_distance = -1.0
-            for first_index, first in enumerate(colors):
-                for second in colors[first_index + 1 :]:
-                    distance = self._color_distance(first, second)
+            for first_index, first in enumerate(samples):
+                for second in samples[first_index + 1 :]:
+                    distance = self._sample_distance(first, second)
                     if distance > best_distance:
                         best_distance = distance
                         best_pair = (first, second)
             if best_pair is not None and best_distance >= 0.30:
-                self.anchors = {1: best_pair[0], 2: best_pair[1]}
+                self.anchors = {
+                    1: best_pair[0][0],
+                    2: best_pair[1][0],
+                }
+                for team, sample in ((1, best_pair[0]), (2, best_pair[1])):
+                    if sample[1] is not None:
+                        self.appearance_anchors[team] = sample[1].copy()
                 self.anchor_initializations += 2
                 return True
-            self.anchors[1] = colors[0]
+            color, appearance = samples[0]
+            self.anchors[1] = color
+            if appearance is not None:
+                self.appearance_anchors[1] = appearance.copy()
             self.anchor_initializations += 1
             return False
 
         if len(self.anchors) == 1:
             anchor = self.anchors[1]
-            candidate = max(colors, key=lambda color: self._color_distance(anchor, color))
-            if self._color_distance(anchor, candidate) >= 0.30:
-                self.anchors[2] = candidate
+            anchor_appearance = self.appearance_anchors.get(1)
+            candidate = max(
+                samples,
+                key=lambda sample: self._sample_distance(
+                    (anchor, anchor_appearance),
+                    sample,
+                ),
+            )
+            if self._sample_distance((anchor, anchor_appearance), candidate) >= 0.30:
+                self.anchors[2] = candidate[0]
+                if candidate[1] is not None:
+                    self.appearance_anchors[2] = candidate[1].copy()
                 self.anchor_initializations += 1
                 return True
         return False
 
-    def _nearest_team(self, color: tuple[int, int, int]) -> int:
-        return min(
-            self.anchors,
-            key=lambda team: self._color_distance(color, self.anchors[team]),
+    def _nearest_team(
+        self,
+        color: tuple[int, int, int],
+        appearance: np.ndarray | None,
+    ) -> tuple[int, float]:
+        distances: dict[int, float] = {}
+        for team, anchor in self.anchors.items():
+            reference_colors = self.reference_palettes_bgr.get(team) or [anchor]
+            distances[team] = min(
+                self._sample_distance(
+                    (color, appearance),
+                    (
+                        reference_color,
+                        self.appearance_anchors.get(team),
+                    ),
+                )
+                for reference_color in reference_colors
+            )
+        team = min(distances, key=distances.get)
+        if len(distances) < 2:
+            return team, 0.50
+        ordered = sorted(distances.values())
+        margin = max(0.0, ordered[1] - ordered[0])
+        confidence = max(
+            0.50,
+            min(
+                0.99,
+                0.50
+                + margin * 0.95
+                + max(0.0, 0.22 - ordered[0]) * 0.45,
+            ),
         )
+        return team, confidence
 
     def _update_anchors(
         self,
-        colors: dict[int, tuple[int, int, int]],
+        samples: dict[int, tuple[tuple[int, int, int], np.ndarray | None]],
         assignments: dict[int, int],
+        outfield_track_ids: set[int],
     ) -> None:
         for team in (1, 2):
-            samples = [
-                colors[track_id]
+            team_samples = [
+                samples[track_id]
                 for track_id, assigned_team in assignments.items()
-                if assigned_team == team
+                if assigned_team == team and track_id in outfield_track_ids
             ]
-            if not samples:
+            if not team_samples:
                 continue
-            sample = tuple(
+            sample_color = tuple(
                 int(value)
-                for value in np.median(np.array(samples, dtype=np.float32), axis=0)
+                for value in np.median(
+                    np.array([sample[0] for sample in team_samples], dtype=np.float32),
+                    axis=0,
+                )
             )
             anchor = self.anchors[team]
+            observation_weight = 0.01 if team in self.reference_seeded_teams else 0.03
             self.anchors[team] = tuple(
-                int(round(anchor[index] * 0.97 + sample[index] * 0.03))
+                int(
+                    round(
+                        anchor[index] * (1.0 - observation_weight)
+                        + sample_color[index] * observation_weight
+                    )
+                )
                 for index in range(3)
             )
+            appearance_samples = [
+                sample[1]
+                for sample in team_samples
+                if sample[1] is not None
+            ]
+            if appearance_samples:
+                sample_appearance = np.mean(
+                    np.stack(appearance_samples).astype(np.float32),
+                    axis=0,
+                )
+                norm = float(np.linalg.norm(sample_appearance))
+                if norm > 1e-6:
+                    sample_appearance /= norm
+                    existing = self.appearance_anchors.get(team)
+                    if existing is None:
+                        self.appearance_anchors[team] = sample_appearance
+                    else:
+                        blended = existing * 0.97 + sample_appearance * 0.03
+                        blended_norm = float(np.linalg.norm(blended))
+                        self.appearance_anchors[team] = (
+                            blended / blended_norm
+                            if blended_norm > 1e-6
+                            else blended
+                        )
+
+    def _sample_distance(
+        self,
+        first: tuple[tuple[int, int, int], np.ndarray | None],
+        second: tuple[tuple[int, int, int], np.ndarray | None],
+    ) -> float:
+        color_distance = self._color_distance(first[0], second[0])
+        if first[1] is None or second[1] is None:
+            return color_distance
+        appearance_similarity = float(
+            max(0.0, min(1.0, np.dot(first[1], second[1])))
+        )
+        appearance_distance = 1.0 - appearance_similarity
+        return color_distance * 0.72 + appearance_distance * 0.28
 
     def _color_distance(
         self,
@@ -1700,6 +1999,8 @@ class BallStaticFilter:
         self.filtered_static = 0
         self.suppressed_tentative = 0
         self.pitch_stabilized_observations = 0
+        self.penalty_spot_rejections = 0
+        self.outside_pitch_rejections = 0
 
     def filter(
         self,
@@ -1720,6 +2021,7 @@ class BallStaticFilter:
             width = max(1.0, ball.bbox[2] - ball.bbox[0])
             height = max(1.0, ball.bbox[3] - ball.bbox[1])
             near_player = self._near_player_foot(center, players, frame_width)
+            near_penalty_spot = self._near_known_penalty_spot(pitch_center)
             candidate = self._observe(
                 frame_index=frame_index,
                 image_center=center,
@@ -1727,8 +2029,19 @@ class BallStaticFilter:
                 raw_track_id=ball.raw_track_id,
                 aspect=width / height,
                 frame_width=frame_width,
-                near_player=near_player,
+                near_player=near_player and not near_penalty_spot,
             )
+
+            if pitch_center is None and pitch_transform is not None:
+                self.outside_pitch_rejections += 1
+                continue
+
+            if near_penalty_spot and not candidate.confirmed_moving:
+                candidate.confirmed_static = True
+                candidate.confirmed_moving = False
+                self.penalty_spot_rejections += 1
+                self.filtered_static += 1
+                continue
 
             if near_player:
                 kept.append(ball)
@@ -1765,13 +2078,15 @@ class BallStaticFilter:
 
     def summary(self) -> dict[str, Any]:
         return {
-            "engine": "motion_confirmed_ball_filter_v3",
+            "engine": "metric_static_ball_filter_v4",
             "raw_ball_observations": self.raw_seen,
             "kept_ball_observations": self.kept,
             "filtered_static_candidates": self.filtered_static,
             "suppressed_tentative_observations": self.suppressed_tentative,
             "static_hits_threshold": self.static_hits,
             "pitch_stabilized_observations": self.pitch_stabilized_observations,
+            "penalty_spot_rejections": self.penalty_spot_rejections,
+            "outside_pitch_rejections": self.outside_pitch_rejections,
             "confirmed_static_markers": sum(
                 1 for candidate in self.candidates.values() if candidate.confirmed_static
             ),
@@ -1940,13 +2255,354 @@ class BallStaticFilter:
     def _center(self, bbox: list[float]) -> tuple[float, float]:
         return ((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2)
 
+    def _near_known_penalty_spot(
+        self,
+        pitch_center: tuple[float, float] | None,
+    ) -> bool:
+        if pitch_center is None:
+            return False
+        spots = (
+            (PENALTY_SPOT_DISTANCE_CM, PITCH_WIDTH_CM / 2),
+            (PITCH_LENGTH_CM - PENALTY_SPOT_DISTANCE_CM, PITCH_WIDTH_CM / 2),
+        )
+        return any(
+            float(np.hypot(pitch_center[0] - spot[0], pitch_center[1] - spot[1])) <= 58.0
+            for spot in spots
+        )
+
+
+class BallTrackerV2:
+    """Single-ball alpha-beta/Kalman-style tracker with short occlusion recovery."""
+
+    def __init__(self, max_interpolation_frames: int = 10) -> None:
+        self.max_interpolation_frames = max_interpolation_frames
+        self.position: np.ndarray | None = None
+        self.velocity = np.zeros(2, dtype=np.float64)
+        self.size = np.array([12.0, 12.0], dtype=np.float64)
+        self.last_frame = -1
+        self.last_observed_frame = -1
+        self.pending_position: np.ndarray | None = None
+        self.pending_frame = -1
+        self.confidence = 0.0
+        self.observed_frames = 0
+        self.interpolated_frames = 0
+        self.rejected_gate = 0
+        self.reinitializations = 0
+        self.expired_track_resets = 0
+        self.track_id = 1
+        self.pitch_path: list[dict[str, float | int | bool]] = []
+
+    def update(
+        self,
+        frame_index: int,
+        detections: list[AnalysisObject],
+        players: list[AnalysisObject],
+        frame_width: int,
+        pitch_transform: Any | None = None,
+    ) -> list[AnalysisObject]:
+        self._expire_lost_track(frame_index)
+        predicted = self._predict(frame_index)
+        measurement = self._select_measurement(
+            detections,
+            predicted,
+            players,
+            frame_width,
+        )
+        if measurement is not None:
+            center = self._center(measurement.bbox)
+            measured = np.array(center, dtype=np.float64)
+            if self.position is None:
+                if not self._confirm_initial_measurement(frame_index, measured, frame_width):
+                    return []
+                self.position = measured
+                self.velocity[:] = 0.0
+                self.reinitializations += 1
+            else:
+                delta_frames = max(1, frame_index - self.last_frame)
+                predicted = self.position + self.velocity * delta_frames
+                residual = measured - predicted
+                self.position = predicted + residual * 0.72
+                measured_velocity = residual / delta_frames
+                self.velocity = self.velocity * 0.76 + measured_velocity * 0.24
+            self.size = self.size * 0.80 + np.array(
+                [
+                    max(2.0, measurement.bbox[2] - measurement.bbox[0]),
+                    max(2.0, measurement.bbox[3] - measurement.bbox[1]),
+                ],
+                dtype=np.float64,
+            ) * 0.20
+            self.last_frame = frame_index
+            self.last_observed_frame = frame_index
+            self.confidence = min(0.99, self.confidence * 0.72 + float(measurement.confidence or 0.5) * 0.28 + 0.18)
+            self.observed_frames += 1
+            output = self._object(measurement.raw_track_id, predicted=False)
+            self._record_pitch(frame_index, output, pitch_transform, predicted=False)
+            return [output]
+
+        if self.position is None or self.last_observed_frame < 0:
+            return []
+        gap = frame_index - self.last_observed_frame
+        if gap > self.max_interpolation_frames:
+            self.confidence *= 0.75
+            return []
+        delta_frames = max(1, frame_index - self.last_frame)
+        self.position = self.position + self.velocity * delta_frames
+        self.velocity *= 0.94
+        self.last_frame = frame_index
+        self.confidence *= 0.82
+        if self.confidence < 0.22:
+            return []
+        self.interpolated_frames += 1
+        output = self._object(None, predicted=True)
+        self._record_pitch(frame_index, output, pitch_transform, predicted=True)
+        return [output]
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "engine": "single_ball_kalman_tracker_v2",
+            "track_id": self.track_id,
+            "observed_frames": self.observed_frames,
+            "interpolated_frames": self.interpolated_frames,
+            "rejected_motion_gate": self.rejected_gate,
+            "reinitializations": self.reinitializations,
+            "expired_track_resets": self.expired_track_resets,
+            "current_confidence": round(self.confidence, 4),
+            "max_interpolation_frames": self.max_interpolation_frames,
+            "pitch_samples": len(self.pitch_path),
+        }
+
+    def _predict(self, frame_index: int) -> np.ndarray | None:
+        if self.position is None:
+            return None
+        return self.position + self.velocity * max(1, frame_index - self.last_frame)
+
+    def _expire_lost_track(self, frame_index: int) -> None:
+        if self.position is None or self.last_observed_frame < 0:
+            return
+        if frame_index - self.last_observed_frame <= self.max_interpolation_frames:
+            return
+        self.position = None
+        self.velocity[:] = 0.0
+        self.last_frame = -1
+        self.last_observed_frame = -1
+        self.pending_position = None
+        self.pending_frame = -1
+        self.confidence = 0.0
+        self.expired_track_resets += 1
+
+    def _select_measurement(
+        self,
+        detections: list[AnalysisObject],
+        predicted: np.ndarray | None,
+        players: list[AnalysisObject],
+        frame_width: int,
+    ) -> AnalysisObject | None:
+        plausible = []
+        for detection in detections:
+            width = max(1.0, detection.bbox[2] - detection.bbox[0])
+            height = max(1.0, detection.bbox[3] - detection.bbox[1])
+            aspect = width / height
+            if not 0.48 <= aspect <= 1.62:
+                continue
+            center = np.array(self._center(detection.bbox), dtype=np.float64)
+            proximity_bonus = 0.18 if self._near_player(center, players, frame_width) else 0.0
+            if predicted is None:
+                score = float(detection.confidence or 0.0) + proximity_bonus
+            else:
+                gate = max(55.0, frame_width * 0.045, float(np.linalg.norm(self.velocity)) * 4.0)
+                distance = float(np.linalg.norm(center - predicted))
+                if distance > gate:
+                    self.rejected_gate += 1
+                    continue
+                score = 1.0 - distance / gate + float(detection.confidence or 0.0) * 0.45 + proximity_bonus
+            plausible.append((score, detection))
+        return max(plausible, key=lambda item: item[0])[1] if plausible else None
+
+    def _confirm_initial_measurement(
+        self,
+        frame_index: int,
+        measurement: np.ndarray,
+        frame_width: int,
+    ) -> bool:
+        if self.pending_position is None or frame_index - self.pending_frame > 3:
+            self.pending_position = measurement
+            self.pending_frame = frame_index
+            return False
+        gate = max(40.0, frame_width * 0.025)
+        confirmed = float(np.linalg.norm(measurement - self.pending_position)) <= gate
+        self.pending_position = measurement
+        self.pending_frame = frame_index
+        return confirmed
+
+    def _object(self, raw_track_id: int | None, predicted: bool) -> AnalysisObject:
+        assert self.position is not None
+        half = self.size / 2.0
+        return AnalysisObject(
+            track_id=self.track_id,
+            raw_track_id=raw_track_id,
+            class_name="ball",
+            bbox=[
+                float(self.position[0] - half[0]),
+                float(self.position[1] - half[1]),
+                float(self.position[0] + half[0]),
+                float(self.position[1] + half[1]),
+            ],
+            confidence=round(self.confidence, 4),
+            is_predicted=predicted,
+            role_name="ball",
+        )
+
+    def _record_pitch(
+        self,
+        frame_index: int,
+        ball: AnalysisObject,
+        pitch_transform: Any | None,
+        predicted: bool,
+    ) -> None:
+        if pitch_transform is None:
+            return
+        point = pitch_transform(self._center(ball.bbox))
+        if point is None:
+            return
+        self.pitch_path.append(
+            {
+                "frame": frame_index,
+                "x": round(float(point[0]), 2),
+                "y": round(float(point[1]), 2),
+                "predicted": predicted,
+                "confidence": round(self.confidence, 4),
+            }
+        )
+
+    def _near_player(
+        self,
+        center: np.ndarray,
+        players: list[AnalysisObject],
+        frame_width: int,
+    ) -> bool:
+        threshold = max(42.0, frame_width * 0.026)
+        return any(
+            float(np.linalg.norm(center - np.array(
+                [(player.bbox[0] + player.bbox[2]) / 2, player.bbox[3]],
+                dtype=np.float64,
+            ))) <= threshold
+            for player in players
+        )
+
+    def _center(self, bbox: list[float]) -> tuple[float, float]:
+        return ((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2)
+
+
+class PossessionTracker:
+    def __init__(self, confirmation_frames: int = 3, hold_frames: int = 8) -> None:
+        self.confirmation_frames = confirmation_frames
+        self.hold_frames = hold_frames
+        self.current_player: int | None = None
+        self.current_team: int | None = None
+        self.candidate_player: int | None = None
+        self.candidate_hits = 0
+        self.last_observed_frame = -1
+        self.team_frames: dict[int, int] = {1: 0, 2: 0}
+        self.player_frames: dict[int, int] = {}
+        self.transitions = 0
+        self.unassigned_frames = 0
+
+    def update(
+        self,
+        frame_index: int,
+        players: list[AnalysisObject],
+        balls: list[AnalysisObject],
+        team_by_track: dict[int, int],
+        pitch_transform: Any,
+    ) -> tuple[int | None, int | None]:
+        observed_balls = [ball for ball in balls if not ball.is_predicted]
+        if not observed_balls:
+            if self.current_team is not None and frame_index - self.last_observed_frame <= self.hold_frames:
+                self._count_current()
+                return self.current_player, self.current_team
+            self.unassigned_frames += 1
+            return None, None
+        ball = observed_balls[0]
+        nearest = self._nearest_player(ball, players, pitch_transform)
+        if nearest is None or nearest[0] > 240.0:
+            self.unassigned_frames += 1
+            return self.current_player, self.current_team
+        player = nearest[1]
+        if self.candidate_player == player.track_id:
+            self.candidate_hits += 1
+        else:
+            self.candidate_player = player.track_id
+            self.candidate_hits = 1
+        if self.candidate_hits >= self.confirmation_frames:
+            if self.current_player is not None and self.current_player != player.track_id:
+                self.transitions += 1
+            self.current_player = player.track_id
+            self.current_team = team_by_track.get(player.track_id)
+        self.last_observed_frame = frame_index
+        self._count_current()
+        return self.current_player, self.current_team
+
+    def summary(self) -> dict[str, Any]:
+        total = max(1, sum(self.team_frames.values()))
+        return {
+            "engine": "nearest_player_possession_hysteresis_v1",
+            "team_1_percent": round(self.team_frames[1] * 100 / total, 2),
+            "team_2_percent": round(self.team_frames[2] * 100 / total, 2),
+            "player_frames": {str(key): value for key, value in sorted(self.player_frames.items())},
+            "transitions": self.transitions,
+            "unassigned_frames": self.unassigned_frames,
+            "confirmation_frames": self.confirmation_frames,
+        }
+
+    def _count_current(self) -> None:
+        if self.current_team in self.team_frames:
+            self.team_frames[self.current_team] += 1
+        if self.current_player is not None:
+            self.player_frames[self.current_player] = self.player_frames.get(self.current_player, 0) + 1
+
+    def _nearest_player(
+        self,
+        ball: AnalysisObject,
+        players: list[AnalysisObject],
+        pitch_transform: Any,
+    ) -> tuple[float, AnalysisObject] | None:
+        ball_center = ((ball.bbox[0] + ball.bbox[2]) / 2, (ball.bbox[1] + ball.bbox[3]) / 2)
+        ball_pitch = pitch_transform(ball_center)
+        nearest: tuple[float, AnalysisObject] | None = None
+        for player in players:
+            if player.is_predicted or player.role_name == "referee":
+                continue
+            foot = ((player.bbox[0] + player.bbox[2]) / 2, player.bbox[3])
+            player_pitch = pitch_transform(foot)
+            if ball_pitch is not None and player_pitch is not None:
+                distance = float(np.hypot(player_pitch[0] - ball_pitch[0], player_pitch[1] - ball_pitch[1]))
+            else:
+                player_height = max(1.0, player.bbox[3] - player.bbox[1])
+                distance = float(np.hypot(foot[0] - ball_center[0], foot[1] - ball_center[1]) * 180.0 / player_height)
+            if nearest is None or distance < nearest[0]:
+                nearest = (distance, player)
+        return nearest
+
 
 class PitchRadar:
-    def __init__(self, model: Any | None, stride: int = 12) -> None:
+    def __init__(
+        self,
+        model: Any | None,
+        stride: int = 12,
+        manual_points: list[dict[str, float]] | None = None,
+    ) -> None:
         self.model = model
         self.stride = max(1, stride)
+        self.manual_points = manual_points or []
         self.homography: np.ndarray | None = None
         self.calibration_mode: str | None = None
+        self.calibration_confidence = 0.0
+        self.calibration_source = "unavailable"
+        self.frame_confidence: list[dict[str, Any]] = []
+        self.manual_calibrations = 0
+        self.manual_calibration_rejections = 0
+        self.model_refreshes = 0
+        self.temporal_blends = 0
         self.last_calibrated_frame = -1
         self.attempts = 0
         self.successes = 0
@@ -1988,7 +2644,10 @@ class PitchRadar:
     ) -> None:
         players = players or []
         try:
+            if frame_index == 0 and self.manual_points:
+                self._apply_manual_calibration(frame, frame_index, players)
             self._track_camera_motion(frame, frame_index, players)
+            players = self._visual_pitch_players(frame, players)
             should_calibrate = (
                 frame_index == 0
                 or frame_index % self.stride == 0
@@ -2023,20 +2682,19 @@ class PitchRadar:
                             inliers,
                             "metric_goal_area_geometry",
                             player_ratio,
+                            line_score=line_score,
                         )
                         self.last_line_alignment_score = round(line_score, 4)
                         self.goal_geometry_calibrations += 1
                         return
                     self.goal_geometry_rejections += 1
 
-            if self.homography is not None:
-                return
             if self.model is None or frame_index % self.stride != 0:
                 return
 
             results = self.model.predict(
                 frame,
-                imgsz=settings.YOLO_IMAGE_SIZE,
+                imgsz=max(960, settings.YOLO_IMAGE_SIZE),
                 device=settings.YOLO_DEVICE,
                 verbose=False,
             )
@@ -2060,7 +2718,7 @@ class PitchRadar:
             target = target[:count].astype(np.float32)
             confidence_values = confidence_values[:count]
             visible = (
-                (confidence_values >= 0.42)
+                (confidence_values >= 0.34)
                 & (source[:, 0] > 1)
                 & (source[:, 1] > 1)
             )
@@ -2085,17 +2743,26 @@ class PitchRadar:
                 self.rejected_local_calibrations += 1
                 return
 
-            homography, _ = cv2.findHomography(
+            homography, inlier_mask = cv2.findHomography(
                 source[visible],
                 target[visible],
-                0,
+                cv2.RANSAC,
+                320.0,
             )
             if homography is None or not np.all(np.isfinite(homography)):
                 self.rejected_geometry += 1
                 return
+            inliers = (
+                inlier_mask.reshape(-1).astype(bool)
+                if inlier_mask is not None
+                else np.ones(self.last_visible_keypoints, dtype=bool)
+            )
+            if int(np.count_nonzero(inliers)) < 4:
+                self.rejected_geometry += 1
+                return
             errors = self._reprojection_errors(
-                source[visible],
-                target[visible],
+                source[visible][inliers],
+                target[visible][inliers],
                 homography,
             )
             error = float(np.median(errors))
@@ -2111,7 +2778,7 @@ class PitchRadar:
                 or error > 260.0
                 or p90_error > 480.0
                 or not player_ok
-                or line_score < 0.42
+                or line_score < 0.30
             ):
                 self.rejected_geometry += 1
                 return
@@ -2119,14 +2786,37 @@ class PitchRadar:
                 homography,
                 frame_index,
                 error,
-                self.last_visible_keypoints,
+                int(np.count_nonzero(inliers)),
                 "wide_view_keypoints",
                 player_ratio,
+                line_score=line_score,
             )
             self.last_line_alignment_score = round(line_score, 4)
             self.wide_view_calibrations += 1
+            self.model_refreshes += 1
         except (AttributeError, IndexError, RuntimeError, TypeError, ValueError, cv2.error):
             self.errors += 1
+
+    def _visual_pitch_players(
+        self,
+        frame: np.ndarray,
+        players: list[AnalysisObject],
+    ) -> list[AnalysisObject]:
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        green = cv2.inRange(hsv, (24, 22, 20), (108, 255, 255))
+        height, width = green.shape[:2]
+        accepted: list[AnalysisObject] = []
+        for player in players:
+            foot_x = int(round((player.bbox[0] + player.bbox[2]) / 2))
+            foot_y = int(round(player.bbox[3]))
+            radius = max(5, int(round((player.bbox[2] - player.bbox[0]) * 0.24)))
+            x1, x2 = max(0, foot_x - radius), min(width, foot_x + radius + 1)
+            y1, y2 = max(0, foot_y - radius), min(height, foot_y + radius + 1)
+            if x1 >= x2 or y1 >= y2:
+                continue
+            if float(np.mean(green[y1:y2, x1:x2] > 0)) >= 0.16:
+                accepted.append(player)
+        return accepted
 
     def _accept_homography(
         self,
@@ -2136,14 +2826,99 @@ class PitchRadar:
         inliers: int,
         mode: str,
         player_ratio: float,
+        line_score: float | None = None,
     ) -> None:
-        self.homography = homography / homography[2, 2]
+        candidate = homography / homography[2, 2]
+        if self.homography is not None and mode != "manual_correspondences":
+            candidate = self._temporally_stabilize(candidate, line_score or 0.0)
+        self.homography = candidate
         self.calibration_mode = mode
+        self.calibration_source = "manual" if mode == "manual_correspondences" else "automatic"
         self.last_calibrated_frame = frame_index
         self.last_reprojection_error_cm = round(error, 2)
         self.last_inliers = inliers
         self.last_player_valid_ratio = round(player_ratio, 4)
+        error_score = max(0.0, 1.0 - error / 420.0)
+        inlier_score = min(1.0, inliers / 10.0)
+        line_quality = min(1.0, max(0.0, line_score if line_score is not None else 0.72))
+        self.calibration_confidence = round(
+            min(0.99, 0.34 * error_score + 0.20 * inlier_score + 0.26 * player_ratio + 0.20 * line_quality),
+            4,
+        )
         self.successes += 1
+
+    def _temporally_stabilize(
+        self,
+        candidate: np.ndarray,
+        candidate_line_score: float,
+    ) -> np.ndarray:
+        if self.homography is None:
+            return candidate
+        anchors = np.array(
+            [[0.0, 0.0], [PITCH_LENGTH_CM, 0.0], [PITCH_LENGTH_CM, PITCH_WIDTH_CM], [0.0, PITCH_WIDTH_CM], [PITCH_LENGTH_CM / 2, PITCH_WIDTH_CM / 2]],
+            dtype=np.float32,
+        )
+        try:
+            current_inverse = np.linalg.inv(self.homography)
+            candidate_inverse = np.linalg.inv(candidate)
+            current_image = cv2.perspectiveTransform(anchors.reshape(-1, 1, 2), current_inverse).reshape(-1, 2)
+            candidate_image = cv2.perspectiveTransform(anchors.reshape(-1, 1, 2), candidate_inverse).reshape(-1, 2)
+        except (np.linalg.LinAlgError, cv2.error):
+            return candidate
+        finite = np.all(np.isfinite(current_image), axis=1) & np.all(np.isfinite(candidate_image), axis=1)
+        if int(np.count_nonzero(finite)) < 4:
+            return candidate
+        median_jump = float(np.median(np.linalg.norm(current_image[finite] - candidate_image[finite], axis=1)))
+        if median_jump > 180.0 and candidate_line_score < 0.62:
+            return self.homography
+        alpha = 0.42 if median_jump < 90.0 else 0.72
+        blended_image = current_image[finite] * (1.0 - alpha) + candidate_image[finite] * alpha
+        blended, _ = cv2.findHomography(blended_image.astype(np.float32), anchors[finite], 0)
+        if blended is None or not np.all(np.isfinite(blended)):
+            return candidate
+        self.temporal_blends += 1
+        return blended / blended[2, 2]
+
+    def _apply_manual_calibration(
+        self,
+        frame: np.ndarray,
+        frame_index: int,
+        players: list[AnalysisObject],
+    ) -> None:
+        valid = [
+            point
+            for point in self.manual_points
+            if {"image_x", "image_y", "pitch_x", "pitch_y"}.issubset(point)
+        ]
+        if len(valid) < 4:
+            self.manual_calibration_rejections += 1
+            return
+        source = np.array([[point["image_x"], point["image_y"]] for point in valid], dtype=np.float32)
+        target = np.array([[point["pitch_x"], point["pitch_y"]] for point in valid], dtype=np.float32)
+        if float(cv2.contourArea(cv2.convexHull(source))) < frame.shape[0] * frame.shape[1] * 0.002:
+            self.manual_calibration_rejections += 1
+            return
+        homography, _ = cv2.findHomography(source, target, cv2.RANSAC, 4.0)
+        if homography is None or not np.all(np.isfinite(homography)):
+            self.manual_calibration_rejections += 1
+            return
+        player_ok, player_ratio, _ = self._validate_player_projection(homography, players, end=None)
+        line_score = self._metric_line_alignment_score(frame, homography)
+        if not player_ok or line_score < 0.24:
+            self.manual_calibration_rejections += 1
+            return
+        error = float(np.median(self._reprojection_errors(source, target, homography)))
+        self._accept_homography(
+            homography,
+            frame_index,
+            error,
+            len(valid),
+            "manual_correspondences",
+            player_ratio,
+            line_score=line_score,
+        )
+        self.calibration_confidence = max(self.calibration_confidence, min(0.96, 0.68 + line_score * 0.28))
+        self.manual_calibrations += 1
 
     def _merge_marker_candidates(
         self,
@@ -2183,6 +2958,7 @@ class PitchRadar:
             return
 
         self.camera_tracking_attempts += 1
+        self.calibration_confidence = max(0.0, self.calibration_confidence * 0.996)
         points = cv2.goodFeaturesToTrack(
             previous_gray,
             mask=previous_mask,
@@ -2322,6 +3098,12 @@ class PitchRadar:
         if self.calibration_mode and "+camera_motion" not in self.calibration_mode:
             self.calibration_mode = f"{self.calibration_mode}+camera_motion"
         self.camera_tracking_successes += 1
+        flow_quality = min(1.0, max(0.0, inlier_ratio * (1.0 - reprojection_error / 8.0)))
+        self.calibration_confidence = round(
+            min(0.99, self.calibration_confidence * 0.94 + flow_quality * 0.06),
+            4,
+        )
+        self.calibration_source = "camera_motion"
         self.last_camera_inliers = inlier_count
         self.last_camera_inlier_ratio = round(inlier_ratio, 4)
         self.last_camera_reprojection_error_px = round(reprojection_error, 3)
@@ -2876,18 +3658,63 @@ class PitchRadar:
         line_mask = cv2.bitwise_and(white, green_near)
         line_mask = cv2.dilate(line_mask, np.ones((7, 7), dtype=np.uint8))
 
+        center_x = PITCH_LENGTH_CM / 2
         center_y = PITCH_WIDTH_CM / 2
         penalty_half = PENALTY_AREA_WIDTH_CM / 2
         goal_half = GOAL_AREA_WIDTH_CM / 2
         segments = [
-            ((PITCH_LENGTH_CM, center_y - penalty_half), (PITCH_LENGTH_CM, center_y + penalty_half)),
-            ((PITCH_LENGTH_CM - PENALTY_AREA_LENGTH_CM, center_y - penalty_half), (PITCH_LENGTH_CM - PENALTY_AREA_LENGTH_CM, center_y + penalty_half)),
-            ((PITCH_LENGTH_CM - PENALTY_AREA_LENGTH_CM, center_y - penalty_half), (PITCH_LENGTH_CM, center_y - penalty_half)),
-            ((PITCH_LENGTH_CM - PENALTY_AREA_LENGTH_CM, center_y + penalty_half), (PITCH_LENGTH_CM, center_y + penalty_half)),
-            ((PITCH_LENGTH_CM - GOAL_AREA_LENGTH_CM, center_y - goal_half), (PITCH_LENGTH_CM - GOAL_AREA_LENGTH_CM, center_y + goal_half)),
-            ((PITCH_LENGTH_CM - GOAL_AREA_LENGTH_CM, center_y - goal_half), (PITCH_LENGTH_CM, center_y - goal_half)),
-            ((PITCH_LENGTH_CM - GOAL_AREA_LENGTH_CM, center_y + goal_half), (PITCH_LENGTH_CM, center_y + goal_half)),
+            ((0.0, 0.0), (PITCH_LENGTH_CM, 0.0)),
+            ((0.0, PITCH_WIDTH_CM), (PITCH_LENGTH_CM, PITCH_WIDTH_CM)),
+            ((0.0, 0.0), (0.0, PITCH_WIDTH_CM)),
+            ((PITCH_LENGTH_CM, 0.0), (PITCH_LENGTH_CM, PITCH_WIDTH_CM)),
+            ((center_x, 0.0), (center_x, PITCH_WIDTH_CM)),
         ]
+        for end_x, direction in ((0.0, 1.0), (PITCH_LENGTH_CM, -1.0)):
+            penalty_x = end_x + direction * PENALTY_AREA_LENGTH_CM
+            goal_x = end_x + direction * GOAL_AREA_LENGTH_CM
+            segments.extend(
+                [
+                    ((penalty_x, center_y - penalty_half), (penalty_x, center_y + penalty_half)),
+                    ((end_x, center_y - penalty_half), (penalty_x, center_y - penalty_half)),
+                    ((end_x, center_y + penalty_half), (penalty_x, center_y + penalty_half)),
+                    ((goal_x, center_y - goal_half), (goal_x, center_y + goal_half)),
+                    ((end_x, center_y - goal_half), (goal_x, center_y - goal_half)),
+                    ((end_x, center_y + goal_half), (goal_x, center_y + goal_half)),
+                ]
+            )
+        circle = [
+            (
+                center_x + CENTER_CIRCLE_RADIUS_CM * np.cos(angle),
+                center_y + CENTER_CIRCLE_RADIUS_CM * np.sin(angle),
+            )
+            for angle in np.linspace(0.0, 2.0 * np.pi, 17)
+        ]
+        segments.extend(zip(circle[:-1], circle[1:]))
+        penalty_arc_angle = float(np.arccos(
+            (PENALTY_AREA_LENGTH_CM - PENALTY_SPOT_DISTANCE_CM)
+            / CENTER_CIRCLE_RADIUS_CM
+        ))
+        left_arc = [
+            (
+                PENALTY_SPOT_DISTANCE_CM + CENTER_CIRCLE_RADIUS_CM * np.cos(angle),
+                center_y + CENTER_CIRCLE_RADIUS_CM * np.sin(angle),
+            )
+            for angle in np.linspace(-penalty_arc_angle, penalty_arc_angle, 9)
+        ]
+        right_arc = [
+            (
+                PITCH_LENGTH_CM - PENALTY_SPOT_DISTANCE_CM
+                + CENTER_CIRCLE_RADIUS_CM * np.cos(angle),
+                center_y + CENTER_CIRCLE_RADIUS_CM * np.sin(angle),
+            )
+            for angle in np.linspace(
+                np.pi - penalty_arc_angle,
+                np.pi + penalty_arc_angle,
+                9,
+            )
+        ]
+        segments.extend(zip(left_arc[:-1], left_arc[1:]))
+        segments.extend(zip(right_arc[:-1], right_arc[1:]))
         scores: list[float] = []
         for first, second in segments:
             pitch_points = np.linspace(first, second, 100).astype(np.float32)
@@ -2914,7 +3741,7 @@ class PitchRadar:
         if len(scores) < 3:
             return 0.0
         scores.sort(reverse=True)
-        return float(np.mean(scores[: min(5, len(scores))]))
+        return float(np.mean(scores[: min(7, len(scores))]))
 
     def _geometry_agrees_with_current(
         self,
@@ -3403,7 +4230,7 @@ class PitchRadar:
         team_by_track: dict[int, int],
     ) -> None:
         if (
-            self.homography is None
+            not self.is_reliable()
             or self.last_calibrated_frame < 0
             or frame_index - self.last_calibrated_frame > self.stride * 3
         ):
@@ -3455,6 +4282,35 @@ class PitchRadar:
         cv2.rectangle(radar, pitch_point(PITCH_LENGTH_CM - GOAL_AREA_LENGTH_CM, goal_y1), pitch_point(PITCH_LENGTH_CM, goal_y2), line_color, thickness)
         cv2.circle(radar, pitch_point(PENALTY_SPOT_DISTANCE_CM, PITCH_WIDTH_CM / 2), max(2, thickness + 1), line_color, cv2.FILLED)
         cv2.circle(radar, pitch_point(PITCH_LENGTH_CM - PENALTY_SPOT_DISTANCE_CM, PITCH_WIDTH_CM / 2), max(2, thickness + 1), line_color, cv2.FILLED)
+        penalty_arc_angle = float(np.arccos(
+            (PENALTY_AREA_LENGTH_CM - PENALTY_SPOT_DISTANCE_CM)
+            / CENTER_CIRCLE_RADIUS_CM
+        ))
+        for penalty_x, angles in (
+            (
+                PENALTY_SPOT_DISTANCE_CM,
+                np.linspace(-penalty_arc_angle, penalty_arc_angle, 28),
+            ),
+            (
+                PITCH_LENGTH_CM - PENALTY_SPOT_DISTANCE_CM,
+                np.linspace(
+                    np.pi - penalty_arc_angle,
+                    np.pi + penalty_arc_angle,
+                    28,
+                ),
+            ),
+        ):
+            arc = np.array(
+                [
+                    pitch_point(
+                        penalty_x + CENTER_CIRCLE_RADIUS_CM * np.cos(angle),
+                        PITCH_WIDTH_CM / 2 + CENTER_CIRCLE_RADIUS_CM * np.sin(angle),
+                    )
+                    for angle in angles
+                ],
+                dtype=np.int32,
+            )
+            cv2.polylines(radar, [arc], False, line_color, thickness, cv2.LINE_AA)
 
         for player in players:
             pitch_xy = self.transform_point(
@@ -3505,12 +4361,28 @@ class PitchRadar:
         self.rendered_frames += 1
 
     def summary(self) -> dict[str, Any]:
+        confidence_values = [float(item["confidence"]) for item in self.frame_confidence]
         return {
-            "engine": "metric_pitch_geometry_radar_v3",
+            "engine": "pitch_calibration_v2",
             "model_available": self.model is not None,
+            "model_image_size": max(960, settings.YOLO_IMAGE_SIZE),
             "calibration_mode": self.calibration_mode,
+            "calibration_source": self.calibration_source,
+            "confidence": {
+                "current": round(self.calibration_confidence, 4),
+                "average": round(float(np.mean(confidence_values)), 4) if confidence_values else 0.0,
+                "minimum": round(float(np.min(confidence_values)), 4) if confidence_values else 0.0,
+                "reliable_frames": sum(1 for value in confidence_values if value >= 0.58),
+                "total_frames": len(confidence_values),
+                "threshold": 0.58,
+                "per_frame": self.frame_confidence,
+            },
             "calibration_attempts": self.attempts,
             "successful_calibrations": self.successes,
+            "manual_calibrations": self.manual_calibrations,
+            "manual_calibration_rejections": self.manual_calibration_rejections,
+            "model_refreshes": self.model_refreshes,
+            "temporal_blends": self.temporal_blends,
             "assisted_calibrations": self.assisted_calibrations,
             "wide_view_calibrations": self.wide_view_calibrations,
             "rejected_local_calibrations": self.rejected_local_calibrations,
@@ -3550,13 +4422,86 @@ class PitchRadar:
                 "goal_area_width_cm": GOAL_AREA_WIDTH_CM,
                 "goal_width_cm": GOAL_WIDTH_CM,
                 "penalty_spot_distance_cm": PENALTY_SPOT_DISTANCE_CM,
+                "penalty_arc_radius_cm": CENTER_CIRCLE_RADIUS_CM,
+                "center_circle_radius_cm": CENTER_CIRCLE_RADIUS_CM,
             },
             "projection_model": "planar_homography_with_camera_motion_compensation",
             "ground_plane_3d": {"z_cm": 0.0},
             "errors": self.errors,
         }
 
-    def transform_point(self, point: tuple[float, float]) -> tuple[float, float] | None:
+    def record_frame_confidence(self, frame_index: int) -> None:
+        if self.homography is None:
+            self.calibration_confidence = 0.0
+            self.calibration_source = "unavailable"
+        elif self.last_calibrated_frame >= 0:
+            stale = max(0, frame_index - self.last_calibrated_frame)
+            if stale > self.stride * 2:
+                self.calibration_confidence = max(
+                    0.0,
+                    self.calibration_confidence * (0.985 ** (stale - self.stride * 2)),
+                )
+        self.frame_confidence.append(
+            {
+                "frame": frame_index,
+                "confidence": round(self.calibration_confidence, 4),
+                "source": self.calibration_source,
+                "reliable": self.is_reliable(),
+            }
+        )
+
+    def is_reliable(self, threshold: float = 0.58) -> bool:
+        return self.homography is not None and self.calibration_confidence >= threshold
+
+    def contains_image_point(
+        self,
+        point: tuple[float, float],
+        margin_cm: float = 0.0,
+    ) -> bool:
+        transformed = self._raw_transform(point)
+        if transformed is None:
+            return False
+        return (
+            -margin_cm <= transformed[0] <= PITCH_LENGTH_CM + margin_cm
+            and -margin_cm <= transformed[1] <= PITCH_WIDTH_CM + margin_cm
+        )
+
+    def playing_surface_mask(self, frame: np.ndarray) -> np.ndarray | None:
+        frame_height, frame_width = frame.shape[:2]
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        green = cv2.inRange(hsv, (24, 24, 22), (108, 255, 255))
+        green = cv2.morphologyEx(
+            green,
+            cv2.MORPH_CLOSE,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (21, 21)),
+        )
+        green = cv2.dilate(green, np.ones((9, 9), dtype=np.uint8))
+        if self.homography is None or not self.is_reliable(0.52):
+            component_count, labels, stats, _ = cv2.connectedComponentsWithStats(green, 8)
+            if component_count <= 1:
+                return green
+            min_area = frame_height * frame_width * 0.025
+            valid_labels = [index for index in range(1, component_count) if stats[index, cv2.CC_STAT_AREA] >= min_area]
+            if not valid_labels:
+                return green
+            return np.where(np.isin(labels, valid_labels), 255, 0).astype(np.uint8)
+
+        inverse = self.pitch_to_video_matrix(require_reliable=False)
+        if inverse is None:
+            return green
+        pitch_boundary = np.array(
+            [[0.0, 0.0], [PITCH_LENGTH_CM, 0.0], [PITCH_LENGTH_CM, PITCH_WIDTH_CM], [0.0, PITCH_WIDTH_CM]],
+            dtype=np.float32,
+        )
+        projected = cv2.perspectiveTransform(pitch_boundary.reshape(-1, 1, 2), inverse).reshape(-1, 2)
+        if not np.all(np.isfinite(projected)):
+            return green
+        polygon = np.zeros((frame_height, frame_width), dtype=np.uint8)
+        cv2.fillConvexPoly(polygon, np.rint(projected).astype(np.int32), 255)
+        line_tolerance = cv2.dilate(green, np.ones((15, 15), dtype=np.uint8))
+        return cv2.bitwise_and(polygon, line_tolerance)
+
+    def _raw_transform(self, point: tuple[float, float]) -> tuple[float, float] | None:
         if self.homography is None:
             return None
         transformed = cv2.perspectiveTransform(
@@ -3566,6 +4511,19 @@ class PitchRadar:
         x_cm, y_cm = float(transformed[0]), float(transformed[1])
         if not np.isfinite(x_cm) or not np.isfinite(y_cm):
             return None
+        return x_cm, y_cm
+
+    def transform_point(
+        self,
+        point: tuple[float, float],
+        require_reliable: bool = True,
+    ) -> tuple[float, float] | None:
+        if require_reliable and not self.is_reliable():
+            return None
+        transformed = self._raw_transform(point)
+        if transformed is None:
+            return None
+        x_cm, y_cm = transformed
         if x_cm < -250 or x_cm > PITCH_LENGTH_CM + 250:
             return None
         if y_cm < -250 or y_cm > PITCH_WIDTH_CM + 250:
@@ -3575,9 +4533,9 @@ class PitchRadar:
             min(PITCH_WIDTH_CM, max(0.0, y_cm)),
         )
 
-    def pitch_to_video_matrix(self) -> np.ndarray | None:
+    def pitch_to_video_matrix(self, require_reliable: bool = True) -> np.ndarray | None:
         """Return the current metric-pitch to source-video projection."""
-        if self.homography is None:
+        if self.homography is None or (require_reliable and not self.is_reliable()):
             return None
         try:
             inverse = np.linalg.inv(self.homography)
@@ -3650,11 +4608,48 @@ class MatchAnalysisPlusRunner:
     }
 
     def __init__(self) -> None:
-        self.model = None
+        self.models: dict[str, Any] = {}
         self.pitch_model = None
-        self.model_path = self._resolve_model_path()
-        self.pitch_model_path = self._resolve_asset_path(settings.MATCH_ANALYSIS_PITCH_MODEL_PATH)
+        self.general_model_path = self._resolve_asset_path(settings.YOLO_MODEL_PATH) or Path(
+            settings.YOLO_MODEL_PATH
+        )
+        self.specialized_model_path = self._resolve_asset_path(
+            settings.MATCH_ANALYSIS_PLAYER_MODEL_PATH
+        )
+        self.legacy_specialized_model_path = self._resolve_asset_path(
+            settings.MATCH_ANALYSIS_PLAYER_MODEL_FALLBACK_PATH
+        )
+        self.model_path = self.specialized_model_path or self.general_model_path
+        self.ball_model_path = (
+            self._resolve_asset_path(settings.MATCH_ANALYSIS_BALL_MODEL_PATH)
+            or self._resolve_asset_path(
+                settings.MATCH_ANALYSIS_BALL_MODEL_FALLBACK_PATH
+            )
+        )
+        self.pitch_model_path = None
+        self.pitch_model_candidates = self._unique_model_paths(
+            [
+                (
+                    "pitch_v2",
+                    self._resolve_asset_path(settings.MATCH_ANALYSIS_PITCH_MODEL_PATH),
+                ),
+                (
+                    "pitch_v1_fallback",
+                    self._resolve_asset_path(
+                        settings.MATCH_ANALYSIS_PITCH_MODEL_FALLBACK_PATH
+                    ),
+                ),
+            ]
+        )
         self.model_mode = "unloaded"
+        self.active_image_size = max(640, settings.MATCH_ANALYSIS_IMAGE_SIZE)
+        self.model_selection: dict[str, Any] = {}
+        self.pitch_model_selection: dict[str, Any] = {
+            "strategy": "unavailable",
+            "selected": None,
+            "candidates": {},
+        }
+        self.ball_detection_mode = "shared_detector"
 
     def run(
         self,
@@ -3665,6 +4660,9 @@ class MatchAnalysisPlusRunner:
         artifact_prefix: str,
         mode: str = "FULL_ANALYSIS",
         max_frames: int = 450,
+        start_frame: int = 0,
+        calibration_points: list[dict[str, float]] | None = None,
+        team_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         requested_mode = (mode or "FULL_ANALYSIS").upper()
         if requested_mode not in self.supported_modes:
@@ -3691,6 +4689,9 @@ class MatchAnalysisPlusRunner:
                 quality_predictions_path=quality_predictions_path,
                 mode=normalized_mode,
                 max_frames=max_frames,
+                start_frame=max(0, start_frame),
+                calibration_points=calibration_points or [],
+                team_context=team_context or {},
             )
 
             visual_layers_payload = summary.pop("_visual_layers_payload", None)
@@ -3773,11 +4774,11 @@ class MatchAnalysisPlusRunner:
         quality_predictions_path: Path,
         mode: str,
         max_frames: int,
+        start_frame: int,
+        calibration_points: list[dict[str, float]],
+        team_context: dict[str, Any],
     ) -> dict[str, Any]:
         start = perf_counter()
-        model = self._load_model()
-        self._reset_tracker_state(model)
-        pitch_model = self._load_pitch_model()
         capture = cv2.VideoCapture(str(input_path))
         if not capture.isOpened():
             raise ValueError("Could not open uploaded video for match analysis")
@@ -3785,6 +4786,29 @@ class MatchAnalysisPlusRunner:
         fps = capture.get(cv2.CAP_PROP_FPS) or 24.0
         width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 1280)
         height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 720)
+        source_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        requested_start_frame = max(0, start_frame)
+        if source_frames > 0:
+            requested_start_frame = min(requested_start_frame, max(0, source_frames - 1))
+        if requested_start_frame:
+            capture.set(cv2.CAP_PROP_POS_FRAMES, requested_start_frame)
+        actual_start_frame = int(capture.get(cv2.CAP_PROP_POS_FRAMES) or requested_start_frame)
+        model = self._select_model_for_video(capture, actual_start_frame)
+        pitch_model = self._select_pitch_model_for_video(
+            capture,
+            actual_start_frame,
+            source_frames,
+        )
+        self._reset_tracker_state(model)
+        dedicated_ball_model = None
+        if (
+            self.ball_model_path is not None
+            and str(self.ball_model_path) != str(self.model_path)
+        ):
+            dedicated_ball_model = self._load_model(self.ball_model_path)
+            self.ball_detection_mode = "dedicated_football_model_every_2_frames"
+        else:
+            self.ball_detection_mode = "shared_football_detector"
         writer = cv2.VideoWriter(
             str(raw_output_path),
             cv2.VideoWriter_fourcc(*"MJPG"),
@@ -3808,20 +4832,34 @@ class MatchAnalysisPlusRunner:
         tracker_runtime: dict[str, Any] = {}
         ball_control: list[int] = []
         class_counts: dict[str, int] = {}
+        participant_role_counts: dict[str, int] = {}
         confidence_values: list[float] = []
         player_filter = PlayerValidityFilter()
+        pitch_occupancy_filter = PitchOccupancyFilter()
         track_stabilizer = TrackIdStabilizer()
-        team_classifier = TeamColorClassifier()
+        kit_reference_config = self._load_kit_reference_config(
+            team_context,
+        )
+        team_classifier = TeamColorClassifier(
+            reference_palettes_bgr=kit_reference_config["palettes"],
+            team_labels=kit_reference_config["team_labels"],
+        )
         ball_filter = BallStaticFilter()
-        radar = PitchRadar(pitch_model, settings.MATCH_ANALYSIS_RADAR_STRIDE)
+        ball_tracker = BallTrackerV2()
+        possession_tracker = PossessionTracker()
+        radar = PitchRadar(
+            pitch_model,
+            settings.MATCH_ANALYSIS_RADAR_STRIDE,
+            manual_points=calibration_points,
+        )
         frames_processed = 0
         detections_count = 0
         raw_detections_count = 0
-        source_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        available_source_frames = max(0, source_frames - actual_start_frame) if source_frames else 0
         expected_frames = (
-            min(source_frames, max_frames)
-            if source_frames > 0 and max_frames > 0
-            else max(source_frames, max_frames)
+            min(available_source_frames, max_frames)
+            if available_source_frames > 0 and max_frames > 0
+            else max(available_source_frames, max_frames)
         )
         quality_review_interval = max(
             1,
@@ -3837,28 +4875,51 @@ class MatchAnalysisPlusRunner:
             if not ok:
                 break
 
-            raw_objects = self._detect_and_track(model, frame, mode)
+            raw_objects = self._detect_and_track(
+                model,
+                frame,
+                mode,
+                include_ball=dedicated_ball_model is None,
+            )
+            if dedicated_ball_model is not None and frames_processed % 2 == 0:
+                raw_objects.extend(self._detect_dedicated_balls(dedicated_ball_model, frame))
             if not tracker_runtime:
                 tracker_runtime = self._tracker_runtime_diagnostics(model)
             raw_detections_count += len(raw_objects)
-            raw_players = player_filter.filter(
+            shape_valid_players = player_filter.filter(
                 [item for item in raw_objects if item.class_name == "player"],
                 frame,
+                specialized_detector=self.model_mode == "football-specialized-yolo",
             )
             raw_balls = [item for item in raw_objects if item.class_name == "ball"]
+            radar.update(
+                frame,
+                frames_processed,
+                players=shape_valid_players,
+                static_markers=ball_filter.static_marker_centers(frames_processed),
+            )
+            radar.record_frame_confidence(frames_processed)
+            raw_players = pitch_occupancy_filter.filter(
+                frames_processed,
+                shape_valid_players,
+                frame,
+                radar,
+            )
             players = track_stabilizer.update(frames_processed, raw_players, frame)
-            balls = ball_filter.filter(
+            reliable_pitch_transform = radar.transform_point if radar.is_reliable() else None
+            filtered_balls = ball_filter.filter(
                 frames_processed,
                 raw_balls,
                 players,
                 width,
-                pitch_transform=radar.transform_point,
+                pitch_transform=reliable_pitch_transform,
             )
-            radar.update(
-                frame,
+            balls = ball_tracker.update(
                 frames_processed,
-                players=players,
-                static_markers=ball_filter.static_marker_centers(frames_processed),
+                filtered_balls,
+                players,
+                width,
+                pitch_transform=reliable_pitch_transform,
             )
             self._record_pitch_projection(
                 frame_index=frames_processed,
@@ -3871,6 +4932,10 @@ class MatchAnalysisPlusRunner:
             detections_count += len(detected_objects)
             for item in detected_objects:
                 class_counts[item.class_name] = class_counts.get(item.class_name, 0) + 1
+                if item.class_name == "player":
+                    participant_role_counts[item.role_name] = (
+                        participant_role_counts.get(item.role_name, 0) + 1
+                    )
                 if item.confidence is not None:
                     confidence_values.append(item.confidence)
 
@@ -3898,11 +4963,11 @@ class MatchAnalysisPlusRunner:
                 track_video_samples=track_video_samples,
                 track_pitch_samples=track_pitch_samples,
             )
-            current_control = self._ball_control(
+            _, current_control = possession_tracker.update(
+                frames_processed,
                 players,
                 balls,
                 team_by_track,
-                ball_control,
                 pitch_transform=radar.transform_point,
             )
             if current_control is not None:
@@ -3930,6 +4995,14 @@ class MatchAnalysisPlusRunner:
                 cv2.imwrite(str(thumbnail_path), annotated)
             writer.write(annotated)
             frames_processed += 1
+            if frames_processed == 1 or frames_processed % 50 == 0:
+                elapsed_seconds = max(perf_counter() - start, 0.001)
+                print(
+                    "Match Analysis + progress "
+                    f"{frames_processed}/{expected_frames or '?'} frames "
+                    f"({frames_processed / elapsed_seconds:.3f} FPS)",
+                    flush=True,
+                )
 
         quality_predictions_file.close()
         capture.release()
@@ -3939,10 +5012,13 @@ class MatchAnalysisPlusRunner:
         output_codec = self._transcode_for_browser(raw_output_path, output_path)
 
         tracks: list[dict[str, Any]] = []
+        track_role_counts: dict[str, int] = {}
         for track_id in sorted(track_frames):
             state = track_stabilizer.tracks.get(track_id)
             video_samples = track_video_samples.get(track_id, [])
             pitch_samples = track_pitch_samples.get(track_id, [])
+            stable_role = state.role_name if state is not None else "player"
+            track_role_counts[stable_role] = track_role_counts.get(stable_role, 0) + 1
             tracks.append(
                 {
                     "track_id": track_id,
@@ -4006,10 +5082,19 @@ class MatchAnalysisPlusRunner:
                     "jersey_color_hsv": list(track_stabilizer._bgr_to_hsv(state.jersey_color))
                     if state is not None and state.jersey_color is not None
                     else None,
+                    "role_name": stable_role,
+                    "role_confidence": round(
+                        max(state.role_votes.values()) / max(sum(state.role_votes.values()), 1e-6),
+                        4,
+                    )
+                    if state is not None and state.role_votes
+                    else 0.0,
+                    "role_votes": dict(state.role_votes) if state is not None else {},
+                    "team_confidence": team_classifier.track_confidence.get(track_id, 0.0),
                 }
             )
-        team_1 = sum(1 for item in ball_control if item == 1)
-        team_2 = sum(1 for item in ball_control if item == 2)
+        team_1 = possession_tracker.team_frames[1]
+        team_2 = possession_tracker.team_frames[2]
         total_control = max(team_1 + team_2, 1)
         elapsed_ms = round((perf_counter() - start) * 1000, 2)
         processing_fps = round(frames_processed / max(elapsed_ms / 1000, 0.001), 3)
@@ -4034,7 +5119,14 @@ class MatchAnalysisPlusRunner:
             track_pitch_samples=track_pitch_samples,
             pitch_to_video_samples=pitch_to_video_samples,
             team_by_track=team_by_track,
+            role_by_track={
+                int(track["track_id"]): str(track["role_name"])
+                for track in tracks
+            },
+            team_confidence_by_track=team_classifier.track_confidence,
             quality_by_track=quality_by_track,
+            pitch_confidence_samples=radar.frame_confidence,
+            ball_pitch_path=ball_tracker.pitch_path,
         )
 
         return {
@@ -4042,18 +5134,26 @@ class MatchAnalysisPlusRunner:
             "engine": "match_analysis_plus",
             "model": str(self.model_path),
             "model_mode": self.model_mode,
+            "model_selection": self.model_selection,
+            "ball_model": str(self.ball_model_path or self.model_path),
+            "ball_detection_mode": self.ball_detection_mode,
             "pitch_model": str(self.pitch_model_path) if self.pitch_model_path is not None else None,
+            "pitch_model_selection": self.pitch_model_selection,
             "tracker": settings.MATCH_ANALYSIS_TRACKER,
             "output_codec": output_codec,
             "output_content_type": "video/mp4",
             "frames_processed": frames_processed,
             "max_frames": max_frames,
+            "source_start_frame": actual_start_frame,
+            "source_end_frame": actual_start_frame + frames_processed - 1,
             "fps": round(float(fps), 3),
             "processing_fps": processing_fps,
             "resolution": [width, height],
             "detections_count": detections_count,
             "raw_detections_count": raw_detections_count,
             "class_counts": class_counts,
+            "participant_role_counts": participant_role_counts,
+            "track_role_counts": track_role_counts,
             "confidence": {
                 "avg": round(float(np.mean(confidence_values)), 4) if confidence_values else None,
                 "min": round(float(np.min(confidence_values)), 4) if confidence_values else None,
@@ -4062,16 +5162,22 @@ class MatchAnalysisPlusRunner:
             "tracks_count": len(tracks),
             "raw_tracks_count": len(track_stabilizer.raw_ids_seen),
             "player_filter": player_filter.summary(),
+            "pitch_occupancy_filter": pitch_occupancy_filter.summary(),
             "team_classifier": team_classifier.summary(),
+            "kit_references": kit_reference_config["summary"],
             "id_stabilizer": track_stabilizer.summary(),
             "tracking_quality": tracking_quality,
-            "ball_filter": ball_filter.summary(),
+            "ball_filter": {
+                **ball_filter.summary(),
+                "tracker": ball_tracker.summary(),
+            },
             "radar": radar.summary(),
             "metric_tracking": {
                 "coordinate_system": "pitch_centimeters",
                 "ground_plane_z_cm": 0.0,
                 "trajectory_sample_rate_hz": VISUAL_LAYER_SAMPLE_RATE_HZ,
-                "heatmap_ready": radar.homography is not None,
+                "heatmap_ready": any(item["reliable"] for item in radar.frame_confidence),
+                "reliable_frames": sum(1 for item in radar.frame_confidence if item["reliable"]),
             },
             "tracks": tracks[:250],
             "_visual_layers_payload": visual_layers_payload,
@@ -4079,6 +5185,7 @@ class MatchAnalysisPlusRunner:
                 "team_1_percent": round(team_1 * 100 / total_control, 2),
                 "team_2_percent": round(team_2 * 100 / total_control, 2),
             },
+            "possession": possession_tracker.summary(),
             "notes": [
                 "sports-main source is vendored in apps/match-analysis-worker/sports-main",
                 "every run executes player, ball, tracking, team classification, and pitch radar analysis",
@@ -4194,13 +5301,19 @@ class MatchAnalysisPlusRunner:
         if predictor is not None and hasattr(predictor, "vid_path"):
             predictor.vid_path = [None for _ in getattr(predictor, "vid_path", [None])]
 
-    def _detect_and_track(self, model: Any, frame: np.ndarray, mode: str) -> list[AnalysisObject]:
-        classes = self._target_class_ids(model)
+    def _detect_and_track(
+        self,
+        model: Any,
+        frame: np.ndarray,
+        mode: str,
+        include_ball: bool = True,
+    ) -> list[AnalysisObject]:
+        classes = self._target_class_ids(model, include_ball=include_ball)
         results = model.track(
             frame,
             persist=True,
-            conf=max(settings.YOLO_CONFIDENCE, 0.25),
-            imgsz=settings.YOLO_IMAGE_SIZE,
+            conf=max(0.05, settings.MATCH_ANALYSIS_CONFIDENCE),
+            imgsz=self.active_image_size,
             device=settings.YOLO_DEVICE,
             max_det=settings.YOLO_MAX_DETECTIONS,
             verbose=False,
@@ -4234,9 +5347,52 @@ class MatchAnalysisPlusRunner:
                     bbox=[float(value) for value in bbox.tolist()],
                     confidence=float(conf[index]) if conf[index] is not None else None,
                     raw_track_id=int(ids[index]),
+                    role_name=self._map_role_name(raw_name),
                 )
             )
         return objects
+
+    def _detect_dedicated_balls(self, model: Any, frame: np.ndarray) -> list[AnalysisObject]:
+        classes = self._target_class_ids(
+            model,
+            include_players=False,
+            include_ball=True,
+        )
+        if not classes:
+            return []
+        results = model.predict(
+            frame,
+            conf=max(0.08, settings.MATCH_ANALYSIS_CONFIDENCE * 0.65),
+            imgsz=max(640, settings.MATCH_ANALYSIS_IMAGE_SIZE),
+            device=settings.YOLO_DEVICE,
+            max_det=12,
+            verbose=False,
+            classes=classes,
+        )
+        if not results or results[0].boxes is None:
+            return []
+        result = results[0]
+        names = result.names or {}
+        boxes = result.boxes
+        xyxy = boxes.xyxy.cpu().numpy() if boxes.xyxy is not None else np.empty((0, 4))
+        class_ids = boxes.cls.cpu().numpy() if boxes.cls is not None else np.empty(0)
+        confidences = boxes.conf.cpu().numpy() if boxes.conf is not None else np.zeros(len(xyxy))
+        balls: list[AnalysisObject] = []
+        for index, bbox in enumerate(xyxy):
+            raw_name = str(names.get(int(class_ids[index]), int(class_ids[index]))).lower()
+            if raw_name not in BALL_ALIASES:
+                continue
+            balls.append(
+                AnalysisObject(
+                    track_id=index + 1,
+                    class_name="ball",
+                    bbox=[float(value) for value in bbox.tolist()],
+                    confidence=float(confidences[index]),
+                    raw_track_id=None,
+                    role_name="ball",
+                )
+            )
+        return balls
 
     def _update_movement(
         self,
@@ -4330,9 +5486,15 @@ class MatchAnalysisPlusRunner:
         track_pitch_samples: dict[int, list[dict[str, float | int]]],
         pitch_to_video_samples: list[list[float | int]],
         team_by_track: dict[int, int],
+        role_by_track: dict[int, str] | None = None,
+        team_confidence_by_track: dict[int, float] | None = None,
         quality_by_track: dict[int, dict[str, Any]] | None = None,
+        pitch_confidence_samples: list[dict[str, Any]] | None = None,
+        ball_pitch_path: list[dict[str, float | int | bool]] | None = None,
     ) -> dict[str, Any]:
         quality_by_track = quality_by_track or {}
+        role_by_track = role_by_track or {}
+        team_confidence_by_track = team_confidence_by_track or {}
         visual_tracks: list[dict[str, Any]] = []
         for track_id in sorted(track_frames):
             video_path = track_video_samples.get(track_id, [])
@@ -4350,6 +5512,8 @@ class MatchAnalysisPlusRunner:
                 {
                     "track_id": track_id,
                     "team": team_by_track.get(track_id),
+                    "role_name": role_by_track.get(track_id, "player"),
+                    "team_confidence": team_confidence_by_track.get(track_id),
                     "color": self._track_visual_color(track_id),
                     "frames": track_frames.get(track_id, 0),
                     "first_frame": int(video_path[0][0]),
@@ -4381,6 +5545,11 @@ class MatchAnalysisPlusRunner:
                 "width_cm": int(PITCH_WIDTH_CM),
             },
             "pitch_to_video": pitch_to_video_samples,
+            "pitch_calibration": pitch_confidence_samples or [],
+            "ball": {
+                "track_id": 1,
+                "pitch_path": ball_pitch_path or [],
+            },
             "tracks": visual_tracks,
         }
 
@@ -4455,12 +5624,16 @@ class MatchAnalysisPlusRunner:
         x1, y1, x2, y2 = [int(round(value)) for value in player.bbox]
         center_x = int((x1 + x2) / 2)
         color = TEAM_DISPLAY_COLORS.get(team, TEAM_DISPLAY_COLORS[1])
-        text_color = (15, 15, 15) if team == 1 else (255, 255, 255)
+        text_color = (15, 15, 15) if team in (0, 1) else (255, 255, 255)
         cv2.ellipse(frame, (center_x, y2), (max(10, (x2 - x1) // 2), 8), 0, -45, 235, color, 2)
         scale = self._font_scale(frame, 0.5)
         small = self._font_scale(frame, 0.38)
         thickness = self._thickness(frame)
-        label = str(player.track_id)
+        role_prefix = {
+            "goalkeeper": "GK ",
+            "referee": "REF ",
+        }.get(player.role_name, "")
+        label = f"{role_prefix}{player.track_id}"
         text_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)[0]
         label_width = max(28, text_size[0] + 10)
         label_height = max(18, text_size[1] + 8)
@@ -4539,52 +5712,486 @@ class MatchAnalysisPlusRunner:
             return "ball"
         return None
 
-    def _target_class_ids(self, model: Any) -> list[int]:
+    def _map_role_name(self, raw_name: str) -> str:
+        if raw_name in GOALKEEPER_ALIASES:
+            return "goalkeeper"
+        if raw_name in REFEREE_ALIASES:
+            return "referee"
+        if raw_name in BALL_ALIASES:
+            return "ball"
+        return "player"
+
+    def _target_class_ids(
+        self,
+        model: Any,
+        include_players: bool = True,
+        include_ball: bool = True,
+    ) -> list[int]:
         names = getattr(model, "names", {}) or {}
         if isinstance(names, list):
             names = dict(enumerate(names))
         class_ids = [
             int(class_id)
             for class_id, class_name in names.items()
-            if self._map_class_name(str(class_name).lower()) is not None
+            if (
+                include_players
+                and str(class_name).lower() in PERSON_ALIASES
+            )
+            or (
+                include_ball
+                and str(class_name).lower() in BALL_ALIASES
+            )
         ]
         return sorted(class_ids)
 
-    def _load_model(self) -> Any:
-        if self.model is not None:
-            return self.model
+    def _select_model_for_video(self, capture: cv2.VideoCapture, start_frame: int) -> Any:
+        candidates = self._unique_model_paths(
+            [
+                ("general", self.general_model_path),
+                ("football_objects_v2", self.specialized_model_path),
+                (
+                    "football_specialized_v1_fallback",
+                    self.legacy_specialized_model_path,
+                ),
+            ]
+        )
+
+        original_position = int(capture.get(cv2.CAP_PROP_POS_FRAMES) or start_frame)
+        ok, preview = capture.read()
+        capture.set(cv2.CAP_PROP_POS_FRAMES, original_position)
+        if not ok or preview is None:
+            label, path = next(
+                (
+                    item
+                    for item in candidates
+                    if item[0] == "football_objects_v2"
+                ),
+                candidates[-1],
+            )
+            model = self._load_model(path)
+            self._activate_model(label, path, model, {}, "preview_unavailable")
+            return model
+
+        scores: dict[str, dict[str, float | int | str]] = {}
+        available: list[tuple[str, Path]] = []
         from ultralytics import YOLO
 
-        self.model = YOLO(str(self.model_path))
+        for label, path in candidates:
+            candidate_model = None
+            try:
+                candidate_model = YOLO(str(path))
+                scores[label] = self._preview_model_score(
+                    candidate_model,
+                    preview,
+                )
+                available.append((label, path))
+            except (ImportError, OSError, RuntimeError, ValueError) as exc:
+                scores[label] = {
+                    "valid_players": 0,
+                    "raw_players": 0,
+                    "confidence_sum": 0.0,
+                    "error": type(exc).__name__,
+                }
+            finally:
+                if candidate_model is not None:
+                    del candidate_model
+                gc.collect()
+        if not available:
+            raise RuntimeError("No YOLO model could be loaded for match analysis")
+
+        selected_label, selected_path = max(
+            available,
+            key=lambda item: (
+                int(scores[item[0]].get("valid_players", 0)),
+                float(scores[item[0]].get("confidence_sum", 0.0)),
+            ),
+        )
+        selected_model = self._load_model(selected_path)
+        reason = "highest_on_pitch_player_coverage"
+        self._activate_model(
+            selected_label,
+            selected_path,
+            selected_model,
+            scores,
+            reason,
+        )
+        capture.set(cv2.CAP_PROP_POS_FRAMES, original_position)
+        return selected_model
+
+    def _preview_model_score(self, model: Any, frame: np.ndarray) -> dict[str, float | int]:
+        results = model.predict(
+            frame,
+            conf=max(0.12, settings.MATCH_ANALYSIS_CONFIDENCE),
+            imgsz=640,
+            device=settings.YOLO_DEVICE,
+            max_det=settings.YOLO_MAX_DETECTIONS,
+            verbose=False,
+            classes=self._target_class_ids(model),
+        )
+        if not results or results[0].boxes is None:
+            return {"valid_players": 0, "raw_players": 0, "confidence_sum": 0.0}
+
+        result = results[0]
+        names = result.names or {}
+        boxes = result.boxes
+        xyxy = boxes.xyxy.cpu().numpy() if boxes.xyxy is not None else np.empty((0, 4))
+        classes = boxes.cls.cpu().numpy() if boxes.cls is not None else np.empty(0)
+        confidences = boxes.conf.cpu().numpy() if boxes.conf is not None else np.zeros(len(xyxy))
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        green = cv2.inRange(hsv, (24, 22, 20), (108, 255, 255))
+        frame_height, frame_width = green.shape[:2]
+        raw_players = 0
+        valid_players = 0
+        confidence_sum = 0.0
+        for index, bbox in enumerate(xyxy):
+            raw_name = str(names.get(int(classes[index]), int(classes[index]))).lower()
+            if raw_name not in PERSON_ALIASES:
+                continue
+            raw_players += 1
+            x1, y1, x2, y2 = [float(value) for value in bbox]
+            box_width = max(1.0, x2 - x1)
+            box_height = max(1.0, y2 - y1)
+            if box_height < frame_height * 0.018 or box_height > frame_height * 0.74:
+                continue
+            if box_width / box_height > 1.35:
+                continue
+            foot_x = int(round((x1 + x2) / 2))
+            foot_y = int(round(y2))
+            radius = max(4, int(round(box_width * 0.28)))
+            left, right = max(0, foot_x - radius), min(frame_width, foot_x + radius + 1)
+            top, bottom = max(0, foot_y - radius), min(frame_height, foot_y + radius + 1)
+            if left >= right or top >= bottom:
+                continue
+            green_ratio = float(np.mean(green[top:bottom, left:right] > 0))
+            if green_ratio < 0.12:
+                continue
+            valid_players += 1
+            confidence_sum += float(confidences[index])
+        return {
+            "valid_players": valid_players,
+            "raw_players": raw_players,
+            "confidence_sum": round(confidence_sum, 4),
+        }
+
+    def _activate_model(
+        self,
+        label: str,
+        path: Path,
+        model: Any,
+        scores: dict[str, Any],
+        reason: str,
+    ) -> None:
+        self.model_path = path
+        names = getattr(model, "names", {}) or {}
+        if isinstance(names, list):
+            names = dict(enumerate(names))
         class_names = {
             str(class_name).lower()
-            for class_name in (getattr(self.model, "names", {}) or {}).values()
+            for class_name in names.values()
         }
+        is_specialized = {"ball", "goalkeeper", "player"}.issubset(class_names)
         self.model_mode = (
             "football-specialized-yolo"
-            if {"ball", "goalkeeper", "player"}.issubset(class_names)
+            if is_specialized
             else "balanced-yolo-with-football-guards"
         )
-        return self.model
+        self.active_image_size = (
+            max(640, settings.MATCH_ANALYSIS_IMAGE_SIZE)
+            if is_specialized
+            else 640
+        )
+        self.model_selection = {
+            "strategy": "automatic_preview_v1",
+            "selected": label,
+            "reason": reason,
+            "preview_image_size": 640,
+            "analysis_image_size": self.active_image_size,
+            "candidates": scores,
+        }
 
-    def _load_pitch_model(self) -> Any | None:
-        if self.pitch_model is not None:
-            return self.pitch_model
-        if self.pitch_model_path is None or not self.pitch_model_path.exists():
-            return None
+    def _load_model(self, path: Path) -> Any:
+        cache_key = str(path)
+        if cache_key in self.models:
+            return self.models[cache_key]
         from ultralytics import YOLO
 
-        self.pitch_model = YOLO(str(self.pitch_model_path))
+        model = YOLO(str(path))
+        self.models[cache_key] = model
+        return model
+
+    def _select_pitch_model_for_video(
+        self,
+        capture: cv2.VideoCapture,
+        start_frame: int,
+        source_frames: int,
+    ) -> Any | None:
+        if not self.pitch_model_candidates:
+            self.pitch_model_selection = {
+                "strategy": "unavailable",
+                "selected": None,
+                "reason": "no_pitch_model_found",
+                "candidates": {},
+            }
+            return None
+
+        from ultralytics import YOLO
+
+        preview_frames = self._pitch_preview_frames(
+            capture,
+            start_frame,
+            source_frames,
+        )
+        if not preview_frames:
+            selected_label, selected_path = self.pitch_model_candidates[0]
+            self.pitch_model = YOLO(str(selected_path), task="pose")
+            self.pitch_model_path = selected_path
+            self.pitch_model_selection = {
+                "strategy": "fallback_order",
+                "selected": selected_label,
+                "reason": "preview_unavailable",
+                "candidates": {},
+            }
+            return self.pitch_model
+
+        scores: dict[str, Any] = {}
+        selected: tuple[str, Path] | None = None
+        selected_rank: tuple[float, ...] | None = None
+        for label, path in self.pitch_model_candidates:
+            candidate_model = None
+            try:
+                candidate_model = YOLO(str(path), task="pose")
+                score = self._pitch_model_preview_score(
+                    candidate_model,
+                    preview_frames,
+                )
+                scores[label] = {
+                    "path": str(path),
+                    **score,
+                }
+                rank = self._pitch_preview_rank(score)
+                if selected_rank is None or rank > selected_rank:
+                    selected = (label, path)
+                    selected_rank = rank
+            except (ImportError, OSError, RuntimeError, ValueError) as exc:
+                scores[label] = {
+                    "path": str(path),
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            finally:
+                if candidate_model is not None:
+                    del candidate_model
+                gc.collect()
+
+        capture.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+        if selected is None:
+            self.pitch_model_selection = {
+                "strategy": "multi_frame_geometry_gate_v1",
+                "selected": None,
+                "reason": "all_candidates_failed",
+                "candidates": scores,
+            }
+            return None
+
+        selected_label, selected_path = selected
+        self.pitch_model = YOLO(str(selected_path), task="pose")
+        self.pitch_model_path = selected_path
+        self.pitch_model_selection = {
+            "strategy": "multi_frame_geometry_gate_v1",
+            "selected": selected_label,
+            "reason": "best_wide_view_geometry_and_reprojection",
+            "preview_frames": [index for index, _ in preview_frames],
+            "candidates": scores,
+        }
         return self.pitch_model
+
+    def _pitch_preview_frames(
+        self,
+        capture: cv2.VideoCapture,
+        start_frame: int,
+        source_frames: int,
+    ) -> list[tuple[int, np.ndarray]]:
+        original_position = int(capture.get(cv2.CAP_PROP_POS_FRAMES) or start_frame)
+        available = (
+            max(1, source_frames - start_frame)
+            if source_frames > 0
+            else 241
+        )
+        span = max(0, min(240, available - 1))
+        offsets = sorted({0, span // 2, span})
+        previews: list[tuple[int, np.ndarray]] = []
+        for offset in offsets:
+            frame_index = start_frame + offset
+            capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+            ok, frame = capture.read()
+            if ok and frame is not None:
+                previews.append((frame_index, frame))
+        capture.set(cv2.CAP_PROP_POS_FRAMES, original_position)
+        return previews
+
+    def _pitch_model_preview_score(
+        self,
+        model: Any,
+        frames: list[tuple[int, np.ndarray]],
+    ) -> dict[str, Any]:
+        geometry = PitchRadar(None)
+        targets = geometry._pitch_vertices()
+        visible_total = 0
+        valid_homographies = 0
+        wide_views = 0
+        inlier_ratios: list[float] = []
+        reprojection_errors: list[float] = []
+        frame_scores: list[dict[str, Any]] = []
+
+        for frame_index, frame in frames:
+            results = model.predict(
+                frame,
+                imgsz=max(960, settings.YOLO_IMAGE_SIZE),
+                device=settings.YOLO_DEVICE,
+                verbose=False,
+            )
+            frame_score: dict[str, Any] = {
+                "frame": frame_index,
+                "visible_keypoints": 0,
+                "valid_homography": False,
+            }
+            if not results or results[0].keypoints is None:
+                frame_scores.append(frame_score)
+                continue
+            keypoints = results[0].keypoints
+            source = keypoints.xy.cpu().numpy()
+            if source.ndim == 3:
+                source = source[0]
+            confidence = keypoints.conf
+            confidence_values = (
+                np.ones(len(source), dtype=np.float32)
+                if confidence is None
+                else confidence.cpu().numpy()
+            )
+            if confidence_values.ndim == 2:
+                confidence_values = confidence_values[0]
+            count = min(len(source), len(targets), len(confidence_values))
+            source = source[:count].astype(np.float32)
+            target = targets[:count].astype(np.float32)
+            confidence_values = confidence_values[:count]
+            visible = (
+                (confidence_values >= 0.34)
+                & (source[:, 0] > 1)
+                & (source[:, 1] > 1)
+            )
+            visible_count = int(np.count_nonzero(visible))
+            visible_total += visible_count
+            frame_score["visible_keypoints"] = visible_count
+            if visible_count < 4:
+                frame_scores.append(frame_score)
+                continue
+
+            homography, inlier_mask = cv2.findHomography(
+                source[visible],
+                target[visible],
+                cv2.RANSAC,
+                320.0,
+            )
+            if homography is None or not np.all(np.isfinite(homography)):
+                frame_scores.append(frame_score)
+                continue
+            inliers = (
+                inlier_mask.reshape(-1).astype(bool)
+                if inlier_mask is not None
+                else np.ones(visible_count, dtype=bool)
+            )
+            inlier_count = int(np.count_nonzero(inliers))
+            if inlier_count < 4:
+                frame_scores.append(frame_score)
+                continue
+            errors = geometry._reprojection_errors(
+                source[visible][inliers],
+                target[visible][inliers],
+                homography,
+            )
+            error = float(np.median(errors))
+            inlier_ratio = inlier_count / max(1, visible_count)
+            visible_target = target[visible]
+            span_x = float(np.ptp(visible_target[:, 0]))
+            span_y = float(np.ptp(visible_target[:, 1]))
+            hull_area = float(cv2.contourArea(cv2.convexHull(source[visible])))
+            frame_area = float(max(1, frame.shape[0] * frame.shape[1]))
+            is_wide_view = (
+                visible_count >= 8
+                and span_x >= PITCH_LENGTH_CM * 0.50
+                and span_y >= PITCH_WIDTH_CM * 0.40
+                and hull_area >= frame_area * 0.045
+            )
+            valid_homographies += 1
+            wide_views += int(is_wide_view)
+            inlier_ratios.append(inlier_ratio)
+            reprojection_errors.append(error)
+            frame_score.update(
+                {
+                    "valid_homography": True,
+                    "wide_view": is_wide_view,
+                    "inliers": inlier_count,
+                    "inlier_ratio": round(inlier_ratio, 4),
+                    "median_reprojection_error_cm": round(error, 2),
+                }
+            )
+            frame_scores.append(frame_score)
+
+        return {
+            "wide_view_frames": wide_views,
+            "valid_homographies": valid_homographies,
+            "visible_keypoints_total": visible_total,
+            "mean_inlier_ratio": (
+                round(float(np.mean(inlier_ratios)), 4)
+                if inlier_ratios
+                else 0.0
+            ),
+            "median_reprojection_error_cm": (
+                round(float(np.median(reprojection_errors)), 2)
+                if reprojection_errors
+                else None
+            ),
+            "frames": frame_scores,
+        }
+
+    def _pitch_preview_rank(self, score: dict[str, Any]) -> tuple[float, ...]:
+        error = score.get("median_reprojection_error_cm")
+        return (
+            float(score.get("wide_view_frames", 0)),
+            float(score.get("valid_homographies", 0)),
+            float(score.get("mean_inlier_ratio", 0.0)),
+            -float(error if error is not None else 1_000_000.0),
+            float(score.get("visible_keypoints_total", 0)),
+        )
 
     def _resolve_model_path(self) -> Path:
         specialized = self._resolve_asset_path(settings.MATCH_ANALYSIS_PLAYER_MODEL_PATH)
         if specialized is not None:
             return specialized
+        fallback = self._resolve_asset_path(
+            settings.MATCH_ANALYSIS_PLAYER_MODEL_FALLBACK_PATH
+        )
+        if fallback is not None:
+            return fallback
         configured = self._resolve_asset_path(settings.YOLO_MODEL_PATH)
         if configured is not None:
             return configured
         return Path("yolo11n.pt")
+
+    def _unique_model_paths(
+        self,
+        values: list[tuple[str, Path | None]],
+    ) -> list[tuple[str, Path]]:
+        unique: list[tuple[str, Path]] = []
+        seen: set[str] = set()
+        for label, path in values:
+            if path is None:
+                continue
+            normalized = str(path.resolve())
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            unique.append((label, path))
+        return unique
 
     def _resolve_asset_path(self, value: str) -> Path | None:
         configured = Path(value)
@@ -4606,6 +6213,152 @@ class MatchAnalysisPlusRunner:
         if app_relative.exists():
             return str(app_relative)
         return settings.MATCH_ANALYSIS_TRACKER
+
+    def _load_kit_reference_config(
+        self,
+        team_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        references = team_context.get("kit_references") or {}
+        labels = {
+            int(team): str(label)
+            for team, label in (team_context.get("team_labels") or {}).items()
+            if str(team).isdigit() and label
+        }
+        palettes: dict[int, list[tuple[int, int, int]]] = {}
+        summary: dict[str, Any] = {
+            "source": "online_appearance_clustering",
+            "teams": {},
+        }
+
+        for team in (1, 2):
+            object_name = (
+                references.get(f"team_{team}_selected")
+                or references.get(f"team_{team}_primary")
+                or references.get(f"team_{team}_alternate")
+            )
+            team_summary: dict[str, Any] = {
+                "team": team,
+                "label": labels.get(team, f"Team {team}"),
+                "object_name": object_name,
+                "status": "missing",
+                "palette_bgr": [],
+            }
+            if object_name:
+                try:
+                    image = self._load_reference_image(object_name)
+                    palette = self._extract_reference_palette(image)
+                    if palette:
+                        palettes[team] = palette
+                        team_summary["status"] = "ready"
+                        team_summary["palette_bgr"] = [
+                            list(color)
+                            for color in palette
+                        ]
+                    else:
+                        team_summary["status"] = "no_reliable_colors"
+                except Exception as exc:
+                    team_summary["status"] = "failed"
+                    team_summary["error"] = str(exc)
+            summary["teams"][str(team)] = team_summary
+
+        if palettes:
+            summary["source"] = "stored_kit_images_with_online_adaptation"
+        summary["seeded_teams"] = sorted(palettes)
+        return {
+            "palettes": palettes,
+            "team_labels": labels,
+            "summary": summary,
+        }
+
+    def _load_reference_image(self, object_name: str) -> np.ndarray:
+        response = client.get_object(BUCKET_NAME, object_name)
+        try:
+            raw = response.read()
+        finally:
+            response.close()
+            response.release_conn()
+        image = cv2.imdecode(
+            np.frombuffer(raw, dtype=np.uint8),
+            cv2.IMREAD_UNCHANGED,
+        )
+        if image is None:
+            raise ValueError("Could not decode stored kit image")
+        return image
+
+    def _extract_reference_palette(
+        self,
+        image: np.ndarray,
+    ) -> list[tuple[int, int, int]]:
+        alpha_mask: np.ndarray | None = None
+        if image.ndim == 2:
+            image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        elif image.shape[2] == 4:
+            alpha_mask = image[:, :, 3] >= 24
+            image = image[:, :, :3]
+
+        height, width = image.shape[:2]
+        inset_y = max(0, int(height * 0.04))
+        inset_x = max(0, int(width * 0.04))
+        image = image[
+            inset_y : max(inset_y + 1, height - inset_y),
+            inset_x : max(inset_x + 1, width - inset_x),
+        ]
+        if alpha_mask is not None:
+            alpha_mask = alpha_mask[
+                inset_y : max(inset_y + 1, height - inset_y),
+                inset_x : max(inset_x + 1, width - inset_x),
+            ]
+        image = cv2.resize(image, (180, 180), interpolation=cv2.INTER_AREA)
+        if alpha_mask is not None:
+            alpha_mask = cv2.resize(
+                alpha_mask.astype(np.uint8),
+                (180, 180),
+                interpolation=cv2.INTER_NEAREST,
+            ).astype(bool)
+
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        usable = ~(
+            (hsv[:, :, 1] < 20)
+            & (hsv[:, :, 2] > 238)
+        )
+        if alpha_mask is not None:
+            usable &= alpha_mask
+        pixels = image[usable].reshape(-1, 3).astype(np.float32)
+        if len(pixels) < 64:
+            pixels = image.reshape(-1, 3).astype(np.float32)
+
+        cluster_count = min(4, max(1, len(pixels) // 64))
+        cv2.setRNGSeed(42)
+        _, labels, centers = cv2.kmeans(
+            pixels,
+            cluster_count,
+            None,
+            (
+                cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER,
+                30,
+                0.5,
+            ),
+            5,
+            cv2.KMEANS_PP_CENTERS,
+        )
+        counts = np.bincount(labels.reshape(-1), minlength=cluster_count)
+        ordered = sorted(
+            zip(centers, counts),
+            key=lambda item: int(item[1]),
+            reverse=True,
+        )
+        palette: list[tuple[int, int, int]] = []
+        for center, count in ordered:
+            if int(count) / max(1, len(pixels)) < 0.025:
+                continue
+            color = tuple(int(round(channel)) for channel in center)
+            if any(
+                float(np.linalg.norm(np.array(color) - np.array(existing))) < 24.0
+                for existing in palette
+            ):
+                continue
+            palette.append(color)
+        return palette[:4]
 
     def _transcode_for_browser(self, source_path: Path, output_path: Path) -> str:
         ffmpeg = shutil.which("ffmpeg")

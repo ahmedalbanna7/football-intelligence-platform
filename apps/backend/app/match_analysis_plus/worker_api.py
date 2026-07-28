@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from fastapi import FastAPI, HTTPException
 
 from app.match_analysis_plus.runner import MatchAnalysisPlusRunner
@@ -12,6 +12,8 @@ class MatchAnalysisRequest(BaseModel):
     artifact_prefix: str
     mode: str = "FULL_ANALYSIS"
     max_frames: int = 450
+    start_frame: int = 0
+    calibration_points: list[dict[str, float]] = Field(default_factory=list)
 
 
 app = FastAPI(title="Match Analysis Plus Worker")
@@ -33,6 +35,8 @@ def run_match_analysis(payload: MatchAnalysisRequest) -> dict:
             artifact_prefix=payload.artifact_prefix,
             mode=payload.mode,
             max_frames=payload.max_frames,
+            start_frame=payload.start_frame,
+            calibration_points=payload.calibration_points,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc

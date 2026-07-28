@@ -1,0 +1,71 @@
+datasets:
+  players:
+    project: football-players-detection-3zvbc
+    workspace: roboflow-jvuqo
+    version: 20
+    task: detect
+    format: yolov11
+    license: CC BY 4.0
+    source: https://universe.roboflow.com/roboflow-jvuqo/football-players-detection-3zvbc/dataset/20
+    archive: players-v20-yolov11.zip
+    sha256: 90b9023a379ee82e148881c8aef80b974164afdc0348ad4116147ad2fc6bf28f
+    expected_classes:
+      - ball
+      - player
+      - referee
+      - goalkeeper
+    note: Train the object detector, but exclude or remap ball during export if the dedicated ball model wins.
+  ball:
+    project: football-ball-detection-rejhg
+    workspace: roboflow-jvuqo
+    version: 4
+    task: detect
+    format: yolov11
+    license: CC BY 4.0
+    source: https://universe.roboflow.com/roboflow-jvuqo/football-ball-detection-rejhg/dataset/4
+    archive: ball-v4-yolov11.zip
+    sha256: 154e3d1bfde1c3ae86ac3f8a9b532d3fb9a215ae5cf2bbf21e7675c65430cde7
+    expected_classes:
+      - ball
+  pitch:
+    project: football-field-detection-f07vi
+    workspace: roboflow-jvuqo
+    version: 17
+    task: pose
+    format: yolov11
+    license: CC BY 4.0
+    source: https://universe.roboflow.com/roboflow-jvuqo/football-field-detection-f07vi/dataset/17
+    archive: pitch-v17-yolov8.zip
+    sha256: fcb78ea6f9dc29f4e0bcf9673ea059a0d592193e807cfbdafec10f6574ba5dbe
+    expected_classes:
+      - pitch
+  player_others:
+    project: player_and_others
+    workspace: peter-noo1c
+    version: 1
+    task: detect
+    format: yolov11
+    license: CC BY 4.0
+    source: https://universe.roboflow.com/peter-noo1c/player_and_others/dataset/1
+    archive: player-others-v1-yolov11.zip
+    sha256: 3c9cef47430d3ef2804c13c5e91ff738734ffda4a4d50f62295a60218071d0ab
+    expected_classes:
+      - goalkeeper
+      - others
+      - player
+      - referee
+    note: Auxiliary-only source. It must pass duplicate and conflict analysis before use.
+derived_datasets:
+  objects_v2:
+    path: training/datasets/objects-v2-merged
+    sources: [players, player_others]
+    classes: [ball, goalkeeper, player, referee, other]
+    merge_policy: Keep all players-v20 labels and import only the complementary other class.
+  ball_v4_grouped:
+    path: training/datasets/ball-v4-grouped
+    source: ball
+    split_policy: Keep every source video in exactly one split.
+  pitch_v17_grouped:
+    path: training/datasets/pitch-v17-grouped
+    source: pitch
+    split_policy: Keep every source clip in exactly one split.

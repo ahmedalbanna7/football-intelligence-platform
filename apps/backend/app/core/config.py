@@ -51,8 +51,20 @@ class Settings(BaseSettings):
     MATCH_ANALYSIS_DEFAULT_MODE: str = "FULL_ANALYSIS"
     MATCH_ANALYSIS_DEFAULT_MAX_FRAMES: int = 450
     MATCH_ANALYSIS_TRACKER: str = "app/match_analysis_plus/trackers/botsort_reid.yaml"
-    MATCH_ANALYSIS_PLAYER_MODEL_PATH: str = "yolo11n.pt"
-    MATCH_ANALYSIS_PITCH_MODEL_PATH: str = "models/football-pitch-detection.pt"
+    MATCH_ANALYSIS_PLAYER_MODEL_PATH: str = "models/football-objects-v2.pt"
+    MATCH_ANALYSIS_PLAYER_MODEL_FALLBACK_PATH: str = (
+        "models/football-player-detection.pt"
+    )
+    MATCH_ANALYSIS_BALL_MODEL_PATH: str = "models/football-ball-v2.pt"
+    MATCH_ANALYSIS_BALL_MODEL_FALLBACK_PATH: str = (
+        "models/football-player-detection.pt"
+    )
+    MATCH_ANALYSIS_IMAGE_SIZE: int = 960
+    MATCH_ANALYSIS_CONFIDENCE: float = 0.20
+    MATCH_ANALYSIS_PITCH_MODEL_PATH: str = "models/football-pitch-v2.pt"
+    MATCH_ANALYSIS_PITCH_MODEL_FALLBACK_PATH: str = (
+        "models/football-pitch-detection.pt"
+    )
     MATCH_ANALYSIS_RADAR_STRIDE: int = 12
 
     class Config:

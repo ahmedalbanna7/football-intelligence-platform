@@ -1,7 +1,11 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import BaseModel, Field
+
+
+def utc_now() -> datetime:
+    return datetime.now(UTC)
 
 
 class VideoUploadedEvent(BaseModel):
@@ -13,7 +17,7 @@ class VideoUploadedEvent(BaseModel):
     filename: str
     content_type: str | None = None
     match_context: dict[str, Any] = Field(default_factory=dict)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utc_now)
 
 
 class MatchAnalysisRequestedEvent(BaseModel):
@@ -24,10 +28,12 @@ class MatchAnalysisRequestedEvent(BaseModel):
     bucket: str
     object_name: str
     artifact_prefix: str
-    mode: str = "PLAYER_TRACKING"
+    mode: str = "FULL_ANALYSIS"
     max_frames: int = 450
+    start_frame: int = 0
+    calibration_points: list[dict[str, float]] = Field(default_factory=list)
     match_context: dict[str, Any] = Field(default_factory=dict)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utc_now)
 
 
 class PipelineResult(BaseModel):

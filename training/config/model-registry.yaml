@@ -1,0 +1,81 @@
+schema_version: 1
+active_bundle: production-v2-hybrid
+bundles:
+  production-v1:
+    status: production
+    objects:
+      path: apps/backend/models/football-player-detection.pt
+      sha256: 75b09c377fbf9d0791d23f6cfb689f5aed6eaa43a6818bd1fb884cf7507fffaf
+      task: detect
+      classes: [ball, goalkeeper, player, referee]
+    ball:
+      path: apps/backend/models/football-player-detection.pt
+      sha256: 75b09c377fbf9d0791d23f6cfb689f5aed6eaa43a6818bd1fb884cf7507fffaf
+      task: detect
+      classes: [ball]
+    pitch:
+      path: apps/backend/models/football-pitch-detection.pt
+      sha256: 28f68f7c4056d6d9b137efd2e7ab5f3c494039380c63831649126ced25628b36
+      task: pose
+      classes: [pitch]
+    team_appearance:
+      engine: stable_kit_color_classifier_v2
+      mode: online
+  production-v2-hybrid:
+    status: production
+    fallback_bundle: production-v1
+    objects:
+      path: apps/backend/models/football-objects-v2.pt
+      fallback_path: apps/backend/models/football-player-detection.pt
+      sha256: b36eb91a56385bc467e2151bf6e56e3c33aaceb72675b323107d391e3b627947
+      task: detect
+      classes: [ball, goalkeeper, player, referee, other]
+      test_map50: 0.859
+      test_map50_95: 0.569
+    ball:
+      path: apps/backend/models/football-ball-v2.pt
+      fallback_path: apps/backend/models/football-player-detection.pt
+      sha256: e1054b64975c45c3f3c824ee695bff3e96648f1ccf0b29a755cde19d563c714a
+      task: detect
+      classes: [ball]
+      test_map50: 0.859
+      test_map50_95: 0.524
+      runtime_guards:
+        [static_marker_filter, penalty_spot_filter, single_ball_kalman]
+    pitch:
+      strategy: multi_frame_geometry_gate_v1
+      candidates:
+        - path: apps/backend/models/football-pitch-v2.pt
+          label: pitch_v2
+          sha256: e41c40ae38537c2dcd65bb19f1e1952c46620cd059e50af67809a8287042a758
+        - path: apps/backend/models/football-pitch-detection.pt
+          label: pitch_v1_fallback
+          sha256: 28f68f7c4056d6d9b137efd2e7ab5f3c494039380c63831649126ced25628b36
+      task: pose
+      classes: [pitch]
+      keypoints: 32
+      selection_metrics:
+        [wide_view_coverage, homography_inliers, reprojection_error]
+    team_appearance:
+      engine: stable_kit_appearance_classifier_v3
+      mode: stored_kit_references_with_online_track_voting
+      features:
+        [jersey_color, hsv_histogram, texture, temporal_role_votes]
+  candidate-v2:
+    status: promoted_as_production-v2-hybrid
+    objects:
+      path: training/runs/football-objects-v2-candidate/weights/best.pt
+      task: detect
+      classes: [ball, goalkeeper, player, referee, other]
+    ball:
+      path: training/runs/football-ball-v2-candidate/weights/best.pt
+      task: detect
+      classes: [ball]
+    pitch:
+      path: training/runs/football-pitch-v2-candidate/weights/best.pt
+      task: pose
+      classes: [pitch]
+    team_appearance:
+      engine: stable_kit_appearance_classifier_v3
+      mode: online_track_voting
+      features: [jersey_color, hsv_histogram, texture, temporal_role_votes]

@@ -650,6 +650,101 @@ button {
   color: #ffffff;
 }
 
+.calibration-mode-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #e4e9ee;
+}
+
+.calibration-mode-row .segmented-control {
+  width: min(330px, 100%);
+}
+
+.manual-calibration {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #e4e9ee;
+}
+
+.calibration-toolbar {
+  display: flex;
+  align-items: end;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.calibration-toolbar .field {
+  width: min(360px, 100%);
+}
+
+.calibration-count {
+  min-height: 34px;
+  padding: 8px 10px;
+  border: 1px solid #e2b847;
+  border-radius: 6px;
+  background: #fff8dd;
+  color: #805b00;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.calibration-count.ready {
+  border-color: #83cbb9;
+  background: #e9f7f2;
+  color: #006d5b;
+}
+
+.calibration-frame {
+  position: relative;
+  width: min(100%, 980px);
+  overflow: hidden;
+  border: 1px solid #cbd5df;
+  border-radius: 6px;
+  background: #111820;
+}
+
+.calibration-frame img {
+  display: block;
+  width: 100%;
+  height: auto;
+  cursor: crosshair;
+}
+
+.calibration-marker {
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  transform: translate(-50%, -50%);
+  border: 2px solid #ffffff;
+  border-radius: 50%;
+  background: #007d66;
+  color: #ffffff;
+  font-size: 10px;
+  font-weight: 900;
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.45);
+}
+
+.calibration-point-list {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.calibration-point {
+  padding: 5px 7px;
+  border: 1px solid #d8e2e8;
+  border-radius: 5px;
+  color: #425363;
+  background: #f8fafb;
+  font-size: 10px;
+}
+
 .time-range-field {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 78px;
@@ -737,6 +832,42 @@ button {
   height: 100%;
   pointer-events: none;
   z-index: 2;
+}
+
+.pitch-confidence-chip {
+  position: absolute;
+  z-index: 7;
+  left: 12px;
+  bottom: 56px;
+  min-height: 30px;
+  padding: 5px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.34);
+  border-radius: 6px;
+  background: rgba(10, 16, 22, 0.84);
+  color: #ffffff;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  pointer-events: none;
+  backdrop-filter: blur(8px);
+}
+
+.pitch-confidence-chip strong {
+  color: #72e2c3;
+  font-size: 12px;
+}
+
+.pitch-confidence-chip small {
+  color: #cbd5df;
+}
+
+.pitch-confidence-chip.unavailable {
+  border-color: rgba(251, 191, 36, 0.65);
+}
+
+.pitch-confidence-chip.unavailable strong {
+  color: #fcd34d;
 }
 
 .analysis-live-layout {

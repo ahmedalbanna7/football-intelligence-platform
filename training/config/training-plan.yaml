@@ -1,0 +1,34 @@
+schema_version: 1
+device_profile:
+  gpu: NVIDIA GeForce GTX 1660 SUPER
+  memory_gb: 6
+  device: 0
+  workers: 2
+models:
+  objects:
+    task: detect
+    data: training/datasets/objects-v2-merged/data-balanced.yaml
+    base_model: yolo11s.pt
+    run_name: football-objects-v2-candidate
+    epochs: 120
+    image_size: 960
+    batch: 4
+    patience: 30
+  ball:
+    task: detect
+    data: training/datasets/ball-v4-grouped/data-balanced.yaml
+    base_model: yolo11s.pt
+    run_name: football-ball-v2-candidate
+    epochs: 120
+    image_size: 960
+    batch: 4
+    patience: 30
+  pitch:
+    task: pose
+    data: training/datasets/pitch-v17-grouped/data.yaml
+    base_model: apps/backend/models/football-pitch-detection.pt
+    run_name: football-pitch-v2-candidate
+    epochs: 100
+    image_size: 640
+    batch: 1
+    patience: 25

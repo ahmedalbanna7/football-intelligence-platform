@@ -5,6 +5,7 @@ import numpy as np
 
 from app.match_analysis_plus.runner import (
     AnalysisObject,
+    BallTrackerV2,
     BallStaticFilter,
     GOAL_AREA_LENGTH_CM,
     GOAL_AREA_WIDTH_CM,
@@ -13,7 +14,9 @@ from app.match_analysis_plus.runner import (
     PITCH_LENGTH_CM,
     PITCH_WIDTH_CM,
     PitchRadar,
+    PitchOccupancyFilter,
     PlayerValidityFilter,
+    PossessionTracker,
     TeamColorClassifier,
     TrackIdStabilizer,
 )
@@ -275,12 +278,36 @@ class PlayerValidityFilterTests(unittest.TestCase):
         self.assertEqual([302], [item.track_id for item in output])
         self.assertEqual(1, validity_filter.summary()["rejected_field_fixtures"])
 
+    def test_specialized_detector_keeps_small_player_class_before_pitch_mask(self) -> None:
+        frame = np.full((FRAME_HEIGHT, FRAME_WIDTH, 3), (45, 105, 45), dtype=np.uint8)
+        small_player = AnalysisObject(
+            track_id=41,
+            raw_track_id=41,
+            class_name="player",
+            bbox=[300, 80, 308, 112],
+            confidence=0.72,
+        )
+
+        validity_filter = PlayerValidityFilter()
+        output = validity_filter.filter(
+            [small_player],
+            frame,
+            specialized_detector=True,
+        )
+
+        self.assertEqual([41], [item.track_id for item in output])
+        self.assertEqual(1, validity_filter.summary()["specialized_detector_observations"])
+
     def test_football_model_classes_include_players_goalkeepers_and_ball(self) -> None:
         class Model:
             names = {0: "ball", 1: "goalkeeper", 2: "player", 3: "referee"}
 
         runner = MatchAnalysisPlusRunner.__new__(MatchAnalysisPlusRunner)
-        self.assertEqual([0, 1, 2], runner._target_class_ids(Model()))
+        self.assertEqual([0, 1, 2, 3], runner._target_class_ids(Model()))
+        self.assertEqual(
+            [0],
+            runner._target_class_ids(Model(), include_players=False, include_ball=True),
+        )
 
 
 class PitchRadarTests(unittest.TestCase):
@@ -336,6 +363,7 @@ class PitchRadarTests(unittest.TestCase):
             dtype=np.float64,
         )
         radar.last_calibrated_frame = 0
+        radar.calibration_confidence = 1.0
         frame = np.zeros((FRAME_HEIGHT, FRAME_WIDTH, 3), dtype=np.uint8)
         player_one = _player(145, 90, 7)
         player_two = _player(410, 110, 9)
@@ -475,6 +503,102 @@ class TeamColorClassifierTests(unittest.TestCase):
         self.assertNotEqual(team_by_track[1], team_by_track[2])
         self.assertEqual(2, len(classifier.summary()["kit_anchors_bgr"]))
 
+    def test_referee_is_excluded_from_team_kit_anchors(self) -> None:
+        classifier = TeamColorClassifier()
+        yellow = _player(100, 100, 1)
+        blue = _player(250, 100, 2)
+        referee = _player(400, 100, 3)
+        referee.role_name = "referee"
+
+        class State:
+            def __init__(
+                self,
+                jersey_color: tuple[int, int, int],
+                role_name: str,
+            ) -> None:
+                self.jersey_color = jersey_color
+                self.role_name = role_name
+                self.appearance_hist = None
+
+        states = {
+            1: State((25, 185, 225), "player"),
+            2: State((205, 125, 55), "player"),
+            3: State((15, 15, 15), "referee"),
+        }
+        team_by_track: dict[int, int] = {}
+
+        classifier.update(
+            [yellow, blue, referee],
+            states,  # type: ignore[arg-type]
+            team_by_track,
+        )
+
+        self.assertEqual(0, team_by_track[3])
+        self.assertEqual([3], classifier.summary()["official_tracks"])
+        self.assertEqual(2, len(classifier.summary()["kit_anchors_bgr"]))
+
+    def test_stored_kit_references_keep_team_orientation(self) -> None:
+        classifier = TeamColorClassifier(
+            reference_palettes_bgr={
+                1: [(20, 190, 225)],
+                2: [(205, 125, 55)],
+            },
+            team_labels={
+                1: "Primary club",
+                2: "Opponent",
+            },
+        )
+        primary = _player(100, 100, 1)
+        opponent = _player(250, 100, 2)
+
+        class State:
+            def __init__(self, jersey_color: tuple[int, int, int]) -> None:
+                self.jersey_color = jersey_color
+                self.role_name = "player"
+                self.appearance_hist = None
+
+        states = {
+            1: State((25, 185, 220)),
+            2: State((200, 130, 60)),
+        }
+        team_by_track: dict[int, int] = {}
+
+        classifier.update(
+            [primary, opponent],
+            states,  # type: ignore[arg-type]
+            team_by_track,
+        )
+
+        self.assertEqual(1, team_by_track[1])
+        self.assertEqual(2, team_by_track[2])
+        summary = classifier.summary()
+        self.assertEqual("stored_kit_images", summary["reference_source"])
+        self.assertEqual("Primary club", summary["team_labels"]["1"])
+
+    def test_kit_palette_excludes_white_background(self) -> None:
+        runner = MatchAnalysisPlusRunner()
+        image = np.full((160, 160, 3), 255, dtype=np.uint8)
+        image[20:145, 48:112] = (20, 180, 225)
+
+        palette = runner._extract_reference_palette(image)
+
+        self.assertTrue(palette)
+        self.assertLess(
+            float(np.linalg.norm(np.array(palette[0]) - np.array((20, 180, 225)))),
+            20.0,
+        )
+
+
+class ParticipantRoleTests(unittest.TestCase):
+    def test_specialized_model_roles_are_preserved(self) -> None:
+        runner = MatchAnalysisPlusRunner()
+
+        self.assertEqual("player", runner._map_class_name("player"))
+        self.assertEqual("player", runner._map_class_name("goalkeeper"))
+        self.assertEqual("player", runner._map_class_name("referee"))
+        self.assertEqual("goalkeeper", runner._map_role_name("goalkeeper"))
+        self.assertEqual("referee", runner._map_role_name("referee"))
+
 
 class VisualLayerArtifactTests(unittest.TestCase):
     def test_visual_layer_payload_keeps_video_and_metric_paths_separate(self) -> None:
@@ -511,6 +635,7 @@ class VisualLayerArtifactTests(unittest.TestCase):
             [[5.0, 0.0, 100.0], [0.0, 5.0, 200.0], [0.0, 0.0, 1.0]],
             dtype=np.float64,
         )
+        radar.calibration_confidence = 1.0
 
         inverse = radar.pitch_to_video_matrix()
 
@@ -520,6 +645,137 @@ class VisualLayerArtifactTests(unittest.TestCase):
             inverse,
         ).reshape(2)
         self.assertTrue(np.allclose(projected, [100.0, 100.0], atol=1e-4))
+
+
+class PitchCalibrationV2Tests(unittest.TestCase):
+    def test_outside_pitch_person_is_rejected_before_stable_tracking(self) -> None:
+        radar = PitchRadar(None)
+        radar.homography = np.array(
+            [
+                [PITCH_LENGTH_CM / FRAME_WIDTH, 0.0, 0.0],
+                [0.0, PITCH_WIDTH_CM / FRAME_HEIGHT, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float64,
+        )
+        radar.calibration_confidence = 0.95
+        frame = np.full((FRAME_HEIGHT, FRAME_WIDTH, 3), (45, 112, 45), dtype=np.uint8)
+        inside = _player(220, 100, 1)
+        outside = _player(650, 100, 2)
+
+        output = PitchOccupancyFilter().filter(0, [inside, outside], frame, radar)
+
+        self.assertEqual([1], [item.raw_track_id for item in output])
+
+    def test_frame_confidence_reports_reliable_metric_state(self) -> None:
+        radar = PitchRadar(None)
+        radar.homography = np.eye(3, dtype=np.float64)
+        radar.calibration_confidence = 0.84
+        radar.calibration_source = "automatic"
+        radar.last_calibrated_frame = 0
+
+        radar.record_frame_confidence(0)
+
+        self.assertTrue(radar.frame_confidence[0]["reliable"])
+        self.assertEqual("automatic", radar.frame_confidence[0]["source"])
+
+
+class BallTrackingV2Tests(unittest.TestCase):
+    def test_penalty_spot_is_rejected_even_when_detected_as_ball(self) -> None:
+        ball_filter = BallStaticFilter(static_hits=2)
+        marker = AnalysisObject(
+            track_id=1,
+            raw_track_id=1,
+            class_name="ball",
+            bbox=[100, 100, 118, 116],
+            confidence=0.8,
+        )
+
+        output = ball_filter.filter(
+            0,
+            [marker],
+            [],
+            FRAME_WIDTH,
+            pitch_transform=lambda _point: (PENALTY_SPOT_DISTANCE_CM, PITCH_WIDTH_CM / 2),
+        )
+
+        self.assertEqual([], output)
+        self.assertEqual(1, ball_filter.summary()["penalty_spot_rejections"])
+
+    def test_ball_track_interpolates_short_detector_gap(self) -> None:
+        tracker = BallTrackerV2(max_interpolation_frames=3)
+        first = AnalysisObject(4, "ball", [100, 100, 114, 114], 0.9, raw_track_id=4)
+        second = AnalysisObject(4, "ball", [108, 100, 122, 114], 0.9, raw_track_id=4)
+
+        self.assertEqual([], tracker.update(0, [first], [], FRAME_WIDTH))
+        observed = tracker.update(1, [second], [], FRAME_WIDTH)
+        predicted = tracker.update(2, [], [], FRAME_WIDTH)
+
+        self.assertEqual(1, observed[0].track_id)
+        self.assertFalse(observed[0].is_predicted)
+        self.assertTrue(predicted[0].is_predicted)
+
+    def test_ball_track_reacquires_after_a_long_detector_gap(self) -> None:
+        tracker = BallTrackerV2(max_interpolation_frames=3)
+        first = AnalysisObject(1, "ball", [100, 100, 114, 114], 0.9)
+        second = AnalysisObject(2, "ball", [108, 100, 122, 114], 0.9)
+        reacquire_first = AnalysisObject(3, "ball", [400, 220, 414, 234], 0.9)
+        reacquire_second = AnalysisObject(4, "ball", [408, 220, 422, 234], 0.9)
+
+        self.assertEqual([], tracker.update(0, [first], [], FRAME_WIDTH))
+        self.assertEqual(1, len(tracker.update(2, [second], [], FRAME_WIDTH)))
+        self.assertEqual([], tracker.update(10, [reacquire_first], [], FRAME_WIDTH))
+        reacquired = tracker.update(12, [reacquire_second], [], FRAME_WIDTH)
+
+        self.assertEqual(1, len(reacquired))
+        self.assertFalse(reacquired[0].is_predicted)
+        self.assertEqual(1, tracker.summary()["expired_track_resets"])
+        self.assertEqual(2, tracker.summary()["reinitializations"])
+
+    def test_possession_is_confirmed_for_nearest_player(self) -> None:
+        tracker = PossessionTracker(confirmation_frames=1)
+        player = _player(180, 100, 7)
+        ball = AnalysisObject(1, "ball", [198, 212, 212, 226], 0.9, raw_track_id=1)
+        pitch_transform = lambda point: (point[0] * 10.0, point[1] * 10.0)
+
+        owner, team = tracker.update(0, [player], [ball], {7: 2}, pitch_transform)
+
+        self.assertEqual(7, owner)
+        self.assertEqual(2, team)
+
+
+class ModelBundleSelectionTests(unittest.TestCase):
+    def test_pitch_gate_prefers_wide_stable_geometry(self) -> None:
+        runner = MatchAnalysisPlusRunner()
+        narrow = {
+            "wide_view_frames": 0,
+            "valid_homographies": 3,
+            "mean_inlier_ratio": 1.0,
+            "median_reprojection_error_cm": 15.0,
+            "visible_keypoints_total": 40,
+        }
+        wide = {
+            "wide_view_frames": 1,
+            "valid_homographies": 3,
+            "mean_inlier_ratio": 0.9,
+            "median_reprojection_error_cm": 60.0,
+            "visible_keypoints_total": 24,
+        }
+
+        self.assertGreater(
+            runner._pitch_preview_rank(wide),
+            runner._pitch_preview_rank(narrow),
+        )
+
+    def test_model_candidates_are_deduplicated_by_resolved_path(self) -> None:
+        runner = MatchAnalysisPlusRunner()
+        path = runner.general_model_path
+
+        candidates = runner._unique_model_paths(
+            [("first", path), ("duplicate", path), ("missing", None)]
+        )
+
+        self.assertEqual([("first", path)], candidates)
 
 
 if __name__ == "__main__":

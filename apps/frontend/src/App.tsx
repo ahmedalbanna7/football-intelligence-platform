@@ -25,7 +25,7 @@ import {
   Waypoints,
   X
 } from "lucide-react";
-import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, MouseEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
 import { TrackingQualityPanel } from "./TrackingQualityPanel";
 import type {
@@ -1128,8 +1128,14 @@ function TrackLayerPicker({
                   type="checkbox"
                 />
                 <span className="track-swatch" style={{ backgroundColor: track.color }} />
-                <span>Track {track.track_id}</span>
-                <span className="muted">Team {track.team ?? "-"}</span>
+                <span>
+                  Track {track.track_id}
+                  {track.role_name && track.role_name !== "player" ? ` · ${track.role_name}` : ""}
+                </span>
+                <span className="muted">
+                  Team {track.team ?? "-"}
+                  {track.team_confidence != null ? ` · ${(track.team_confidence * 100).toFixed(0)}%` : ""}
+                </span>
               </label>
             ))}
           </div>
@@ -1456,6 +1462,9 @@ function InteractiveAnalysisViewer({
   const currentFrame = layers
     ? Math.min(totalFrames, Math.max(0, Math.round(currentTime * layers.fps)))
     : 0;
+  const pitchFrameConfidence = layers?.pitch_calibration?.length
+    ? layers.pitch_calibration[Math.min(currentFrame, layers.pitch_calibration.length - 1)]
+    : null;
   const activeStartFrame = layers && windowMode === "range"
     ? Math.min(totalFrames, Math.max(0, Math.round(rangeStart * layers.fps)))
     : 0;
@@ -1661,6 +1670,14 @@ function InteractiveAnalysisViewer({
             src={api.objectUrl(videoObject)}
           />
           <canvas aria-hidden="true" className="movement-overlay" ref={canvasRef} />
+
+          {pitchFrameConfidence ? (
+            <div className={`pitch-confidence-chip${pitchFrameConfidence.reliable ? " reliable" : " unavailable"}`}>
+              <span>Pitch</span>
+              <strong>{(pitchFrameConfidence.confidence * 100).toFixed(0)}%</strong>
+              <small>{pitchFrameConfidence.source}</small>
+            </div>
+          ) : null}
 
           <div className="stage-layer-toolbar">
             <TrackLayerPicker
@@ -2233,10 +2250,140 @@ function FullMatchVisualReview({
   );
 }
 
+type ManualCalibrationPoint = {
+  landmark: string;
+  image_x: number;
+  image_y: number;
+  pitch_x: number;
+  pitch_y: number;
+};
+
+const pitchCalibrationLandmarks = [
+  { key: "left_top", label: "Left touchline / top", pitch_x: 0, pitch_y: 0 },
+  { key: "left_bottom", label: "Left touchline / bottom", pitch_x: 0, pitch_y: 6800 },
+  { key: "right_top", label: "Right touchline / top", pitch_x: 10500, pitch_y: 0 },
+  { key: "right_bottom", label: "Right touchline / bottom", pitch_x: 10500, pitch_y: 6800 },
+  { key: "halfway_top", label: "Halfway line / top", pitch_x: 5250, pitch_y: 0 },
+  { key: "halfway_bottom", label: "Halfway line / bottom", pitch_x: 5250, pitch_y: 6800 },
+  { key: "center", label: "Center mark", pitch_x: 5250, pitch_y: 3400 },
+  { key: "center_top", label: "Center circle / top", pitch_x: 5250, pitch_y: 2485 },
+  { key: "center_bottom", label: "Center circle / bottom", pitch_x: 5250, pitch_y: 4315 },
+  { key: "center_left", label: "Center circle / left", pitch_x: 4335, pitch_y: 3400 },
+  { key: "center_right", label: "Center circle / right", pitch_x: 6165, pitch_y: 3400 },
+  { key: "left_penalty_end_top", label: "Left penalty area / end-line top", pitch_x: 0, pitch_y: 1384 },
+  { key: "left_penalty_top", label: "Left penalty area / top", pitch_x: 1650, pitch_y: 1384 },
+  { key: "left_penalty_bottom", label: "Left penalty area / bottom", pitch_x: 1650, pitch_y: 5416 },
+  { key: "left_penalty_end_bottom", label: "Left penalty area / end-line bottom", pitch_x: 0, pitch_y: 5416 },
+  { key: "left_goal_top", label: "Left goal area / top", pitch_x: 550, pitch_y: 2484 },
+  { key: "left_goal_bottom", label: "Left goal area / bottom", pitch_x: 550, pitch_y: 4316 },
+  { key: "left_goal_end_top", label: "Left goal area / end-line top", pitch_x: 0, pitch_y: 2484 },
+  { key: "left_goal_end_bottom", label: "Left goal area / end-line bottom", pitch_x: 0, pitch_y: 4316 },
+  { key: "right_penalty_end_top", label: "Right penalty area / end-line top", pitch_x: 10500, pitch_y: 1384 },
+  { key: "right_penalty_top", label: "Right penalty area / top", pitch_x: 8850, pitch_y: 1384 },
+  { key: "right_penalty_bottom", label: "Right penalty area / bottom", pitch_x: 8850, pitch_y: 5416 },
+  { key: "right_penalty_end_bottom", label: "Right penalty area / end-line bottom", pitch_x: 10500, pitch_y: 5416 },
+  { key: "right_goal_top", label: "Right goal area / top", pitch_x: 9950, pitch_y: 2484 },
+  { key: "right_goal_bottom", label: "Right goal area / bottom", pitch_x: 9950, pitch_y: 4316 },
+  { key: "right_goal_end_top", label: "Right goal area / end-line top", pitch_x: 10500, pitch_y: 2484 },
+  { key: "right_goal_end_bottom", label: "Right goal area / end-line bottom", pitch_x: 10500, pitch_y: 4316 },
+  { key: "left_spot", label: "Left penalty spot", pitch_x: 1100, pitch_y: 3400 },
+  { key: "right_spot", label: "Right penalty spot", pitch_x: 9400, pitch_y: 3400 }
+];
+
+function ManualPitchCalibration({
+  matchId,
+  frameIndex,
+  points,
+  onChange
+}: {
+  matchId: number;
+  frameIndex: number;
+  points: ManualCalibrationPoint[];
+  onChange: (points: ManualCalibrationPoint[]) => void;
+}) {
+  const imageRef = useRef<HTMLImageElement | null>(null);
+  const [landmarkKey, setLandmarkKey] = useState(pitchCalibrationLandmarks[0].key);
+  const [imageSize, setImageSize] = useState({ width: 1, height: 1 });
+  const selectedLandmark = pitchCalibrationLandmarks.find((item) => item.key === landmarkKey)!;
+
+  function addPoint(event: MouseEvent<HTMLImageElement>) {
+    const image = imageRef.current;
+    if (!image) return;
+    const bounds = image.getBoundingClientRect();
+    const imageX = (event.clientX - bounds.left) / bounds.width * image.naturalWidth;
+    const imageY = (event.clientY - bounds.top) / bounds.height * image.naturalHeight;
+    const point: ManualCalibrationPoint = {
+      landmark: selectedLandmark.key,
+      image_x: Math.round(imageX * 10) / 10,
+      image_y: Math.round(imageY * 10) / 10,
+      pitch_x: selectedLandmark.pitch_x,
+      pitch_y: selectedLandmark.pitch_y
+    };
+    onChange([...points.filter((item) => item.landmark !== selectedLandmark.key), point]);
+  }
+
+  return (
+    <div className="manual-calibration">
+      <div className="calibration-toolbar">
+        <label className="field">
+          <span className="label">Pitch landmark</span>
+          <select className="select" onChange={(event) => setLandmarkKey(event.target.value)} value={landmarkKey}>
+            {pitchCalibrationLandmarks.map((item) => (
+              <option key={item.key} value={item.key}>{item.label}</option>
+            ))}
+          </select>
+        </label>
+        <span className={`calibration-count ${points.length >= 4 ? "ready" : ""}`}>
+          {points.length}/4 minimum
+        </span>
+        <button className="button" disabled={!points.length} onClick={() => onChange([])} type="button">
+          <RotateCcw size={15} /> Clear
+        </button>
+      </div>
+      <div className="calibration-frame">
+        <img
+          alt={`Pitch calibration frame ${frameIndex}`}
+          key={`${matchId}-${frameIndex}`}
+          onClick={addPoint}
+          onLoad={(event) => setImageSize({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })}
+          ref={imageRef}
+          src={api.calibrationFrameUrl(matchId, frameIndex)}
+        />
+        {points.map((point, index) => (
+          <button
+            aria-label={`Remove ${point.landmark}`}
+            className="calibration-marker"
+            key={point.landmark}
+            onClick={() => onChange(points.filter((item) => item.landmark !== point.landmark))}
+            style={{
+              left: `${point.image_x / imageSize.width * 100}%`,
+              top: `${point.image_y / imageSize.height * 100}%`
+            }}
+            title={`${pitchCalibrationLandmarks.find((item) => item.key === point.landmark)?.label || point.landmark}. Click to remove.`}
+            type="button"
+          >
+            {index + 1}
+          </button>
+        ))}
+      </div>
+      <div className="calibration-point-list">
+        {points.map((point, index) => (
+          <span className="calibration-point" key={point.landmark}>
+            <strong>{index + 1}</strong> {pitchCalibrationLandmarks.find((item) => item.key === point.landmark)?.label}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function MatchAnalysisPlusPage() {
   const matches = useAsyncData(() => api.listMatches(30), []);
   const [matchId, setMatchId] = useState<number | null>(null);
   const [maxFrames, setMaxFrames] = useState(450);
+  const [startFrame, setStartFrame] = useState(0);
+  const [manualCalibration, setManualCalibration] = useState(false);
+  const [calibrationPoints, setCalibrationPoints] = useState<ManualCalibrationPoint[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
   const [running, setRunning] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -2261,12 +2408,20 @@ function MatchAnalysisPlusPage() {
 
   async function runAnalysis() {
     if (!activeId) return;
+    if (manualCalibration && calibrationPoints.length < 4) {
+      setMessage("Manual calibration needs at least four pitch landmarks.");
+      return;
+    }
     setRunning(true);
     setMessage("Running Match Analysis +...");
     try {
       const response = await api.runMatchAnalysisPlus(activeId, {
         mode: "FULL_ANALYSIS",
-        max_frames: maxFrames
+        max_frames: maxFrames,
+        start_frame: Math.max(0, startFrame),
+        calibration_points: manualCalibration
+          ? calibrationPoints.map(({ image_x, image_y, pitch_x, pitch_y }) => ({ image_x, image_y, pitch_x, pitch_y }))
+          : []
       });
       setSelectedRunId(response.id);
       setVideoError(null);
@@ -2284,9 +2439,20 @@ function MatchAnalysisPlusPage() {
     <section className="grid">
       <div className="card">
         <div className="toolbar">
-          <select className="select" value={activeId || ""} onChange={(event) => { setMatchId(Number(event.target.value)); setSelectedRunId(null); }} style={{ maxWidth: 520 }}>
+          <select className="select" value={activeId || ""} onChange={(event) => { setMatchId(Number(event.target.value)); setSelectedRunId(null); setCalibrationPoints([]); }} style={{ maxWidth: 520 }}>
             {(matches.data?.items || []).map((match) => <option key={match.id} value={match.id}>#{match.id} {match.title}</option>)}
           </select>
+          <label className="toolbar">
+            <span className="label">Start frame</span>
+            <input
+              className="input"
+              min="0"
+              onChange={(event) => { setStartFrame(Number(event.target.value)); setCalibrationPoints([]); }}
+              style={{ maxWidth: 120 }}
+              type="number"
+              value={startFrame}
+            />
+          </label>
           <label className="toolbar">
             <span className="label">Max frames</span>
             <input
@@ -2306,6 +2472,26 @@ function MatchAnalysisPlusPage() {
             <RefreshCw size={16} /> Refresh
           </button>
         </div>
+        <div className="calibration-mode-row">
+          <span className="label">Pitch calibration</span>
+          <div className="segmented-control" role="group" aria-label="Pitch calibration mode">
+            <button className={!manualCalibration ? "active" : ""} onClick={() => setManualCalibration(false)} type="button">
+              Automatic
+            </button>
+            <button className={manualCalibration ? "active" : ""} onClick={() => setManualCalibration(true)} type="button">
+              Manual fallback
+            </button>
+          </div>
+          <span className="muted small">Automatic line and keypoint calibration runs on every analysis.</span>
+        </div>
+        {manualCalibration && activeId ? (
+          <ManualPitchCalibration
+            frameIndex={Math.max(0, startFrame)}
+            matchId={activeId}
+            onChange={setCalibrationPoints}
+            points={calibrationPoints}
+          />
+        ) : null}
         {message ? <p className="badge">{message}</p> : null}
         <p className="muted small">Full analysis profile. Results are saved per match.</p>
       </div>
@@ -2369,6 +2555,8 @@ function MatchAnalysisPlusPage() {
                   <tr><th>Status</th><td>{selectedRun.status}</td></tr>
                   <tr><th>Quality gate</th><td>{selectedRun.quality?.status?.replaceAll("_", " ") || "Not evaluated"}</td></tr>
                   <tr><th>Profile</th><td>{selectedRun.mode === "FULL_ANALYSIS" ? "Full analysis" : "Legacy run"}</td></tr>
+                  <tr><th>Source frames</th><td>{selectedRun.analysis_config?.start_frame ?? summary?.source_start_frame ?? 0} to {summary?.source_end_frame ?? "-"}</td></tr>
+                  <tr><th>Calibration</th><td>{selectedRun.analysis_config?.calibration_points?.length ? "Manual fallback supplied" : "Automatic"}</td></tr>
                   <tr><th>Source</th><td>{selectedRun.source}</td></tr>
                   <tr><th>Worker</th><td>{summary?.worker || "-"}</td></tr>
                   <tr><th>Project</th><td>{summary?.source_project || "apps/match-analysis-worker/sports-main"}</td></tr>
@@ -2388,6 +2576,16 @@ function MatchAnalysisPlusPage() {
             <StatCard title="Frames" value={summary.frames_processed} label={`max ${summary.max_frames}`} />
             <StatCard title="Tracks" value={summary.tracks_count} label={summary.model_mode || "sports-main worker"} />
             <StatCard title="Detections" value={summary.detections_count} label={Object.entries(summary.class_counts || {}).map(([key, value]) => `${key}: ${value}`).join(" / ") || "class counts"} />
+            <StatCard
+              title="Pitch confidence"
+              value={`${((summary.radar?.confidence?.average || 0) * 100).toFixed(1)}%`}
+              label={`${summary.radar?.confidence?.reliable_frames || 0}/${summary.radar?.confidence?.total_frames || summary.frames_processed} reliable frames`}
+            />
+            <StatCard
+              title="Ball track"
+              value={summary.ball_filter?.tracker?.observed_frames ?? 0}
+              label={`${summary.ball_filter?.tracker?.interpolated_frames ?? 0} interpolated frames`}
+            />
             <StatCard title="Elapsed" value={`${summary.elapsed_ms} ms`} label={summary.output_codec || "codec"} />
           </section>
 
@@ -2416,14 +2614,84 @@ function MatchAnalysisPlusPage() {
                 <table className="table">
                   <tbody>
                     <tr><th>Model</th><td>{summary.model}</td></tr>
+                    <tr><th>Detector selection</th><td>{summary.model_selection?.selected || summary.model_mode || "-"}</td></tr>
+                    <tr>
+                      <th>Preview coverage</th>
+                      <td>
+                        {summary.model_selection
+                          ? Object.entries(summary.model_selection.candidates)
+                              .map(([name, candidate]) => `${name}: ${candidate.valid_players ?? 0} on-pitch players`)
+                              .join(" / ")
+                          : "-"}
+                      </td>
+                    </tr>
+                    <tr><th>Ball detector</th><td>{summary.ball_detection_mode || summary.ball_model || "-"}</td></tr>
+                    <tr><th>Pitch detector</th><td>{summary.pitch_model_selection?.selected || summary.pitch_model || "-"}</td></tr>
+                    <tr>
+                      <th>Pitch geometry gate</th>
+                      <td>
+                        {summary.pitch_model_selection
+                          ? Object.entries(summary.pitch_model_selection.candidates)
+                              .map(([name, candidate]) => {
+                                const error = candidate.median_reprojection_error_cm;
+                                return `${name}: ${candidate.wide_view_frames ?? 0} wide / ${error == null ? "-" : `${error} cm`}`;
+                              })
+                              .join(" / ")
+                          : "-"}
+                      </td>
+                    </tr>
                     <tr><th>Resolution</th><td>{summary.resolution.join(" x ")}</td></tr>
                     <tr><th>FPS</th><td>{summary.fps}</td></tr>
                     <tr><th>Processing FPS</th><td>{summary.processing_fps ?? "-"}</td></tr>
                     <tr><th>Confidence avg</th><td>{summary.confidence?.avg ?? "-"}</td></tr>
+                    <tr>
+                      <th>Stable track roles</th>
+                      <td>
+                        {Object.entries(summary.track_role_counts || {})
+                          .map(([role, count]) => `${role}: ${count}`)
+                          .join(" / ") || "-"}
+                      </td>
+                    </tr>
+                    <tr>
+                      <th>Role observations</th>
+                      <td>
+                        {Object.entries(summary.participant_role_counts || {})
+                          .map(([role, count]) => `${role}: ${count}`)
+                          .join(" / ") || "-"}
+                      </td>
+                    </tr>
                     <tr><th>Fixture detections rejected</th><td>{summary.player_filter?.rejected_field_fixtures ?? 0}</td></tr>
+                    <tr><th>People outside pitch rejected</th><td>{summary.pitch_occupancy_filter?.rejected_outside_pitch ?? 0}</td></tr>
+                    <tr><th>Non-field footpoints rejected</th><td>{summary.pitch_occupancy_filter?.rejected_non_field_foot ?? 0}</td></tr>
                     <tr><th>Static ball candidates rejected</th><td>{summary.ball_filter?.filtered_static_candidates ?? 0}</td></tr>
+                    <tr><th>Penalty spot false balls rejected</th><td>{summary.ball_filter?.penalty_spot_rejections ?? 0}</td></tr>
+                    <tr><th>Ball observed / interpolated</th><td>{summary.ball_filter?.tracker?.observed_frames ?? 0} / {summary.ball_filter?.tracker?.interpolated_frames ?? 0}</td></tr>
                     <tr><th>Team kit references</th><td>{Object.keys(summary.team_classifier?.kit_anchors_bgr || {}).length}</td></tr>
+                    <tr><th>Team color source</th><td>{summary.kit_references?.source || "online_appearance_clustering"}</td></tr>
+                    <tr>
+                      <th>Team appearance engine</th>
+                      <td>{summary.team_classifier?.engine || "-"}</td>
+                    </tr>
+                    <tr>
+                      <th>Classified / ambiguous kit observations</th>
+                      <td>
+                        {summary.team_classifier
+                          ? `${summary.team_classifier.classified_tracks} tracks / ${summary.team_classifier.ambiguous_observations ?? 0} observations`
+                          : "-"}
+                      </td>
+                    </tr>
+                    <tr>
+                      <th>Officials / goalkeepers</th>
+                      <td>
+                        {summary.team_classifier
+                          ? `${summary.team_classifier.official_tracks?.length ?? 0} / ${summary.team_classifier.goalkeeper_tracks?.length ?? 0}`
+                          : "-"}
+                      </td>
+                    </tr>
                     <tr><th>Pitch calibration</th><td>{summary.radar?.calibration_mode ?? "Not calibrated"}</td></tr>
+                    <tr><th>Calibration source</th><td>{summary.radar?.calibration_source ?? "-"}</td></tr>
+                    <tr><th>Calibration confidence</th><td>{summary.radar?.confidence ? `${(summary.radar.confidence.average * 100).toFixed(1)}% average` : "-"}</td></tr>
+                    <tr><th>Reliable metric frames</th><td>{summary.radar?.confidence ? `${summary.radar.confidence.reliable_frames}/${summary.radar.confidence.total_frames}` : "-"}</td></tr>
                     <tr><th>Radar calibrations</th><td>{summary.radar?.successful_calibrations ?? 0}</td></tr>
                     <tr>
                       <th>Line alignment</th>
@@ -2454,6 +2722,7 @@ function MatchAnalysisPlusPage() {
                     <tr><th>Radar frames rendered</th><td>{summary.radar?.rendered_frames ?? 0}</td></tr>
                     <tr><th>Team 1 control</th><td>{summary.team_ball_control?.team_1_percent ?? 0}%</td></tr>
                     <tr><th>Team 2 control</th><td>{summary.team_ball_control?.team_2_percent ?? 0}%</td></tr>
+                    <tr><th>Possession changes</th><td>{summary.possession?.transitions ?? 0}</td></tr>
                     <tr><th>Output</th><td>{summary.output_object}</td></tr>
                   </tbody>
                 </table>
