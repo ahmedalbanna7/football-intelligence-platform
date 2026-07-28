@@ -275,6 +275,23 @@ MATCH_ANALYSIS_DEFAULT_MAX_FRAMES=450
 docker compose up -d --build
 ```
 
+The first startup downloads the versioned `production-v2-hybrid` model bundle
+from the project's GitHub Release. Every weight is checked against its expected
+file size and SHA-256 digest before the API or analysis workers start. Existing
+valid files are reused, so later startups do not redownload the bundle.
+
+To download or verify the models without Docker:
+
+```bash
+python scripts/download_models.py
+```
+
+The five production and fallback weights require approximately 435 MB. They are
+distributed as Release assets instead of Git objects so every collaborator gets
+the same inference quality without exceeding GitHub's repository file limit.
+The exact release URLs and checksums are versioned in
+[`config/model-bundle-v2.json`](config/model-bundle-v2.json).
+
 ### 3. Open the dashboard
 
 - Frontend: <http://localhost:5173>

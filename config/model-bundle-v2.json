@@ -1,0 +1,43 @@
+{
+  "bundle": "production-v2-hybrid",
+  "version": "2.0.0",
+  "release_tag": "models-v2.0.0",
+  "destination": "apps/backend/models",
+  "models": [
+    {
+      "name": "football-objects-v2.pt",
+      "bytes": 19248147,
+      "sha256": "b36eb91a56385bc467e2151bf6e56e3c33aaceb72675b323107d391e3b627947",
+      "url": "https://github.com/ahmedalbanna7/football-intelligence-platform/releases/download/models-v2.0.0/football-objects-v2.pt",
+      "purpose": "Primary football object and role detector"
+    },
+    {
+      "name": "football-ball-v2.pt",
+      "bytes": 19250067,
+      "sha256": "e1054b64975c45c3f3c824ee695bff3e96648f1ccf0b29a755cde19d563c714a",
+      "url": "https://github.com/ahmedalbanna7/football-intelligence-platform/releases/download/models-v2.0.0/football-ball-v2.pt",
+      "purpose": "Dedicated small football detector"
+    },
+    {
+      "name": "football-pitch-v2.pt",
+      "bytes": 140070753,
+      "sha256": "e41c40ae38537c2dcd65bb19f1e1952c46620cd059e50af67809a8287042a758",
+      "url": "https://github.com/ahmedalbanna7/football-intelligence-platform/releases/download/models-v2.0.0/football-pitch-v2.pt",
+      "purpose": "Primary pitch keypoint detector"
+    },
+    {
+      "name": "football-player-detection.pt",
+      "bytes": 136802409,
+      "sha256": "75b09c377fbf9d0791d23f6cfb689f5aed6eaa43a6818bd1fb884cf7507fffaf",
+      "url": "https://github.com/ahmedalbanna7/football-intelligence-platform/releases/download/models-v2.0.0/football-player-detection.pt",
+      "purpose": "Legacy football participant fallback"
+    },
+    {
+      "name": "football-pitch-detection.pt",
+      "bytes": 140212306,
+      "sha256": "28f68f7c4056d6d9b137efd2e7ab5f3c494039380c63831649126ced25628b36",
+      "url": "https://github.com/ahmedalbanna7/football-intelligence-platform/releases/download/models-v2.0.0/football-pitch-detection.pt",
+      "purpose": "Legacy pitch detector and geometry fallback"
+    }
+  ]
+}
