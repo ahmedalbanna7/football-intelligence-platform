@@ -1614,6 +1614,27 @@ button {
   flex-wrap: wrap;
 }
 
+.quality-ground-truth-builder {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(120px, 170px)) auto;
+  gap: 10px;
+  align-items: end;
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid #d9e2ea;
+}
+
+.quality-ground-truth-builder label {
+  display: grid;
+  gap: 5px;
+}
+
+.quality-ground-truth-builder label span {
+  color: #5f6f7d;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .quality-benchmark-band > input[type="file"] {
   position: absolute;
   width: 1px;
@@ -2015,6 +2036,10 @@ button {
   .quality-heading-actions,
   .quality-benchmark-band {
     width: 100%;
+  }
+
+  .quality-ground-truth-builder {
+    grid-template-columns: 1fr;
   }
 
   .quality-state {

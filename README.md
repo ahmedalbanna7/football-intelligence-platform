@@ -210,7 +210,7 @@ flowchart LR
 | Tracking quality | `GET /match-analysis-plus/{match_id}/runs/{run_id}/quality`, corrections, recalculation, benchmark |
 | AI status | `GET /ai/yolo/status` |
 
-Detailed quality-gate behavior and the ground-truth JSON contract are documented in [docs/TRACKING_QUALITY_GATE.md](docs/TRACKING_QUALITY_GATE.md).
+Detailed quality-gate behavior and the ground-truth JSON contract are documented in [docs/TRACKING_QUALITY_GATE.md](docs/TRACKING_QUALITY_GATE.md). The conservative association rules, Match 12 regression clips, and release thresholds are in [docs/tracking-accuracy-v2.md](docs/tracking-accuracy-v2.md).
 
 ## Repository Layout
 

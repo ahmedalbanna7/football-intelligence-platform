@@ -1,0 +1,67 @@
+{
+  "schema_version": "tracking_ground_truth.v2",
+  "coverage": "selected_identities",
+  "verification": {
+    "status": "verified",
+    "annotator": "codex-assisted-manual-review",
+    "reviewed_at": "2026-08-23T14:00:00Z"
+  },
+  "source": {
+    "match_id": 12,
+    "file_name": "08fd33_4.mp4",
+    "reference_run_id": 47,
+    "purpose": "Regression for the first confirmed global stable-ID permutation"
+  },
+  "frames": [
+    {
+      "frame": 15,
+      "objects": [
+        {
+          "identity_id": "match12-player-a",
+          "bbox": [1302.44, 397.41, 1328.29, 467.26],
+          "review_state": "verified"
+        }
+      ]
+    },
+    {
+      "frame": 18,
+      "objects": [
+        {
+          "identity_id": "match12-player-a",
+          "bbox": [1309.24, 396.58, 1332.86, 467.31],
+          "review_state": "verified"
+        }
+      ]
+    },
+    {
+      "frame": 20,
+      "objects": [
+        {
+          "identity_id": "match12-player-a",
+          "bbox": [1309.73, 399.45, 1328.4, 468.39],
+          "review_state": "verified"
+        }
+      ]
+    },
+    {
+      "frame": 27,
+      "objects": [
+        {
+          "identity_id": "match12-player-a",
+          "bbox": [1323.61, 398.11, 1348.83, 470.35],
+          "review_state": "verified"
+        }
+      ]
+    },
+    {
+      "frame": 39,
+      "objects": [
+        {
+          "identity_id": "match12-player-a",
+          "bbox": [1335.63, 401.83, 1365.61, 474.46],
+          "review_state": "verified"
+        }
+      ]
+    }
+  ]
+}

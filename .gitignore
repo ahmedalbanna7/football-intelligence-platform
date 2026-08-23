@@ -28,6 +28,7 @@ artifacts/
 *.webm
 
 # Local caches
+.tmp/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/

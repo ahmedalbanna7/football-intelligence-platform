@@ -54,7 +54,7 @@ These values are only populated after uploading frame-level ground truth:
 - fragmentation;
 - IDTP, IDFP, and IDFN.
 
-Until ground truth is present, the API deliberately returns `ground_truth_required` and null benchmark values.
+Until verified ground truth is present, the API deliberately returns `ground_truth_required` and null benchmark values. Draft or automatically generated labels are rejected.
 
 ## Ground-truth JSON
 
@@ -64,13 +64,19 @@ The benchmark accepts either grouped frames or a flat observation list.
 
 ```json
 {
+  "verification": {
+    "status": "verified",
+    "annotator": "analyst@example.com",
+    "reviewed_at": "2026-08-23T12:00:00Z"
+  },
   "frames": [
     {
       "frame": 0,
       "objects": [
         {
           "identity_id": "player-10",
-          "bbox": [758.4, 309.6, 828.8, 439.2]
+          "bbox": [758.4, 309.6, 828.8, 439.2],
+          "review_state": "verified"
         }
       ]
     }
@@ -82,6 +88,10 @@ The benchmark accepts either grouped frames or a flat observation list.
 
 ```json
 {
+  "verification": {
+    "status": "verified",
+    "annotator": "analyst@example.com"
+  },
   "observations": [
     {
       "frame": 0,
@@ -93,6 +103,8 @@ The benchmark accepts either grouped frames or a flat observation list.
 ```
 
 Bounding boxes use source-video pixel coordinates in `x1, y1, x2, y2` order. Identity values may be strings or numbers, but must remain stable for the same player across frames.
+
+The Quality Overview can generate a draft for a selected frame range. Every box and identity must be reviewed before changing the verification status to `verified`. Evaluation is restricted to annotated frames, so predictions outside a selected clip do not reduce its score.
 
 ## Review Actions
 
@@ -116,6 +128,7 @@ GET  /match-analysis-plus/{match_id}/runs/{run_id}/quality
 POST /match-analysis-plus/{match_id}/runs/{run_id}/quality/corrections
 POST /match-analysis-plus/{match_id}/runs/{run_id}/quality/corrections/{correction_id}/undo
 POST /match-analysis-plus/{match_id}/runs/{run_id}/quality/recalculate
+POST /match-analysis-plus/{match_id}/runs/{run_id}/quality/ground-truth/draft
 POST /match-analysis-plus/{match_id}/runs/{run_id}/quality/benchmark
 ```
 

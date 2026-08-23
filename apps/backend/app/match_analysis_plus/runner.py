@@ -106,6 +106,9 @@ class StableTrackState:
     jersey_family_votes: dict[str, int] = field(default_factory=dict)
     role_name: str = "player"
     role_votes: dict[str, float] = field(default_factory=dict)
+    role_locked: bool = False
+    last_observed_role: str = "player"
+    role_streak: int = 1
     bbox_height: float = 0.0
     depth_proxy: float = 0.0
     depth_velocity: float = 0.0
@@ -123,6 +126,8 @@ class StableTrackState:
     max_observation_gap: int = 0
     assignment_scores: list[float] = field(default_factory=list)
     detection_confidences: list[float] = field(default_factory=list)
+    max_motion_gate_ratio: float = 0.0
+    native_reid_reentries: int = 0
 
 
 class PlayerValidityFilter:
@@ -350,13 +355,15 @@ class PitchOccupancyFilter:
 class TrackIdStabilizer:
     def __init__(
         self,
-        max_gap_frames: int = 240,
+        max_gap_frames: int = 120,
         confirmation_hits: int = 4,
         hidden_hold_frames: int = 18,
+        long_gap_frames: int = 30,
     ) -> None:
         self.max_gap_frames = max_gap_frames
         self.confirmation_hits = confirmation_hits
         self.hidden_hold_frames = hidden_hold_frames
+        self.long_gap_frames = long_gap_frames
         self.next_stable_id = 1
         self.tracks: dict[int, StableTrackState] = {}
         self.raw_to_stable: dict[int, int] = {}
@@ -382,6 +389,11 @@ class TrackIdStabilizer:
         self.global_assignment_fallbacks = 0
         self.motion_matches = 0
         self.raw_id_identity_mismatch_ignores = 0
+        self.raw_id_motion_conflict_ignores = 0
+        self.rejected_hard_motion_jumps = 0
+        self.rejected_long_gap_reentries = 0
+        self.rejected_role_conflicts = 0
+        self.frozen_identity_visual_updates = 0
 
     def update(self, frame_index: int, players: list[AnalysisObject], frame: np.ndarray | None = None) -> list[AnalysisObject]:
         self._expire_tentative_tracks(frame_index)
@@ -458,6 +470,7 @@ class TrackIdStabilizer:
                 pair_scores=pair_scores,
                 crowded=bool(candidates[candidate_index]["crowded"]),
                 severe_overlap=bool(candidates[candidate_index]["severe_overlap"]),
+                frame_index=frame_index,
             ):
                 uncertain_candidates.add(candidate_index)
                 self.suppressed_uncertain_associations += 1
@@ -533,8 +546,12 @@ class TrackIdStabilizer:
         }
         stable_count = max(len(confirmed_tracks), 1)
         raw_count = len(self.raw_ids_seen)
+        motion_gate_ratios = [
+            state.max_motion_gate_ratio
+            for state in confirmed_tracks.values()
+        ]
         return {
-            "engine": "identity_isolation_stabilizer_v4_observation_only",
+            "engine": "identity_isolation_stabilizer_v5_conservative_reid",
             "raw_track_ids_seen": raw_count,
             "stable_tracks_count": len(confirmed_tracks),
             "internal_track_candidates": len(self.tracks),
@@ -542,6 +559,7 @@ class TrackIdStabilizer:
             "max_gap_frames": self.max_gap_frames,
             "confirmation_hits": self.confirmation_hits,
             "hidden_hold_frames": self.hidden_hold_frames,
+            "long_gap_frames": self.long_gap_frames,
             "raw_id_reassignments": self.raw_id_reassignments,
             "appearance_matches": self.appearance_matches,
             "rejected_far_matches": self.rejected_far_matches,
@@ -564,12 +582,20 @@ class TrackIdStabilizer:
             "global_assignment_fallbacks": self.global_assignment_fallbacks,
             "motion_matches": self.motion_matches,
             "raw_id_identity_mismatch_ignores": self.raw_id_identity_mismatch_ignores,
+            "raw_id_motion_conflict_ignores": self.raw_id_motion_conflict_ignores,
+            "rejected_hard_motion_jumps": self.rejected_hard_motion_jumps,
+            "rejected_long_gap_reentries": self.rejected_long_gap_reentries,
+            "rejected_role_conflicts": self.rejected_role_conflicts,
+            "frozen_identity_visual_updates": self.frozen_identity_visual_updates,
             "tracks_with_multiple_raw_ids": sum(1 for count in raw_ids_per_stable.values() if count > 1),
             "max_raw_ids_per_stable_track": max(raw_ids_per_stable.values(), default=0),
             "avg_raw_ids_per_stable_track": round(raw_count / stable_count, 3),
             "fragmentation_reduction_percent": round(max(0, raw_count - len(confirmed_tracks)) * 100 / max(raw_count, 1), 2),
             "raw_ids_per_stable_track": raw_ids_per_stable,
             "identity_locked_tracks": sum(1 for state in confirmed_tracks.values() if state.identity_locked),
+            "max_accepted_motion_gate_ratio": round(max(motion_gate_ratios, default=0.0), 4),
+            "tracks_near_motion_gate": sum(1 for ratio in motion_gate_ratios if ratio >= 0.82),
+            "tracks_over_motion_gate": sum(1 for ratio in motion_gate_ratios if ratio > 1.0),
         }
 
     def _solve_global_assignment(
@@ -636,9 +662,8 @@ class TrackIdStabilizer:
         pair_scores: list[tuple[float, int, int]],
         crowded: bool,
         severe_overlap: bool,
+        frame_index: int,
     ) -> bool:
-        if not crowded:
-            return False
         competing_scores = [
             score
             for score, other_stable_id, other_candidate_index in pair_scores
@@ -653,7 +678,16 @@ class TrackIdStabilizer:
         ]
         if not competing_scores:
             return False
-        required_margin = 0.90 if severe_overlap else 0.48
+        gap = max(frame_index - self.tracks[stable_id].last_frame, 1)
+        required_margin = (
+            0.90
+            if severe_overlap
+            else 0.52
+            if crowded
+            else 0.42
+            if gap > 8
+            else 0.20
+        )
         return assigned_score - max(competing_scores) < required_margin
 
     def _near_confirmed_prediction(
@@ -800,18 +834,68 @@ class TrackIdStabilizer:
         predicted_depth = state.depth_proxy + state.depth_velocity * min(gap, 45)
         perspective_depth_gap = abs(depth_proxy - predicted_depth)
         direction_similarity = self._direction_similarity(state, foot, gap)
-        same_raw = self.raw_to_stable.get(raw_id) == state.stable_id
+        same_raw_owner = self.raw_to_stable.get(raw_id) == state.stable_id
         trusted_visual = visual_reliable and visual_quality >= 0.80
+        raw_motion_conflict = same_raw_owner and self._raw_id_motion_conflict(
+            state=state,
+            player=player,
+            frame_index=frame_index,
+        )
+        raw_identity_conflict = same_raw_owner and (
+            raw_motion_conflict
+            or self._raw_id_identity_mismatch(
+                state,
+                player,
+                frame_index,
+                appearance_hist,
+                jersey_color,
+            )
+        )
+        if raw_identity_conflict:
+            self.raw_id_identity_mismatch_ignores += 1
+            if raw_motion_conflict:
+                self.raw_id_motion_conflict_ignores += 1
+        same_raw = same_raw_owner and not raw_identity_conflict
         bootstrap_raw = same_raw and not trusted_visual and state.reliable_hits < 4
+        observed_role = self._normalized_role(player.role_name)
+
+        direct_foot_distance = self._center_distance(foot, state.foot)
+        hard_motion_gate = self._hard_motion_gate(state, player.bbox, gap)
+        if direct_foot_distance > hard_motion_gate and iou < 0.04:
+            self.rejected_hard_motion_jumps += 1
+            if state.identity_locked:
+                self.locked_identity_rejections += 1
+            return None
+
+        if gap > self.long_gap_frames:
+            native_reid_evidence = (
+                same_raw
+                and trusted_visual
+                and appearance >= 0.62
+                and color_similarity >= 0.42
+            )
+            if not native_reid_evidence:
+                self.rejected_long_gap_reentries += 1
+                return None
+
+        if (
+            state.role_locked
+            and observed_role != state.role_name
+            and gap > 8
+            and trusted_visual
+            and appearance < 0.90
+        ):
+            self.rejected_role_conflicts += 1
+            return None
 
         family_mismatch = self._color_family_mismatch(state.jersey_family, jersey_family)
         if family_mismatch and family_confidence >= 0.70:
             self.rejected_color_family_mismatches += 1
             if (
-                state.identity_locked
+                (state.identity_locked or state.reliable_hits >= 8)
                 and trusted_visual
-                and color_similarity < 0.50
-                and appearance < 0.72
+                and color_similarity < 0.62
+                and appearance < 0.84
             ):
                 self.locked_identity_rejections += 1
                 return None
@@ -850,11 +934,10 @@ class TrackIdStabilizer:
                     self.locked_identity_rejections += 1
                 return None
 
-        far_gate = max_distance * (1.4 if gap <= 4 else 1.9)
+        far_gate = max_distance * (1.25 if gap <= 4 else 1.55)
         if (
             center_distance > far_gate
             and foot_distance > far_gate
-            and appearance < 0.82
             and not (same_raw and trusted_visual)
             and not bootstrap_raw
         ):
@@ -888,10 +971,7 @@ class TrackIdStabilizer:
         if bootstrap_raw:
             raw_bonus = 2.4
         elif same_raw and trusted_visual:
-            if self._raw_id_identity_mismatch(state, player, frame_index, appearance_hist, jersey_color):
-                self.raw_id_identity_mismatch_ignores += 1
-            else:
-                raw_bonus = 0.72
+            raw_bonus = 2.8 if gap <= 3 else 1.8 if gap <= 12 else 0.95
 
         family_penalty = 0.0
         if family_mismatch and family_confidence >= 0.55:
@@ -912,7 +992,7 @@ class TrackIdStabilizer:
             - family_penalty
             - gap * 0.004
         )
-        min_score = 3.9 if gap <= 4 else 4.2
+        min_score = 4.05 if gap <= 4 else 4.45
         if same_raw and trusted_visual:
             min_score -= 0.35
         if bootstrap_raw:
@@ -934,7 +1014,7 @@ class TrackIdStabilizer:
         stable_id = self.next_stable_id
         self.next_stable_id += 1
         jersey_family = self._jersey_family(jersey_color)
-        role_name = self._normalized_role(player.role_name)
+        observed_role = self._normalized_role(player.role_name)
         self.tracks[stable_id] = StableTrackState(
             stable_id=stable_id,
             bbox=player.bbox,
@@ -949,8 +1029,9 @@ class TrackIdStabilizer:
             jersey_color=jersey_color,
             jersey_family=jersey_family,
             jersey_family_votes={jersey_family: 1} if jersey_family is not None else {},
-            role_name=role_name,
-            role_votes={role_name: self._role_vote_weight(role_name)},
+            role_name="player",
+            role_votes={observed_role: self._role_vote_weight(observed_role)},
+            last_observed_role=observed_role,
             bbox_height=self._bbox_height(player.bbox),
             depth_proxy=self._depth_proxy(player.bbox),
             last_reliable_frame=frame_index if appearance_hist is not None else 0,
@@ -980,6 +1061,13 @@ class TrackIdStabilizer:
         new_foot = self._foot(player.bbox)
         new_depth = self._depth_proxy(player.bbox)
         frame_delta = max(frame_index - state.last_frame, 1)
+        motion_gate = self._hard_motion_gate(state, player.bbox, frame_delta)
+        state.max_motion_gate_ratio = max(
+            state.max_motion_gate_ratio,
+            self._center_distance(new_foot, state.foot) / max(motion_gate, 1.0),
+        )
+        if frame_delta > self.long_gap_frames and self.raw_to_stable.get(raw_id) == stable_id:
+            state.native_reid_reentries += 1
         state.max_observation_gap = max(state.max_observation_gap, frame_delta)
         if frame_delta > 2:
             state.fragments += 1
@@ -1024,15 +1112,22 @@ class TrackIdStabilizer:
         state.bbox_height = state.bbox_height * 0.82 + self._bbox_height(player.bbox) * 0.18
         state.hits += 1
         state.consecutive_hits = state.consecutive_hits + 1 if frame_delta <= 2 else 1
-        observed_role = self._normalized_role(player.role_name)
-        state.role_votes[observed_role] = (
-            state.role_votes.get(observed_role, 0.0)
-            + self._role_vote_weight(observed_role)
-        )
-        state.role_name = max(state.role_votes, key=state.role_votes.get)
+        self._update_role_state(state, self._normalized_role(player.role_name))
         if not visual_reliable:
             state.occlusion_hits += 1
-        if visual_reliable and appearance_hist is not None:
+        identity_visual_update = visual_reliable
+        if state.identity_locked and appearance_hist is not None:
+            appearance_to_identity = self._state_appearance_similarity(appearance_hist, state)
+            color_to_identity = self._color_similarity(jersey_color, state.jersey_color)
+            observed_family = self._jersey_family(jersey_color)
+            if (
+                appearance_to_identity < 0.74
+                or color_to_identity < 0.52
+                or self._color_family_mismatch(state.jersey_family, observed_family)
+            ):
+                identity_visual_update = False
+                self.frozen_identity_visual_updates += 1
+        if identity_visual_update and appearance_hist is not None:
             state.last_reliable_frame = frame_index
             state.reliable_hits += 1
             if state.appearance_hist is None:
@@ -1046,7 +1141,7 @@ class TrackIdStabilizer:
                 state.appearance_gallery.append(appearance_hist.copy())
                 if len(state.appearance_gallery) > 12:
                     state.appearance_gallery.pop(0)
-        if visual_reliable and jersey_color is not None:
+        if identity_visual_update and jersey_color is not None:
             observed_family = self._jersey_family(jersey_color)
             family_confidence = self._jersey_family_confidence(state)
             accept_color = (
@@ -1090,7 +1185,35 @@ class TrackIdStabilizer:
         return "player"
 
     def _role_vote_weight(self, role_name: str) -> float:
-        return 2.0 if role_name in {"goalkeeper", "referee"} else 1.0
+        if role_name == "referee":
+            return 0.70
+        if role_name == "goalkeeper":
+            return 0.85
+        return 1.0
+
+    def _update_role_state(self, state: StableTrackState, observed_role: str) -> None:
+        if observed_role == state.last_observed_role:
+            state.role_streak += 1
+        else:
+            state.last_observed_role = observed_role
+            state.role_streak = 1
+        state.role_votes[observed_role] = (
+            state.role_votes.get(observed_role, 0.0)
+            + self._role_vote_weight(observed_role)
+        )
+        if state.role_locked:
+            return
+
+        total = sum(state.role_votes.values())
+        best_role = max(state.role_votes, key=state.role_votes.get)
+        best_confidence = state.role_votes[best_role] / max(total, 1e-6)
+        required_streak = 8 if best_role in {"referee", "goalkeeper"} else 4
+        if state.last_observed_role == best_role and state.role_streak >= required_streak:
+            if best_confidence >= (0.74 if best_role != "player" else 0.58):
+                state.role_name = best_role
+        if state.hits >= 16 and best_confidence >= 0.84:
+            state.role_name = best_role
+            state.role_locked = True
 
     def _is_compatible(
         self,
@@ -1144,9 +1267,70 @@ class TrackIdStabilizer:
             return True
         return False
 
+    def _raw_id_motion_conflict(
+        self,
+        state: StableTrackState,
+        player: AnalysisObject,
+        frame_index: int,
+    ) -> bool:
+        """Ignore a native ID when another established trajectory owns the detection.
+
+        Native trackers can preserve the numeric ID while assigning it to the other
+        participant after an overlap.  The stable layer therefore treats raw IDs as
+        evidence, not truth, whenever the candidate is substantially closer to a
+        competing predicted foot position.
+        """
+        if state.hits < 3:
+            return False
+        gap = frame_index - state.last_frame
+        if gap < 0 or gap > self.hidden_hold_frames:
+            return False
+
+        candidate_foot = self._foot(player.bbox)
+        own_prediction = self._predicted_foot(state, max(gap, 1))
+        own_distance = self._center_distance(candidate_foot, own_prediction)
+        separation_margin = max(12.0, self._bbox_height(player.bbox) * 0.20)
+        if own_distance <= separation_margin:
+            return False
+
+        for other_state in self.tracks.values():
+            if other_state.stable_id == state.stable_id or not other_state.confirmed:
+                continue
+            other_gap = frame_index - other_state.last_frame
+            if other_gap < 0 or other_gap > self.hidden_hold_frames:
+                continue
+            other_prediction = self._predicted_foot(other_state, max(other_gap, 1))
+            other_distance = self._center_distance(candidate_foot, other_prediction)
+            if other_distance + separation_margin < own_distance:
+                return True
+        return False
+
     def _max_center_distance(self, bbox_a: list[float], bbox_b: list[float], gap: int) -> float:
         size = max(self._bbox_size(bbox_a), self._bbox_size(bbox_b), 1.0)
-        return max(65.0, min(320.0, size * 1.55 + min(gap, 45) * 5.0))
+        return max(42.0, min(240.0, size * 1.10 + min(gap, 30) * 4.0))
+
+    def _hard_motion_gate(
+        self,
+        state: StableTrackState,
+        candidate_bbox: list[float],
+        gap: int,
+    ) -> float:
+        """Maximum plausible image-plane foot displacement before identity is rejected.
+
+        Appearance can distinguish teams, but it must never override impossible motion.
+        A camera cut may therefore start new identities; that is safer than assigning an
+        existing identity to a different person and corrupting every downstream metric.
+        """
+        height = max(state.bbox_height, self._bbox_height(candidate_bbox), 1.0)
+        if gap <= 2:
+            gate = height * 0.62 + gap * 12.0
+        elif gap <= 12:
+            gate = height * 0.78 + gap * 8.0
+        elif gap <= self.long_gap_frames:
+            gate = height * 1.05 + gap * 5.0
+        else:
+            gate = height * 1.35 + min(gap, self.max_gap_frames) * 3.0
+        return max(28.0, min(260.0, gate))
 
     def _is_locked_jersey_mismatch(
         self,
@@ -1231,20 +1415,16 @@ class TrackIdStabilizer:
         if crop.size == 0:
             return None, None
         person = cv2.resize(crop, (32, 64), interpolation=cv2.INTER_AREA)
-        torso = person[6:36, 8:24]
+        torso = person[8:34, 9:23]
         if torso.size == 0:
             return None, None
 
-        hsv = cv2.cvtColor(torso, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, np.array([0, 38, 45]), np.array([179, 255, 255]))
-        if int(np.count_nonzero(mask)) < max(12, int(mask.size * 0.08)):
-            mask = None
-
         region_descriptors = [
-            self._region_hist(person[0:20, 7:25]),
+            self._region_hist(person[1:19, 8:24]),
             self._region_hist(torso),
-            self._region_hist(person[34:61, 4:28]),
+            self._region_hist(person[34:61, 6:26]),
         ]
+        lab_torso = self._region_lab_hist(torso)
         gray = cv2.cvtColor(person, cv2.COLOR_BGR2GRAY)
         gradients = self._gradient_descriptor(gray)
         appearance = self._normalize_hist(
@@ -1253,14 +1433,15 @@ class TrackIdStabilizer:
                     region_descriptors[0] * 0.85,
                     region_descriptors[1] * 1.35,
                     region_descriptors[2] * 1.0,
+                    lab_torso * 1.15,
                     gradients * 0.55,
                 ]
             ).astype(np.float32)
         )
-        if mask is not None:
-            pixels = torso[mask > 0].reshape(-1, 3).astype(np.float32)
-        else:
-            pixels = torso.reshape(-1, 3).astype(np.float32)
+        inner_torso = torso[2:-2, 2:-2] if torso.shape[0] > 6 and torso.shape[1] > 6 else torso
+        hsv = cv2.cvtColor(inner_torso, cv2.COLOR_BGR2HSV)
+        valid_mask = hsv[:, :, 2] >= 32
+        pixels = inner_torso[valid_mask].reshape(-1, 3).astype(np.float32)
         jersey_color = None
         if len(pixels) >= 6:
             jersey_color = tuple(int(value) for value in np.median(pixels, axis=0))
@@ -1271,6 +1452,13 @@ class TrackIdStabilizer:
             return np.zeros(128, dtype=np.float32)
         hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
         hist = cv2.calcHist([hsv], [0, 1], None, [16, 8], [0, 180, 0, 256]).astype(np.float32).flatten()
+        return self._normalize_hist(hist)
+
+    def _region_lab_hist(self, region: np.ndarray) -> np.ndarray:
+        if region.size == 0:
+            return np.zeros(64, dtype=np.float32)
+        lab = cv2.cvtColor(region, cv2.COLOR_BGR2LAB)
+        hist = cv2.calcHist([lab], [1, 2], None, [8, 8], [0, 256, 0, 256]).astype(np.float32).flatten()
         return self._normalize_hist(hist)
 
     def _gradient_descriptor(self, gray: np.ndarray) -> np.ndarray:
@@ -1309,11 +1497,16 @@ class TrackIdStabilizer:
         aggregate = self._appearance_similarity(candidate, state.appearance_hist)
         if not state.appearance_gallery:
             return aggregate
-        gallery_best = max(
+        gallery_scores = sorted(
+            (
             self._appearance_similarity(candidate, reference)
             for reference in state.appearance_gallery
+            ),
+            reverse=True,
         )
-        return max(aggregate, gallery_best * 0.96)
+        robust_count = min(3, len(gallery_scores))
+        robust_gallery = float(np.mean(gallery_scores[:robust_count]))
+        return float(np.clip(aggregate * 0.62 + robust_gallery * 0.38, 0.0, 1.0))
 
     def _color_similarity(
         self,
@@ -1427,6 +1620,7 @@ class TrackIdStabilizer:
         lock_bonus = 0.12 if state.identity_locked else 0.0
         fragment_penalty = min(0.22, max(0, state.fragments - 1) * 0.055)
         transition_penalty = min(0.16, state.raw_id_transitions * 0.018)
+        motion_penalty = max(0.0, state.max_motion_gate_ratio - 0.68) * 0.34
         return float(
             np.clip(
                 history * 0.42
@@ -1434,7 +1628,8 @@ class TrackIdStabilizer:
                 + continuity * 0.30
                 + lock_bonus
                 - fragment_penalty
-                - transition_penalty,
+                - transition_penalty
+                - motion_penalty,
                 0.0,
                 1.0,
             )
@@ -1456,8 +1651,17 @@ class TrackIdStabilizer:
             identity_confidence = self._identity_confidence(state)
             appearance_consistency = self._appearance_consistency(state)
             gallery_coverage = min(1.0, len(state.appearance_gallery) / 6.0)
-            reid_confidence = appearance_consistency * 0.72 + gallery_coverage * 0.28
             motion_consistency = self._motion_consistency(state)
+            transition_consistency = max(
+                0.0,
+                1.0 - state.raw_id_transitions / max(state.hits * 0.08, 1.0),
+            )
+            reid_confidence = (
+                appearance_consistency * 0.40
+                + gallery_coverage * 0.12
+                + motion_consistency * 0.30
+                + transition_consistency * 0.18
+            )
             team_consistency = self._jersey_family_confidence(state)
             fragment_count = max(0, state.fragments - 1)
             issues: list[str] = []
@@ -1471,6 +1675,8 @@ class TrackIdStabilizer:
                 issues.append("team_color_unstable")
             if reid_confidence < 0.58:
                 issues.append("appearance_inconsistent")
+            if state.max_motion_gate_ratio >= 0.82:
+                issues.append("near_motion_gate")
             if track_frames.get(track_id, 0) < self.confirmation_hits * 3:
                 issues.append("short_track")
 
@@ -1502,6 +1708,9 @@ class TrackIdStabilizer:
                     "last_frame": state.last_frame,
                     "observation_count": track_frames.get(track_id, 0),
                     "raw_track_ids": sorted(state.raw_ids_seen),
+                    "max_motion_gate_ratio": round(state.max_motion_gate_ratio, 4),
+                    "native_reid_reentries": state.native_reid_reentries,
+                    "role_locked": state.role_locked,
                     "issue_codes": issues,
                     "crop_files": crop_files.get(track_id, []),
                     "review_observations": observations,
@@ -1512,8 +1721,9 @@ class TrackIdStabilizer:
         review_tracks = [track for track in tracks if track["switch_risk"] != "low"]
         high_risk_tracks = [track for track in tracks if track["switch_risk"] == "high"]
         fragmented_tracks = [track for track in tracks if int(track["fragment_count"]) > 0]
+        motion_gate_ratios = [float(track["max_motion_gate_ratio"]) for track in tracks]
         return {
-            "engine": "tracking_quality_gate_v1",
+            "engine": "tracking_quality_gate_v2_ground_truth",
             "tracker_runtime": tracker_runtime,
             "overview": {
                 "status": "needs_review" if review_tracks else "quality_check_passed",
@@ -1525,6 +1735,9 @@ class TrackIdStabilizer:
                 "fragmented_tracks": len(fragmented_tracks),
                 "tracks_needing_review": len(review_tracks),
                 "low_risk_tracks": len(tracks) - len(review_tracks),
+                "max_accepted_motion_gate_ratio": round(max(motion_gate_ratios, default=0.0), 4),
+                "tracks_near_motion_gate": sum(1 for ratio in motion_gate_ratios if ratio >= 0.82),
+                "tracks_over_motion_gate": sum(1 for ratio in motion_gate_ratios if ratio > 1.0),
             },
             "benchmark": {
                 "status": "ground_truth_required",
@@ -1556,8 +1769,16 @@ class TrackIdStabilizer:
             score_quality = 0.45
         gap_quality = max(0.0, 1.0 - min(state.max_observation_gap, 30) / 30.0)
         fragment_quality = max(0.0, 1.0 - max(0, state.fragments - 1) * 0.16)
+        gate_quality = max(0.0, 1.0 - max(0.0, state.max_motion_gate_ratio - 0.45) / 0.55)
         return float(
-            np.clip(score_quality * 0.52 + gap_quality * 0.24 + fragment_quality * 0.24, 0.0, 1.0)
+            np.clip(
+                score_quality * 0.36
+                + gap_quality * 0.20
+                + fragment_quality * 0.20
+                + gate_quality * 0.24,
+                0.0,
+                1.0,
+            )
         )
 
     def _center(self, bbox: list[float]) -> tuple[float, float]:
@@ -5288,7 +5509,7 @@ class MatchAnalysisPlusRunner:
                 "encoder": type(encoder).__name__ if encoder is not None else None,
                 "native_detector_features": native_features,
             },
-            "stable_identity_layer": "identity_isolation_stabilizer_v4_observation_only",
+            "stable_identity_layer": "identity_isolation_stabilizer_v5_conservative_reid",
         }
 
     def _reset_tracker_state(self, model: Any) -> None:

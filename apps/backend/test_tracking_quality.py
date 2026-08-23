@@ -5,7 +5,7 @@ from app.tracking_quality.metrics import evaluate_tracking
 
 def _payload(rows: list[tuple[int, str, list[float]]], prediction: bool) -> dict:
     identity_key = "track_id" if prediction else "identity_id"
-    return {
+    payload = {
         "observations": [
             {
                 "frame": frame,
@@ -15,6 +15,12 @@ def _payload(rows: list[tuple[int, str, list[float]]], prediction: bool) -> dict
             for frame, identity, bbox in rows
         ]
     }
+    if not prediction:
+        payload["verification"] = {
+            "status": "verified",
+            "annotator": "tracking-quality-test",
+        }
+    return payload
 
 
 class TrackingQualityMetricTests(unittest.TestCase):
@@ -76,6 +82,51 @@ class TrackingQualityMetricTests(unittest.TestCase):
 
         self.assertEqual(1, metrics["fragmentation"])
         self.assertLess(metrics["idf1"], 100.0)
+
+    def test_predictions_outside_selected_clip_are_ignored(self) -> None:
+        predictions = [
+            (frame, "1" if identity == "a" else "2", bbox)
+            for frame, identity, bbox in self.ground_truth_rows
+        ]
+        predictions.append((99, "unrelated", [0, 0, 20, 50]))
+
+        metrics = evaluate_tracking(
+            _payload(predictions, prediction=True),
+            _payload(self.ground_truth_rows, prediction=False),
+        )
+
+        self.assertEqual(100.0, metrics["idf1"])
+        self.assertEqual(3, metrics["evaluated_frames"])
+        self.assertEqual("annotated_frames_only", metrics["evaluation_scope"])
+
+    def test_unverified_ground_truth_is_rejected(self) -> None:
+        ground_truth = _payload(self.ground_truth_rows, prediction=False)
+        ground_truth["verification"]["status"] = "draft"
+
+        with self.assertRaisesRegex(ValueError, "manually reviewed"):
+            evaluate_tracking(
+                _payload(self.ground_truth_rows, prediction=True),
+                ground_truth,
+            )
+
+    def test_selected_identity_coverage_ignores_other_people_in_same_frame(self) -> None:
+        ground_truth = _payload(
+            [row for row in self.ground_truth_rows if row[1] == "a"],
+            prediction=False,
+        )
+        ground_truth["coverage"] = "selected_identities"
+        predictions = [
+            (frame, "1" if identity == "a" else "unrelated", bbox)
+            for frame, identity, bbox in self.ground_truth_rows
+        ]
+
+        metrics = evaluate_tracking(
+            _payload(predictions, prediction=True),
+            ground_truth,
+        )
+
+        self.assertEqual(100.0, metrics["idf1"])
+        self.assertEqual("selected_identities", metrics["coverage"])
 
 
 if __name__ == "__main__":

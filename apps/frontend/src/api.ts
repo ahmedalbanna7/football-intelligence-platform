@@ -191,6 +191,27 @@ export const api = {
     });
   },
 
+  buildTrackingGroundTruthDraft(
+    matchId: number,
+    runId: number,
+    payload: {
+      start_frame: number;
+      end_frame: number;
+      sample_every_frames: number;
+      track_ids?: number[];
+    }
+  ) {
+    return request<{
+      object_name: string;
+      frame_count: number;
+      annotation_count: number;
+      ground_truth: Record<string, unknown>;
+    }>(`/match-analysis-plus/${matchId}/runs/${runId}/quality/ground-truth/draft`, {
+      method: "POST",
+      json: payload
+    });
+  },
+
   getPrimaryTeam() {
     return request<PrimaryTeamProfile>("/primary-team/");
   },

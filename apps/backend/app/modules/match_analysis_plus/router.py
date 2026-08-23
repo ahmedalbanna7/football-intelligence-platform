@@ -45,6 +45,13 @@ class TrackingBenchmarkRequest(BaseModel):
     iou_threshold: float = Field(default=0.5, ge=0.05, le=0.95)
 
 
+class TrackingGroundTruthDraftRequest(BaseModel):
+    start_frame: int = Field(default=0, ge=0)
+    end_frame: int = Field(ge=0)
+    sample_every_frames: int = Field(default=5, ge=1, le=120)
+    track_ids: list[int] = Field(default_factory=list)
+
+
 quality_service = TrackingQualityService()
 
 
@@ -349,5 +356,26 @@ def benchmark_tracking_quality(
             "metrics": metrics,
             "quality": quality_service.get_quality(db, run),
         }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/{match_id}/runs/{run_id}/quality/ground-truth/draft")
+def build_tracking_ground_truth_draft(
+    match_id: int,
+    run_id: int,
+    payload: TrackingGroundTruthDraftRequest,
+    db: Session = Depends(get_db),
+):
+    run = get_run_or_404(db, match_id, run_id)
+    try:
+        return quality_service.build_ground_truth_draft(
+            db=db,
+            run=run,
+            start_frame=payload.start_frame,
+            end_frame=payload.end_frame,
+            sample_every_frames=payload.sample_every_frames,
+            track_ids=payload.track_ids,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

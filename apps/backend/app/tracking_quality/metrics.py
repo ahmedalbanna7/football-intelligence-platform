@@ -6,6 +6,38 @@ from typing import Any
 import numpy as np
 
 
+def _validate_ground_truth(payload: dict[str, Any]) -> dict[str, Any]:
+    verification = payload.get("verification")
+    if not isinstance(verification, dict):
+        verification = {}
+    status = str(
+        verification.get("status")
+        or payload.get("verification_status")
+        or payload.get("status")
+        or "draft"
+    ).lower()
+    if status != "verified":
+        raise ValueError(
+            "Ground truth must be manually reviewed and marked verification.status='verified'"
+        )
+    annotator = verification.get("annotator") or payload.get("annotator")
+    if not str(annotator or "").strip():
+        raise ValueError("Verified ground truth must include verification.annotator")
+    for frame_payload in payload.get("frames", []):
+        if not isinstance(frame_payload, dict):
+            continue
+        for item in frame_payload.get("objects", frame_payload.get("annotations", [])):
+            if isinstance(item, dict) and item.get("review_state") != "verified":
+                raise ValueError(
+                    "Every ground-truth object must have review_state='verified'"
+                )
+    return {
+        "status": status,
+        "annotator": str(annotator),
+        "reviewed_at": verification.get("reviewed_at"),
+    }
+
+
 def _iou(a: list[float], b: list[float]) -> float:
     x1 = max(float(a[0]), float(b[0]))
     y1 = max(float(a[1]), float(b[1]))
@@ -262,12 +294,49 @@ def evaluate_tracking(
 ) -> dict[str, Any]:
     if not 0.05 <= iou_threshold <= 0.95:
         raise ValueError("iou_threshold must be between 0.05 and 0.95")
+    verification = _validate_ground_truth(ground_truth)
     prediction_frames = _normalise_frames(predictions, prediction=True)
     ground_truth_frames = _normalise_frames(ground_truth, prediction=False)
     if not ground_truth_frames:
         raise ValueError("Ground truth does not contain valid frame annotations")
     if not prediction_frames:
         raise ValueError("Tracking run does not contain valid predictions")
+
+    duplicate_identities: list[tuple[int, str]] = []
+    for frame_index, items in ground_truth_frames.items():
+        identities = [item["identity"] for item in items]
+        duplicate_identities.extend(
+            (frame_index, identity)
+            for identity in set(identities)
+            if identities.count(identity) > 1
+        )
+    if duplicate_identities:
+        frame_index, identity = duplicate_identities[0]
+        raise ValueError(
+            f"Ground truth identity {identity!r} occurs more than once in frame {frame_index}"
+        )
+
+    coverage = str(ground_truth.get("coverage") or "all_visible_identities")
+    annotated_frames = set(ground_truth_frames)
+    prediction_frames = {
+        frame_index: items
+        for frame_index, items in prediction_frames.items()
+        if frame_index in annotated_frames
+    }
+    if coverage == "selected_identities":
+        prediction_frames = {
+            frame_index: [
+                prediction
+                for prediction in items
+                if any(
+                    _iou(prediction["bbox"], truth["bbox"]) >= 0.10
+                    for truth in ground_truth_frames.get(frame_index, [])
+                )
+            ]
+            for frame_index, items in prediction_frames.items()
+        }
+    if not prediction_frames:
+        raise ValueError("Tracking run has no predictions in the annotated ground-truth frames")
 
     identity = _identity_metrics(
         ground_truth_frames,
@@ -280,10 +349,17 @@ def evaluate_tracking(
         for threshold in thresholds
     ]
     hota = float(np.mean([float(item["hota"]) for item in hota_curve]))
-    evaluated_frames = len(set(ground_truth_frames) | set(prediction_frames))
+    evaluated_frames = len(ground_truth_frames)
     return {
         "status": "measured",
-        "protocol": "mot_identity_and_hota",
+        "protocol": (
+            "mot_identity_and_hota_partial_identity"
+            if coverage == "selected_identities"
+            else "mot_identity_and_hota"
+        ),
+        "evaluation_scope": "annotated_frames_only",
+        "coverage": coverage,
+        "verification": verification,
         "iou_threshold": iou_threshold,
         "evaluated_frames": evaluated_frames,
         "ground_truth_identities": len(

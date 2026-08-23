@@ -1,6 +1,7 @@
 import {
   AlertTriangle,
   CheckCircle2,
+  Download,
   Eye,
   FileCheck2,
   GitMerge,
@@ -80,6 +81,9 @@ export function TrackingQualityPanel({
   const [groundTruth, setGroundTruth] = useState<Record<string, unknown> | null>(null);
   const [groundTruthName, setGroundTruthName] = useState<string | null>(null);
   const [iouThreshold, setIouThreshold] = useState(0.5);
+  const [groundTruthStart, setGroundTruthStart] = useState(0);
+  const [groundTruthEnd, setGroundTruthEnd] = useState(0);
+  const [groundTruthStep, setGroundTruthStep] = useState(5);
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
   async function load() {
@@ -117,6 +121,15 @@ export function TrackingQualityPanel({
   }, [data, riskFilter, statusFilter, teamFilter]);
 
   const selectedTrack = data?.tracks.find((track) => track.track_id === selectedTrackId) || null;
+  const lastAvailableFrame = useMemo(
+    () => Math.max(0, ...(data?.tracks.map((track) => track.last_frame ?? 0) || [0])),
+    [data]
+  );
+
+  useEffect(() => {
+    setGroundTruthStart(0);
+    setGroundTruthEnd(lastAvailableFrame);
+  }, [runId, lastAvailableFrame]);
 
   useEffect(() => {
     if (!selectedTrack) return;
@@ -226,6 +239,32 @@ export function TrackingQualityPanel({
     }
   }
 
+  async function downloadGroundTruthDraft() {
+    setBusy(true);
+    setMessage("Building selected ground-truth clip...");
+    try {
+      const response = await api.buildTrackingGroundTruthDraft(matchId, runId, {
+        start_frame: groundTruthStart,
+        end_frame: groundTruthEnd,
+        sample_every_frames: groundTruthStep
+      });
+      const blob = new Blob([JSON.stringify(response.ground_truth, null, 2)], {
+        type: "application/json"
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `match-${matchId}-run-${runId}-gt-${groundTruthStart}-${groundTruthEnd}.json`;
+      link.click();
+      URL.revokeObjectURL(url);
+      setMessage(`${response.frame_count} draft frames generated with ${response.annotation_count} annotations.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Ground-truth draft failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (loading && !data) {
     return <section className="tracking-quality-shell quality-loading">Loading tracking quality...</section>;
   }
@@ -296,6 +335,15 @@ export function TrackingQualityPanel({
               Re-ID {assessment.reid_enabled ? "active" : "inactive"}
             </span>
             <span>{assessment.reid_model || "No Re-ID model reported"}</span>
+          </div>
+
+          <div className="quality-ground-truth-builder">
+            <label><span>Clip start</span><input className="input" min="0" onChange={(event) => setGroundTruthStart(Number(event.target.value))} type="number" value={groundTruthStart} /></label>
+            <label><span>Clip end</span><input className="input" max={lastAvailableFrame} min={groundTruthStart} onChange={(event) => setGroundTruthEnd(Number(event.target.value))} type="number" value={groundTruthEnd} /></label>
+            <label><span>Sample every</span><input className="input" max="120" min="1" onChange={(event) => setGroundTruthStep(Number(event.target.value))} type="number" value={groundTruthStep} /></label>
+            <button className="button" disabled={busy || groundTruthEnd < groundTruthStart} onClick={() => void downloadGroundTruthDraft()} type="button">
+              <Download size={16} /> Ground truth draft
+            </button>
           </div>
 
           <div className="quality-benchmark-band">

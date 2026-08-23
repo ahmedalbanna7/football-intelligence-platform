@@ -360,6 +360,97 @@ class TrackingQualityService:
         db.commit()
         return metrics
 
+    def build_ground_truth_draft(
+        self,
+        db: Session,
+        run: MatchAnalysisRun,
+        start_frame: int,
+        end_frame: int,
+        sample_every_frames: int,
+        track_ids: list[int] | None = None,
+    ) -> dict[str, Any]:
+        if end_frame < start_frame:
+            raise ValueError("end_frame must be greater than or equal to start_frame")
+        if end_frame - start_frame > 3000:
+            raise ValueError("A ground-truth clip cannot exceed 3000 frames")
+        assessment = (
+            db.query(TrackingQualityAssessment)
+            .filter(TrackingQualityAssessment.run_id == run.id)
+            .first()
+        )
+        if assessment is None:
+            assessment = self.sync_from_summary(db, run, run.summary_json or {})
+        if not assessment.predictions_object:
+            raise ValueError("This run does not contain tracking prediction artifacts")
+
+        predictions = self._get_predictions(BUCKET_NAME, assessment.predictions_object)
+        selected_ids = set(track_ids or [])
+        frames: dict[int, list[dict[str, Any]]] = {}
+        for observation in predictions.get("observations", []):
+            frame_index = int(observation.get("frame", -1))
+            track_id = int(observation.get("track_id", -1))
+            if frame_index < start_frame or frame_index > end_frame:
+                continue
+            if (frame_index - start_frame) % sample_every_frames != 0:
+                continue
+            if selected_ids and track_id not in selected_ids:
+                continue
+            frames.setdefault(frame_index, []).append(
+                {
+                    "identity_id": f"identity-{track_id}",
+                    "bbox": observation["bbox"],
+                    "source_track_id": track_id,
+                    "source_raw_track_id": observation.get("raw_track_id"),
+                    "review_state": "unverified",
+                }
+            )
+        if not frames:
+            raise ValueError("No tracking observations exist in the selected clip")
+
+        payload = {
+            "schema_version": "tracking_ground_truth.v2",
+            "verification": {
+                "status": "draft",
+                "annotator": None,
+                "reviewed_at": None,
+            },
+            "source": {
+                "match_id": run.match_id,
+                "run_id": run.id,
+                "predictions_object": assessment.predictions_object,
+            },
+            "clips": [
+                {
+                    "start_frame": start_frame,
+                    "end_frame": end_frame,
+                    "sample_every_frames": sample_every_frames,
+                    "coverage": "all_visible_identities" if not selected_ids else "selected_identities",
+                }
+            ],
+            "instructions": [
+                "Correct every identity_id and bbox in the selected frames.",
+                "Add missing visible identities and remove false detections.",
+                "Set every review_state to verified, then set verification.status to verified.",
+                "Use a stable identity_id for the same physical person across every clip.",
+            ],
+            "frames": [
+                {"frame": frame_index, "objects": frames[frame_index]}
+                for frame_index in sorted(frames)
+            ],
+        }
+        prefix = assessment.predictions_object.rsplit("/", 1)[0]
+        object_name = (
+            f"{prefix}/ground-truth/draft_{start_frame}_{end_frame}_"
+            f"step_{sample_every_frames}.json"
+        )
+        self._put_json(BUCKET_NAME, object_name, payload)
+        return {
+            "object_name": object_name,
+            "frame_count": len(frames),
+            "annotation_count": sum(len(items) for items in frames.values()),
+            "ground_truth": payload,
+        }
+
     def _apply_layer_corrections(
         self,
         layers: dict[str, Any],
