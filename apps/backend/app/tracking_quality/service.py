@@ -4,6 +4,7 @@ from copy import deepcopy
 from datetime import UTC, datetime
 import io
 import json
+import math
 from typing import Any
 
 from sqlalchemy import desc
@@ -34,6 +35,8 @@ ALLOWED_PARTICIPANT_ROLES = {
     "assistant_referee",
     "staff_outside_pitch",
 }
+ANALYTICS_PARTICIPANT_ROLES = {"player", "goalkeeper"}
+MAX_PLAUSIBLE_PLAYER_SPEED_KMH = 45.0
 
 
 def _utc_now() -> datetime:
@@ -233,7 +236,66 @@ class TrackingQualityService:
                 raise ValueError("split_frame must be after the track start")
             if source.last_frame is not None and split_frame > source.last_frame:
                 raise ValueError("split_frame must be inside the track")
+            existing_ids = [
+                int(item.track_id)
+                for item in db.query(TrackReviewItem)
+                .filter(TrackReviewItem.run_id == run.id)
+                .all()
+            ]
+            target_track_id = max(existing_ids, default=0) + 1
+            original_last_frame = source.last_frame
+            original_observations = source.observation_count
+            total_span = max(1, (original_last_frame or split_frame) - (source.first_frame or 0) + 1)
+            tail_ratio = max(0.0, min(1.0, ((original_last_frame or split_frame) - split_frame + 1) / total_span))
+            tail_observations = max(1, int(round(original_observations * tail_ratio)))
+            split_item = TrackReviewItem(
+                run_id=run.id,
+                track_id=target_track_id,
+                canonical_track_id=target_track_id,
+                team_number=source.team_number,
+                role_name=source.role_name,
+                role_confidence=source.role_confidence,
+                role_locked=source.role_locked,
+                role_evidence_json=list(source.role_evidence_json or []),
+                assigned_player_id=None,
+                status="pending",
+                identity_confidence=source.identity_confidence,
+                reid_confidence=source.reid_confidence,
+                motion_consistency=source.motion_consistency,
+                team_consistency=source.team_consistency,
+                switch_risk=source.switch_risk,
+                fragment_count=0,
+                raw_id_transitions=0,
+                first_frame=split_frame,
+                last_frame=original_last_frame,
+                observation_count=tail_observations,
+                raw_track_ids=list(source.raw_track_ids or []),
+                issue_codes=["manual_split_requires_review"],
+                crop_objects=[
+                    crop
+                    for crop in (source.crop_objects or [])
+                    if int(crop.get("frame", -1)) >= split_frame
+                ],
+                observations_json=[
+                    observation
+                    for observation in (source.observations_json or [])
+                    if int(observation.get("frame", -1)) >= split_frame
+                ],
+            )
+            source.last_frame = split_frame - 1
+            source.observation_count = max(0, original_observations - tail_observations)
+            source.crop_objects = [
+                crop
+                for crop in (source.crop_objects or [])
+                if int(crop.get("frame", -1)) < split_frame
+            ]
+            source.observations_json = [
+                observation
+                for observation in (source.observations_json or [])
+                if int(observation.get("frame", -1)) < split_frame
+            ]
             source.status = "split"
+            db.add(split_item)
         elif action == "assign_player":
             if assigned_player_id is None or db.get(Player, assigned_player_id) is None:
                 raise ValueError("A valid assigned_player_id is required")
@@ -299,6 +361,15 @@ class TrackingQualityService:
         if correction.source_track_id is not None and correction.before_json:
             item = self._get_item(db, run.id, correction.source_track_id)
             self._restore_snapshot(item, correction.before_json)
+        if correction.action == "split" and correction.target_track_id is not None:
+            split_item = (
+                db.query(TrackReviewItem)
+                .filter(TrackReviewItem.run_id == run.id)
+                .filter(TrackReviewItem.track_id == correction.target_track_id)
+                .first()
+            )
+            if split_item is not None:
+                db.delete(split_item)
         correction.undone = True
         self._refresh_assessment_status(db, run.id)
         db.commit()
@@ -319,21 +390,76 @@ class TrackingQualityService:
             .order_by(TrackReviewCorrection.id)
             .all()
         )
-        corrected = self._apply_layer_corrections(layers, corrections, db)
+        corrected = self._apply_layer_corrections(layers, corrections, db, run.id)
         prefix = original_object.rsplit("/", 1)[0]
         corrected_object = f"{prefix}/visual_layers.corrected.json"
         self._put_json(BUCKET_NAME, corrected_object, corrected)
+        canonical_analytics = self._build_canonical_analytics(
+            corrected,
+            float(corrected.get("fps") or summary.get("fps") or 25.0),
+        )
+        analytics_object = f"{prefix}/canonical_analytics.json"
+        report_object = f"{prefix}/canonical_report.json"
+        canonical_report = self._build_canonical_report(run, canonical_analytics)
+        self._put_json(BUCKET_NAME, analytics_object, canonical_analytics)
+        self._put_json(BUCKET_NAME, report_object, canonical_report)
+
+        assessment = (
+            db.query(TrackingQualityAssessment)
+            .filter(TrackingQualityAssessment.run_id == run.id)
+            .first()
+        )
+        corrected_predictions_object = None
+        corrected_observations = 0
+        if assessment is not None and assessment.predictions_object:
+            predictions = self._get_predictions(BUCKET_NAME, assessment.predictions_object)
+            corrected_predictions = self._apply_prediction_corrections(
+                predictions,
+                corrections,
+                db,
+                run.id,
+            )
+            corrected_predictions_object = f"{prefix}/tracking_quality_predictions.corrected.jsonl"
+            self._put_jsonl(
+                BUCKET_NAME,
+                corrected_predictions_object,
+                corrected_predictions.get("observations", []),
+            )
+            corrected_observations = len(corrected_predictions.get("observations", []))
         layer_summary = {
             **layer_summary,
+            "status": "corrected" if corrections else layer_summary.get("status", "ready"),
             "object_name": corrected_object,
             "original_object_name": original_object,
             "corrections_applied": len(corrections),
             "tracks_count": len(corrected.get("tracks", [])),
+            "canonical_identity_overlay": True,
         }
         summary["visual_layers"] = layer_summary
+        summary["tracks"] = canonical_analytics["tracks"]
+        summary["canonical_analytics"] = {
+            **canonical_analytics,
+            "object_name": analytics_object,
+        }
+        summary["canonical_report"] = {
+            "status": "ready",
+            "object_name": report_object,
+            "schema_version": canonical_report["schema_version"],
+            "teams_count": len(canonical_report["teams"]),
+            "players_count": len(canonical_report["players"]),
+        }
+        summary["canonical_video"] = {
+            "status": "ready",
+            "strategy": "client_side_canonical_overlay",
+            "base_object_name": run.output_object,
+            "overlay_object_name": corrected_object,
+            "note": "The review player renders corrected canonical identities over the saved analysis video.",
+        }
         tracking_quality = deepcopy(summary.get("tracking_quality") or {})
         tracking_quality["corrected_layers_object"] = corrected_object
+        tracking_quality["corrected_predictions_object"] = corrected_predictions_object
         tracking_quality["active_corrections"] = len(corrections)
+        tracking_quality["canonical_tracks_count"] = len(canonical_analytics["tracks"])
         summary["tracking_quality"] = tracking_quality
         run.summary_json = summary
         self._refresh_assessment_status(db, run.id)
@@ -345,6 +471,10 @@ class TrackingQualityService:
             "object_name": corrected_object,
             "corrections_applied": len(corrections),
             "tracks_count": len(corrected.get("tracks", [])),
+            "corrected_predictions_object": corrected_predictions_object,
+            "corrected_observations": corrected_observations,
+            "canonical_analytics_object": analytics_object,
+            "canonical_report_object": report_object,
         }
 
     def benchmark(
@@ -509,6 +639,7 @@ class TrackingQualityService:
         layers: dict[str, Any],
         corrections: list[TrackReviewCorrection],
         db: Session,
+        run_id: int,
     ) -> dict[str, Any]:
         corrected = deepcopy(layers)
         tracks = {int(track["track_id"]): track for track in corrected.get("tracks", [])}
@@ -538,12 +669,15 @@ class TrackingQualityService:
                     for value in (target.get("last_frame"), source.get("last_frame"))
                     if value is not None
                 )
+                target["canonical_track_id"] = int(correction.target_track_id)
                 del tracks[source_id]
             elif correction.action == "split" and correction.split_frame is not None:
                 split_frame = correction.split_frame
                 split_track = deepcopy(source)
-                split_track["track_id"] = next_track_id
-                split_track["color"] = self._track_color(next_track_id)
+                split_track_id = correction.target_track_id or next_track_id
+                split_track["track_id"] = split_track_id
+                split_track["canonical_track_id"] = split_track_id
+                split_track["color"] = self._track_color(split_track_id)
                 for path_key in ("video_path", "pitch_path"):
                     path = source.get(path_key, [])
                     source[path_key] = [point for point in path if int(point[0]) < split_frame]
@@ -551,8 +685,8 @@ class TrackingQualityService:
                 self._refresh_layer_track(source)
                 self._refresh_layer_track(split_track)
                 if split_track.get("video_path"):
-                    tracks[next_track_id] = split_track
-                    next_track_id += 1
+                    tracks[split_track_id] = split_track
+                    next_track_id = max(next_track_id, split_track_id + 1)
             elif correction.action == "change_team":
                 source["team"] = correction.assigned_team_number
             elif correction.action == "change_role" and correction.assigned_role_name:
@@ -565,10 +699,242 @@ class TrackingQualityService:
                 source["player_id"] = correction.assigned_player_id
                 source["player_name"] = player.name if player is not None else None
                 source["jersey_number"] = player.jersey_number if player is not None else None
+        review_items = {
+            int(item.track_id): item
+            for item in db.query(TrackReviewItem)
+            .filter(TrackReviewItem.run_id == run_id)
+            .all()
+        }
+        for track_id, track in tracks.items():
+            item = review_items.get(track_id)
+            track["canonical_track_id"] = int(
+                item.canonical_track_id if item is not None else track_id
+            )
+            if item is None:
+                continue
+            track["team"] = item.team_number
+            track["role_name"] = item.role_name
+            track["role_confidence"] = item.role_confidence
+            track["role_locked"] = item.role_locked
+            track["role_evidence"] = list(item.role_evidence_json or [])
+            if item.assigned_player is not None:
+                track["player_id"] = item.assigned_player.id
+                track["player_name"] = item.assigned_player.name
+                track["jersey_number"] = item.assigned_player.jersey_number
         corrected["schema_version"] = max(2, int(corrected.get("schema_version", 1)))
         corrected["corrections_applied"] = len(corrections)
         corrected["tracks"] = [tracks[key] for key in sorted(tracks)]
         return corrected
+
+    def _apply_prediction_corrections(
+        self,
+        predictions: dict[str, Any],
+        corrections: list[TrackReviewCorrection],
+        db: Session,
+        run_id: int,
+    ) -> dict[str, Any]:
+        review_items = {
+            int(item.track_id): item
+            for item in db.query(TrackReviewItem)
+            .filter(TrackReviewItem.run_id == run_id)
+            .all()
+        }
+        corrected_by_frame_identity: dict[tuple[int, int], dict[str, Any]] = {}
+        for raw in predictions.get("observations", []):
+            observation = deepcopy(raw)
+            original_track_id = self._optional_int(observation.get("track_id"))
+            if original_track_id is None:
+                continue
+            frame = int(observation.get("frame", -1))
+            canonical_track_id = original_track_id
+            rejected = False
+            for correction in corrections:
+                source_id = correction.source_track_id
+                if source_id is None or canonical_track_id != source_id:
+                    continue
+                if correction.action == "reject":
+                    rejected = True
+                    break
+                if correction.action == "merge" and correction.target_track_id is not None:
+                    canonical_track_id = int(correction.target_track_id)
+                elif (
+                    correction.action == "split"
+                    and correction.target_track_id is not None
+                    and correction.split_frame is not None
+                    and frame >= int(correction.split_frame)
+                ):
+                    canonical_track_id = int(correction.target_track_id)
+            if rejected:
+                continue
+
+            item = review_items.get(canonical_track_id)
+            observation["source_track_id"] = original_track_id
+            observation["track_id"] = canonical_track_id
+            observation["canonical_track_id"] = canonical_track_id
+            if item is not None:
+                observation["team"] = item.team_number
+                observation["role_name"] = item.role_name
+                observation["role_confidence"] = item.role_confidence
+                observation["role_locked"] = item.role_locked
+                observation["assigned_player_id"] = item.assigned_player_id
+            key = (frame, canonical_track_id)
+            existing = corrected_by_frame_identity.get(key)
+            if existing is None or self._observation_score(observation) > self._observation_score(existing):
+                corrected_by_frame_identity[key] = observation
+
+        return {
+            "schema_version": "canonical_tracking_predictions.v1",
+            "corrections_applied": len(corrections),
+            "observations": [
+                corrected_by_frame_identity[key]
+                for key in sorted(corrected_by_frame_identity)
+            ],
+        }
+
+    def _build_canonical_analytics(
+        self,
+        layers: dict[str, Any],
+        fps: float,
+    ) -> dict[str, Any]:
+        safe_fps = max(1.0, fps)
+        tracks: list[dict[str, Any]] = []
+        team_totals: dict[str, dict[str, Any]] = {}
+        role_counts: dict[str, int] = {}
+        excluded_roles: dict[str, int] = {}
+
+        for layer_track in layers.get("tracks", []):
+            track_id = int(layer_track.get("canonical_track_id") or layer_track["track_id"])
+            role_name = str(layer_track.get("role_name") or "player")
+            role_counts[role_name] = role_counts.get(role_name, 0) + 1
+            pitch_path = sorted(
+                [point for point in layer_track.get("pitch_path", []) if len(point) >= 3],
+                key=lambda point: int(point[0]),
+            )
+            distance_m = 0.0
+            active_seconds = 0.0
+            valid_speeds: list[float] = []
+            rejected_metric_steps = 0
+            for previous, current in zip(pitch_path, pitch_path[1:]):
+                frame_delta = int(current[0]) - int(previous[0])
+                if frame_delta <= 0 or frame_delta > safe_fps * 2.0:
+                    rejected_metric_steps += 1
+                    continue
+                step_m = math.hypot(
+                    float(current[1]) - float(previous[1]),
+                    float(current[2]) - float(previous[2]),
+                ) / 100.0
+                seconds = frame_delta / safe_fps
+                speed_kmh = step_m / max(seconds, 1e-6) * 3.6
+                if not math.isfinite(speed_kmh) or speed_kmh > MAX_PLAUSIBLE_PLAYER_SPEED_KMH:
+                    rejected_metric_steps += 1
+                    continue
+                distance_m += step_m
+                active_seconds += seconds
+                valid_speeds.append(speed_kmh)
+
+            track_summary = {
+                "track_id": track_id,
+                "canonical_track_id": track_id,
+                "source_track_id": int(layer_track["track_id"]),
+                "team": layer_track.get("team"),
+                "role_name": role_name,
+                "player_id": layer_track.get("player_id"),
+                "player_name": layer_track.get("player_name"),
+                "jersey_number": layer_track.get("jersey_number"),
+                "frames": int(layer_track.get("frames", len(layer_track.get("video_path", [])))),
+                "first_frame": layer_track.get("first_frame"),
+                "last_frame": layer_track.get("last_frame"),
+                "distance_m": round(distance_m, 3),
+                "average_speed_kmh": round(distance_m / active_seconds * 3.6, 3) if active_seconds else 0.0,
+                "max_speed_kmh": round(max(valid_speeds), 3) if valid_speeds else 0.0,
+                "movement_samples": len(layer_track.get("video_path", [])),
+                "heatmap_samples": len(pitch_path),
+                "metric_steps": len(valid_speeds),
+                "rejected_metric_steps": rejected_metric_steps,
+                "identity_confidence": layer_track.get("identity_confidence"),
+                "switch_risk": layer_track.get("switch_risk"),
+            }
+            tracks.append(track_summary)
+            if role_name not in ANALYTICS_PARTICIPANT_ROLES:
+                excluded_roles[role_name] = excluded_roles.get(role_name, 0) + 1
+                continue
+            team_key = str(layer_track.get("team") or "unassigned")
+            aggregate = team_totals.setdefault(
+                team_key,
+                {
+                    "team": layer_track.get("team"),
+                    "players_count": 0,
+                    "total_distance_m": 0.0,
+                    "movement_samples": 0,
+                    "heatmap_samples": 0,
+                },
+            )
+            aggregate["players_count"] += 1
+            aggregate["total_distance_m"] += distance_m
+            aggregate["movement_samples"] += track_summary["movement_samples"]
+            aggregate["heatmap_samples"] += track_summary["heatmap_samples"]
+
+        for aggregate in team_totals.values():
+            aggregate["total_distance_m"] = round(float(aggregate["total_distance_m"]), 3)
+        return {
+            "schema_version": "canonical_analytics.v1",
+            "coordinate_system": "pitch_centimeters",
+            "fps": round(safe_fps, 4),
+            "corrections_applied": int(layers.get("corrections_applied", 0)),
+            "tracks_count": len(tracks),
+            "analytics_tracks_count": sum(
+                1 for track in tracks if track["role_name"] in ANALYTICS_PARTICIPANT_ROLES
+            ),
+            "role_counts": role_counts,
+            "excluded_roles": excluded_roles,
+            "teams": team_totals,
+            "tracks": sorted(tracks, key=lambda track: int(track["track_id"])),
+        }
+
+    def _build_canonical_report(
+        self,
+        run: MatchAnalysisRun,
+        analytics: dict[str, Any],
+    ) -> dict[str, Any]:
+        match = run.match
+        labels = {
+            "1": getattr(match, "primary_team_name", None) or "Team 1",
+            "2": (
+                getattr(match, "another_team_name", None)
+                or getattr(match, "opponent_team_name", None)
+                or "Team 2"
+            ),
+            "unassigned": "Unassigned",
+        }
+        teams = []
+        for key, values in analytics.get("teams", {}).items():
+            teams.append({"team_key": key, "name": labels.get(key, key), **values})
+        return {
+            "schema_version": "canonical_match_report.v1",
+            "run_id": run.id,
+            "match_id": run.match_id,
+            "generated_at": _utc_now().isoformat() + "Z",
+            "corrections_applied": analytics.get("corrections_applied", 0),
+            "teams": teams,
+            "players": [
+                track
+                for track in analytics.get("tracks", [])
+                if track.get("role_name") in ANALYTICS_PARTICIPANT_ROLES
+            ],
+            "participants_excluded_from_player_analytics": analytics.get("excluded_roles", {}),
+            "quality": {
+                "coordinate_system": analytics.get("coordinate_system"),
+                "maximum_plausible_speed_kmh": MAX_PLAUSIBLE_PLAYER_SPEED_KMH,
+                "canonical_identity_required": True,
+            },
+        }
+
+    def _observation_score(self, observation: dict[str, Any]) -> float:
+        return float(
+            observation.get("identity_confidence")
+            or observation.get("confidence")
+            or 0.0
+        )
 
     def _quality_from_legacy_summary(self, summary: dict[str, Any]) -> dict[str, Any]:
         tracks = []
@@ -732,6 +1098,11 @@ class TrackingQualityService:
             "role_evidence_json": item.role_evidence_json,
             "assigned_player_id": item.assigned_player_id,
             "status": item.status,
+            "first_frame": item.first_frame,
+            "last_frame": item.last_frame,
+            "observation_count": item.observation_count,
+            "crop_objects": list(item.crop_objects or []),
+            "observations_json": list(item.observations_json or []),
         }
 
     def _restore_snapshot(self, item: TrackReviewItem, snapshot: dict[str, Any]) -> None:
@@ -743,6 +1114,11 @@ class TrackingQualityService:
         item.role_evidence_json = list(snapshot.get("role_evidence_json") or [])
         item.assigned_player_id = self._optional_int(snapshot.get("assigned_player_id"))
         item.status = str(snapshot.get("status", "pending"))
+        item.first_frame = self._optional_int(snapshot.get("first_frame"))
+        item.last_frame = self._optional_int(snapshot.get("last_frame"))
+        item.observation_count = int(snapshot.get("observation_count", 0))
+        item.crop_objects = list(snapshot.get("crop_objects") or [])
+        item.observations_json = list(snapshot.get("observations_json") or [])
 
     def _refresh_layer_track(self, track: dict[str, Any]) -> None:
         video_path = track.get("video_path", [])
@@ -794,6 +1170,23 @@ class TrackingQualityService:
             io.BytesIO(data),
             length=len(data),
             content_type="application/json",
+        )
+
+    def _put_jsonl(
+        self,
+        bucket: str,
+        object_name: str,
+        rows: list[dict[str, Any]],
+    ) -> None:
+        data = (
+            "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n"
+        ).encode("utf-8")
+        client.put_object(
+            bucket,
+            object_name,
+            io.BytesIO(data),
+            length=len(data),
+            content_type="application/x-ndjson",
         )
 
     def _optional_int(self, value: Any) -> int | None:

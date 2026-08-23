@@ -325,6 +325,104 @@ class TrackingQualityMetricTests(unittest.TestCase):
         self.assertEqual("passed", suite["status"])
         self.assertEqual(2, suite["cases_count"])
 
+    def test_canonical_analytics_excludes_officials_and_rejects_speed_spikes(self) -> None:
+        service = TrackingQualityService()
+        layers = {
+            "fps": 10,
+            "corrections_applied": 2,
+            "tracks": [
+                {
+                    "track_id": 1,
+                    "canonical_track_id": 1,
+                    "team": 1,
+                    "role_name": "player",
+                    "frames": 4,
+                    "video_path": [[0, 10, 10], [10, 20, 20], [20, 30, 30], [30, 40, 40]],
+                    "pitch_path": [[0, 0, 0], [10, 100, 0], [20, 50000, 0], [30, 200, 0]],
+                },
+                {
+                    "track_id": 2,
+                    "canonical_track_id": 2,
+                    "team": None,
+                    "role_name": "referee",
+                    "frames": 2,
+                    "video_path": [[0, 10, 10], [10, 20, 20]],
+                    "pitch_path": [[0, 0, 0], [10, 100, 0]],
+                },
+            ],
+        }
+
+        analytics = service._build_canonical_analytics(layers, 10.0)
+
+        self.assertEqual(2, analytics["tracks_count"])
+        self.assertEqual(1, analytics["analytics_tracks_count"])
+        self.assertEqual(1, analytics["teams"]["1"]["players_count"])
+        self.assertEqual({"referee": 1}, analytics["excluded_roles"])
+        self.assertGreater(analytics["tracks"][0]["rejected_metric_steps"], 0)
+
+    def test_prediction_corrections_create_canonical_merge_and_split_ids(self) -> None:
+        service = TrackingQualityService()
+
+        class QueryStub:
+            def __init__(self, items):
+                self.items = items
+
+            def filter(self, *_args, **_kwargs):
+                return self
+
+            def all(self):
+                return self.items
+
+        review_items = [
+            SimpleNamespace(
+                track_id=2,
+                team_number=2,
+                role_name="goalkeeper",
+                role_confidence=1.0,
+                role_locked=True,
+                assigned_player_id=44,
+            ),
+            SimpleNamespace(
+                track_id=3,
+                team_number=1,
+                role_name="player",
+                role_confidence=1.0,
+                role_locked=True,
+                assigned_player_id=None,
+            ),
+        ]
+        db = Mock()
+        db.query.return_value = QueryStub(review_items)
+        merge = SimpleNamespace(
+            action="merge",
+            source_track_id=1,
+            target_track_id=2,
+            split_frame=None,
+        )
+        split = SimpleNamespace(
+            action="split",
+            source_track_id=2,
+            target_track_id=3,
+            split_frame=10,
+        )
+        predictions = {
+            "observations": [
+                {"frame": 5, "track_id": 1, "confidence": 0.8, "bbox": [0, 0, 10, 20]},
+                {"frame": 15, "track_id": 1, "confidence": 0.9, "bbox": [1, 0, 11, 20]},
+            ]
+        }
+
+        corrected = service._apply_prediction_corrections(
+            predictions,
+            [merge, split],
+            db,
+            run_id=7,
+        )
+
+        self.assertEqual([2, 3], [row["track_id"] for row in corrected["observations"]])
+        self.assertEqual("goalkeeper", corrected["observations"][0]["role_name"])
+        self.assertEqual("player", corrected["observations"][1]["role_name"])
+
 
 if __name__ == "__main__":
     unittest.main()

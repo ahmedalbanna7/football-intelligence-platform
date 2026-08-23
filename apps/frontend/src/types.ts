@@ -156,6 +156,7 @@ export type ReportResponse = {
 
 export type MatchVisualLayerTrack = {
   track_id: number;
+  canonical_track_id?: number;
   team?: number | null;
   role_name?: string | null;
   team_confidence?: number | null;
@@ -174,6 +175,7 @@ export type MatchVisualLayerTrack = {
 
 export type MatchVisualLayers = {
   schema_version: number;
+  corrections_applied?: number;
   coordinate_systems: {
     video: string;
     pitch: string;
@@ -371,13 +373,48 @@ export type MatchAnalysisPlusSummary = {
     tracks_count: number;
     movement_sample_rate_hz: number;
     heatmap_sample_rate_hz: number;
+    corrections_applied?: number;
+    canonical_identity_overlay?: boolean;
+  };
+  canonical_analytics?: {
+    object_name: string;
+    tracks_count: number;
+    analytics_tracks_count: number;
+    corrections_applied: number;
+    role_counts: Record<string, number>;
+    excluded_roles: Record<string, number>;
+    teams: Record<string, {
+      team?: number | null;
+      players_count: number;
+      total_distance_m: number;
+      movement_samples: number;
+      heatmap_samples: number;
+    }>;
+  };
+  canonical_report?: {
+    status: string;
+    object_name: string;
+    schema_version: string;
+    teams_count: number;
+    players_count: number;
+  };
+  canonical_video?: {
+    status: string;
+    strategy: string;
+    base_object_name?: string | null;
+    overlay_object_name: string;
   };
   tracks?: Array<{
     track_id: number;
+    canonical_track_id?: number;
     team?: number | null;
+    role_name?: string;
+    player_name?: string | null;
     frames?: number;
     distance_m?: number;
     last_speed_kmh?: number;
+    average_speed_kmh?: number;
+    max_speed_kmh?: number;
     movement_samples?: number;
     heatmap_samples?: number;
   }>;

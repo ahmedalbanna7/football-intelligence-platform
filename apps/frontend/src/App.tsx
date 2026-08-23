@@ -1337,7 +1337,8 @@ function drawMovementOverlay(
   if (!context) return;
   context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
   context.clearRect(0, 0, cssWidth, cssHeight);
-  if (!selectedTrackIds.length) return;
+  const showCanonicalIdentities = Boolean(layers.corrections_applied);
+  if (!selectedTrackIds.length && !showCanonicalIdentities) return;
 
   const sourceWidth = layers.resolution[0] || video.videoWidth || 1;
   const sourceHeight = layers.resolution[1] || video.videoHeight || 1;
@@ -1417,6 +1418,41 @@ function drawMovementOverlay(
       context.arc(latest.x, latest.y, 5, 0, Math.PI * 2);
       context.fill();
       context.stroke();
+      context.restore();
+    }
+  }
+
+  if (showCanonicalIdentities) {
+    for (const track of layers.tracks) {
+      const useMetricPath = Boolean(projection && track.pitch_path.length);
+      const path = useMetricPath ? track.pitch_path : track.video_path;
+      let latest: number[] | null = null;
+      for (const point of path) {
+        if (point[0] > currentFrame) break;
+        latest = point;
+      }
+      if (!latest || currentFrame - latest[0] > layers.fps * 1.5) continue;
+      const projected = useMetricPath
+        ? projectPitchPoint(projection as number[], latest[1], latest[2])
+        : [latest[1], latest[2]] as [number, number];
+      if (!projected) continue;
+      const x = offsetX + projected[0] * renderScale;
+      const y = offsetY + projected[1] * renderScale - 20;
+      const label = `C${track.canonical_track_id ?? track.track_id}`;
+      context.save();
+      context.font = "700 11px system-ui, sans-serif";
+      context.textAlign = "center";
+      context.textBaseline = "middle";
+      const labelWidth = Math.max(28, context.measureText(label).width + 12);
+      context.fillStyle = "rgba(8, 18, 27, 0.88)";
+      context.strokeStyle = track.color;
+      context.lineWidth = 2;
+      context.beginPath();
+      context.roundRect(x - labelWidth / 2, y - 10, labelWidth, 20, 4);
+      context.fill();
+      context.stroke();
+      context.fillStyle = "#ffffff";
+      context.fillText(label, x, y);
       context.restore();
     }
   }
@@ -2720,6 +2756,8 @@ function MatchAnalysisPlusPage() {
                     </tr>
                     <tr><th>Heatmap coordinates</th><td>{summary.metric_tracking?.heatmap_ready ? "Ready" : "Not calibrated"}</td></tr>
                     <tr><th>Interactive layers</th><td>{summary.visual_layers?.status || "Not generated"}</td></tr>
+                    <tr><th>Canonical corrections</th><td>{summary.canonical_analytics?.corrections_applied ?? 0}</td></tr>
+                    <tr><th>Canonical analytics tracks</th><td>{summary.canonical_analytics?.analytics_tracks_count ?? summary.tracks_count}</td></tr>
                     <tr><th>Radar frames rendered</th><td>{summary.radar?.rendered_frames ?? 0}</td></tr>
                     <tr><th>Team 1 control</th><td>{summary.team_ball_control?.team_1_percent ?? 0}%</td></tr>
                     <tr><th>Team 2 control</th><td>{summary.team_ball_control?.team_2_percent ?? 0}%</td></tr>
@@ -2745,6 +2783,16 @@ function MatchAnalysisPlusPage() {
                     Open layer data
                   </a>
                 ) : null}
+                {summary.canonical_analytics?.object_name ? (
+                  <a className="button" href={api.objectUrl(summary.canonical_analytics.object_name)} target="_blank" rel="noreferrer">
+                    Canonical analytics
+                  </a>
+                ) : null}
+                {summary.canonical_report?.object_name ? (
+                  <a className="button" href={api.objectUrl(summary.canonical_report.object_name)} target="_blank" rel="noreferrer">
+                    Canonical report
+                  </a>
+                ) : null}
               </div>
               <div className="layer-run-stats">
                 <span><strong>{summary.visual_layers?.tracks_count ?? 0}</strong> selectable tracks</span>
@@ -2758,7 +2806,7 @@ function MatchAnalysisPlusPage() {
             <h2 className="section-title">Tracks Data</h2>
             <MiniDataTable
               rows={(summary.tracks || []) as Array<Record<string, unknown>>}
-              columns={["track_id", "team", "frames", "distance_m", "last_speed_kmh"]}
+              columns={["track_id", "team", "role_name", "player_name", "frames", "distance_m", "average_speed_kmh", "max_speed_kmh"]}
             />
           </div>
         </>
