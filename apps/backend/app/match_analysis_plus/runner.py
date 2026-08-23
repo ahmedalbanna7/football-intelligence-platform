@@ -3179,6 +3179,10 @@ class PitchRadar:
         self.last_camera_inliers = 0
         self.last_camera_inlier_ratio: float | None = None
         self.last_camera_reprojection_error_px: float | None = None
+        self.camera_cuts: list[dict[str, Any]] = []
+        self.camera_cut_recoveries = 0
+        self.awaiting_camera_cut_recovery = False
+        self.last_camera_cut_frame: int | None = None
         self.visual_marker_observations = 0
         self.visual_marker_tracks: list[dict[str, Any]] = []
         self.next_visual_marker_id = 1
@@ -3397,6 +3401,8 @@ class PitchRadar:
         self.last_reprojection_error_cm = round(error, 2)
         self.last_inliers = inliers
         self.last_player_valid_ratio = round(player_ratio, 4)
+        if line_score is not None:
+            self.last_line_alignment_score = round(float(line_score), 4)
         error_score = max(0.0, 1.0 - error / 420.0)
         inlier_score = min(1.0, inliers / 10.0)
         line_quality = min(1.0, max(0.0, line_score if line_score is not None else 0.72))
@@ -3405,6 +3411,14 @@ class PitchRadar:
             4,
         )
         self.successes += 1
+        if self.awaiting_camera_cut_recovery:
+            self.camera_cut_recoveries += 1
+            self.awaiting_camera_cut_recovery = False
+            if self.camera_cuts:
+                self.camera_cuts[-1]["recovered_frame"] = frame_index
+                self.camera_cuts[-1]["recovery_frames"] = (
+                    frame_index - int(self.camera_cuts[-1]["frame"])
+                )
 
     def _temporally_stabilize(
         self,
@@ -3507,6 +3521,26 @@ class PitchRadar:
         self.previous_tracking_gray = current_gray
         self.previous_tracking_mask = current_mask
         self.previous_tracking_scale = current_scale
+        if (
+            previous_gray is not None
+            and previous_gray.shape == current_gray.shape
+            and self._is_camera_cut(previous_gray, current_gray)
+        ):
+            self.camera_cuts.append(
+                {
+                    "frame": frame_index,
+                    "recovered_frame": None,
+                    "recovery_frames": None,
+                }
+            )
+            self.last_camera_cut_frame = frame_index
+            self.awaiting_camera_cut_recovery = True
+            self.homography = None
+            self.calibration_mode = None
+            self.calibration_confidence = 0.0
+            self.calibration_source = "camera_cut"
+            self.last_calibrated_frame = -1
+            return
         if (
             self.homography is None
             or previous_gray is None
@@ -3666,6 +3700,25 @@ class PitchRadar:
         self.last_camera_inliers = inlier_count
         self.last_camera_inlier_ratio = round(inlier_ratio, 4)
         self.last_camera_reprojection_error_px = round(reprojection_error, 3)
+
+    def _is_camera_cut(
+        self,
+        previous_gray: np.ndarray,
+        current_gray: np.ndarray,
+    ) -> bool:
+        previous_hist = cv2.calcHist([previous_gray], [0], None, [32], [0, 256])
+        current_hist = cv2.calcHist([current_gray], [0], None, [32], [0, 256])
+        cv2.normalize(previous_hist, previous_hist)
+        cv2.normalize(current_hist, current_hist)
+        histogram_correlation = float(
+            cv2.compareHist(previous_hist, current_hist, cv2.HISTCMP_CORREL)
+        )
+        mean_difference = float(
+            np.mean(cv2.absdiff(previous_gray, current_gray))
+        )
+        return (
+            histogram_correlation < 0.42 and mean_difference > 34.0
+        ) or mean_difference > 72.0
 
     def _camera_tracking_sample(
         self,
@@ -4919,10 +4972,99 @@ class PitchRadar:
         )
         self.rendered_frames += 1
 
+    def quality_gate(self) -> dict[str, Any]:
+        confidence_values = [float(item["confidence"]) for item in self.frame_confidence]
+        total_frames = len(confidence_values)
+        reliable_frames = sum(1 for value in confidence_values if value >= 0.58)
+        reliable_ratio = reliable_frames / max(1, total_frames)
+        average_confidence = float(np.mean(confidence_values)) if confidence_values else 0.0
+        longest_unreliable_streak = 0
+        current_unreliable_streak = 0
+        for item in self.frame_confidence:
+            if bool(item.get("reliable")):
+                current_unreliable_streak = 0
+            else:
+                current_unreliable_streak += 1
+                longest_unreliable_streak = max(
+                    longest_unreliable_streak,
+                    current_unreliable_streak,
+                )
+        unrecovered_cuts = sum(
+            1 for item in self.camera_cuts if item.get("recovered_frame") is None
+        )
+        maximum_allowed_gap = max(self.stride * 4, int(round(total_frames * 0.08)))
+        reprojection_ok = (
+            self.last_reprojection_error_cm is not None
+            and self.last_reprojection_error_cm <= 260.0
+        )
+        line_alignment_ok = (
+            self.last_line_alignment_score is not None
+            and self.last_line_alignment_score >= 0.30
+        )
+        conditions = [
+            {
+                "code": "homography_available",
+                "passed": self.homography is not None,
+                "value": self.calibration_mode,
+                "required": "valid metric homography",
+            },
+            {
+                "code": "reliable_frame_coverage",
+                "passed": reliable_ratio >= 0.90,
+                "value": round(reliable_ratio, 4),
+                "required": 0.90,
+            },
+            {
+                "code": "average_confidence",
+                "passed": average_confidence >= 0.62,
+                "value": round(average_confidence, 4),
+                "required": 0.62,
+            },
+            {
+                "code": "maximum_unreliable_streak",
+                "passed": longest_unreliable_streak <= maximum_allowed_gap,
+                "value": longest_unreliable_streak,
+                "required": maximum_allowed_gap,
+            },
+            {
+                "code": "camera_cut_recovery",
+                "passed": unrecovered_cuts == 0,
+                "value": unrecovered_cuts,
+                "required": 0,
+            },
+            {
+                "code": "metric_reprojection_error",
+                "passed": reprojection_ok,
+                "value": self.last_reprojection_error_cm,
+                "required": "<= 260 cm",
+            },
+            {
+                "code": "pitch_line_alignment",
+                "passed": line_alignment_ok,
+                "value": self.last_line_alignment_score,
+                "required": ">= 0.30",
+            },
+        ]
+        failed = [item["code"] for item in conditions if not item["passed"]]
+        status = "passed" if not failed else "needs_manual_calibration"
+        return {
+            "status": status,
+            "metric_outputs_verified": status == "passed",
+            "conditions": conditions,
+            "failed_conditions": failed,
+            "reliable_ratio": round(reliable_ratio, 4),
+            "longest_unreliable_streak_frames": longest_unreliable_streak,
+            "camera_cuts_detected": len(self.camera_cuts),
+            "camera_cuts_recovered": self.camera_cut_recoveries,
+            "unrecovered_camera_cuts": unrecovered_cuts,
+            "manual_fallback_available": True,
+            "manual_fallback_used": self.manual_calibrations > 0,
+        }
+
     def summary(self) -> dict[str, Any]:
         confidence_values = [float(item["confidence"]) for item in self.frame_confidence]
         return {
-            "engine": "pitch_calibration_v2",
+            "engine": "pitch_calibration_v3_quality_gate",
             "model_available": self.model is not None,
             "model_image_size": max(960, settings.YOLO_IMAGE_SIZE),
             "calibration_mode": self.calibration_mode,
@@ -4960,6 +5102,8 @@ class PitchRadar:
                 "last_inlier_ratio": self.last_camera_inlier_ratio,
                 "last_reprojection_error_px": self.last_camera_reprojection_error_px,
             },
+            "camera_cuts": self.camera_cuts,
+            "quality_gate": self.quality_gate(),
             "visual_marker_observations": self.visual_marker_observations,
             "rendered_frames": self.rendered_frames,
             "last_visible_keypoints": self.last_visible_keypoints,
@@ -5006,6 +5150,9 @@ class PitchRadar:
                 "confidence": round(self.calibration_confidence, 4),
                 "source": self.calibration_source,
                 "reliable": self.is_reliable(),
+                "reprojection_error_cm": self.last_reprojection_error_cm,
+                "line_alignment_score": self.last_line_alignment_score,
+                "camera_cut": frame_index == self.last_camera_cut_frame,
             }
         )
 
@@ -5722,6 +5869,8 @@ class MatchAnalysisPlusRunner:
             pitch_confidence_samples=radar.frame_confidence,
             ball_pitch_path=ball_tracker.pitch_path,
         )
+        radar_summary = radar.summary()
+        pitch_quality_gate = radar_summary["quality_gate"]
 
         return {
             "status": "ok",
@@ -5767,13 +5916,16 @@ class MatchAnalysisPlusRunner:
                 **ball_filter.summary(),
                 "tracker": ball_tracker.summary(),
             },
-            "radar": radar.summary(),
+            "radar": radar_summary,
             "metric_tracking": {
                 "coordinate_system": "pitch_centimeters",
                 "ground_plane_z_cm": 0.0,
                 "trajectory_sample_rate_hz": VISUAL_LAYER_SAMPLE_RATE_HZ,
                 "heatmap_ready": any(item["reliable"] for item in radar.frame_confidence),
                 "reliable_frames": sum(1 for item in radar.frame_confidence if item["reliable"]),
+                "quality_verified": pitch_quality_gate["metric_outputs_verified"],
+                "quality_gate_status": pitch_quality_gate["status"],
+                "distance_speed_units": "metric_only_when_quality_gate_passes",
             },
             "tracks": tracks[:250],
             "_visual_layers_payload": visual_layers_payload,
@@ -5787,6 +5939,7 @@ class MatchAnalysisPlusRunner:
                 "every run executes player, ball, tracking, team classification, and pitch radar analysis",
                 "field-fixture filtering runs before stable player identity assignment",
                 "distance and speed use metric ground-plane coordinates only after validated pitch calibration",
+                "unverified metric outputs remain visible for review but are not release-grade until the pitch quality gate passes",
             ],
             "elapsed_ms": elapsed_ms,
         }

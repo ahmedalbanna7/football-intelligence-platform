@@ -351,6 +351,29 @@ export type MatchAnalysisPlusSummary = {
       last_inlier_ratio?: number | null;
       last_reprojection_error_px?: number | null;
     };
+    camera_cuts?: Array<{
+      frame: number;
+      recovered_frame?: number | null;
+      recovery_frames?: number | null;
+    }>;
+    quality_gate?: {
+      status: "passed" | "needs_manual_calibration";
+      metric_outputs_verified: boolean;
+      failed_conditions: string[];
+      reliable_ratio: number;
+      longest_unreliable_streak_frames: number;
+      camera_cuts_detected: number;
+      camera_cuts_recovered: number;
+      unrecovered_camera_cuts: number;
+      manual_fallback_available: boolean;
+      manual_fallback_used: boolean;
+      conditions: Array<{
+        code: string;
+        passed: boolean;
+        value: unknown;
+        required: unknown;
+      }>;
+    };
     pitch_template?: {
       name: string;
       length_cm: number;
@@ -365,6 +388,9 @@ export type MatchAnalysisPlusSummary = {
     ground_plane_z_cm: number;
     trajectory_sample_rate_hz: number;
     heatmap_ready: boolean;
+    quality_verified?: boolean;
+    quality_gate_status?: string;
+    distance_speed_units?: string;
   };
   visual_layers?: {
     status: string;

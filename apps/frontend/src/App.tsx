@@ -2729,6 +2729,23 @@ function MatchAnalysisPlusPage() {
                     <tr><th>Calibration source</th><td>{summary.radar?.calibration_source ?? "-"}</td></tr>
                     <tr><th>Calibration confidence</th><td>{summary.radar?.confidence ? `${(summary.radar.confidence.average * 100).toFixed(1)}% average` : "-"}</td></tr>
                     <tr><th>Reliable metric frames</th><td>{summary.radar?.confidence ? `${summary.radar.confidence.reliable_frames}/${summary.radar.confidence.total_frames}` : "-"}</td></tr>
+                    <tr>
+                      <th>Pitch quality gate</th>
+                      <td>
+                        {summary.radar?.quality_gate
+                          ? `${summary.radar.quality_gate.status} · ${(summary.radar.quality_gate.reliable_ratio * 100).toFixed(1)}% coverage`
+                          : "-"}
+                      </td>
+                    </tr>
+                    <tr>
+                      <th>Camera cuts recovered</th>
+                      <td>
+                        {summary.radar?.quality_gate
+                          ? `${summary.radar.quality_gate.camera_cuts_recovered}/${summary.radar.quality_gate.camera_cuts_detected}`
+                          : "-"}
+                      </td>
+                    </tr>
+                    <tr><th>Metric release status</th><td>{summary.metric_tracking?.quality_verified ? "Verified" : "Review / manual calibration required"}</td></tr>
                     <tr><th>Radar calibrations</th><td>{summary.radar?.successful_calibrations ?? 0}</td></tr>
                     <tr>
                       <th>Line alignment</th>
