@@ -1460,10 +1460,145 @@ button {
 }
 
 .quality-state.approved,
-.quality-state.quality_check_passed {
+.quality-state.quality_check_passed,
+.quality-state.passed {
   border-color: #91d8c0;
   background: #eaf8f3;
   color: #006b4e;
+}
+
+.release-gate-panel,
+.release-plan-builder {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid #d9e2ea;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.release-gate-panel.passed {
+  border-color: #91d8c0;
+  background: #f0f9f6;
+}
+
+.release-gate-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.release-gate-heading h3 {
+  margin: 3px 0 0;
+  font-size: 15px;
+}
+
+.release-gate-panel > p {
+  margin: 10px 0 0;
+  color: #617080;
+  font-size: 12px;
+}
+
+.release-condition-grid {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.release-condition-grid > div {
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid #e1e7ed;
+  border-radius: 5px;
+  background: #ffffff;
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+}
+
+.release-condition-grid > div.passed {
+  color: #00795b;
+}
+
+.release-condition-grid > div.blocked {
+  color: #b42318;
+}
+
+.release-condition-grid span {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.release-condition-grid strong,
+.release-condition-grid small {
+  overflow-wrap: anywhere;
+  font-size: 10px;
+}
+
+.release-condition-grid small {
+  color: #617080;
+  font-weight: 500;
+}
+
+.release-plan-builder {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) repeat(2, minmax(105px, 150px)) auto minmax(160px, auto);
+  align-items: end;
+  gap: 9px;
+}
+
+.release-plan-builder > div,
+.release-plan-builder label {
+  display: grid;
+  gap: 4px;
+}
+
+.release-plan-builder label span,
+.release-plan-builder .eyebrow {
+  color: #617080;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.release-plan-result {
+  padding-bottom: 8px;
+  color: #315c50;
+  font-size: 11px;
+}
+
+.release-plan-clips {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 6px;
+  max-height: 260px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.release-plan-clips > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid #d9e2ea;
+  background: #fff;
+}
+
+.release-plan-clips > div.critical {
+  border-left: 3px solid #d99100;
+}
+
+.release-plan-clips span,
+.release-plan-clips small {
+  display: block;
+}
+
+.release-plan-clips small {
+  margin-top: 2px;
+  color: #617080;
 }
 
 .quality-tabs {
@@ -1616,12 +1751,26 @@ button {
 
 .quality-ground-truth-builder {
   display: grid;
-  grid-template-columns: repeat(3, minmax(120px, 170px)) auto;
+  grid-template-columns: repeat(6, minmax(105px, 150px)) auto;
   gap: 10px;
   align-items: end;
   margin-top: 12px;
   padding: 10px;
   border: 1px solid #d9e2ea;
+}
+
+.quality-ground-truth-builder .quality-critical-check {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.table-subline {
+  margin-top: 3px;
+  display: block;
+  color: #617080;
+  font-size: 9px;
 }
 
 .quality-ground-truth-builder label {
@@ -1866,6 +2015,24 @@ button {
   width: 100%;
 }
 
+.role-assurance-row {
+  margin-top: 8px;
+  padding: 8px;
+  border-left: 3px solid #008d6a;
+  background: #eef8f5;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 10px;
+}
+
+.role-assurance-row span,
+.review-control small {
+  color: #617080;
+  font-size: 9px;
+}
+
 .review-issues {
   margin-top: 10px;
   display: flex;
@@ -1985,6 +2152,10 @@ button {
 }
 
 @media (max-width: 1280px) {
+  .quality-ground-truth-builder {
+    grid-template-columns: repeat(4, minmax(105px, 1fr));
+  }
+
   .track-review-workspace {
     grid-template-columns: 180px minmax(360px, 1fr) 300px;
   }
@@ -1997,6 +2168,14 @@ button {
   }
 
   .quality-metric-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .release-condition-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .release-plan-builder {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -2039,6 +2218,11 @@ button {
   }
 
   .quality-ground-truth-builder {
+    grid-template-columns: 1fr;
+  }
+
+  .release-condition-grid,
+  .release-plan-builder {
     grid-template-columns: 1fr;
   }
 

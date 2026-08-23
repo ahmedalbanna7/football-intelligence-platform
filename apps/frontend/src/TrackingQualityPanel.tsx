@@ -13,6 +13,7 @@ import {
   Undo2,
   Upload,
   UserCheck,
+  UserRoundCog,
   XCircle
 } from "lucide-react";
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
@@ -30,6 +31,7 @@ type TrackingQualityPanelProps = {
   videoObject: string;
   fps: number;
   onLayersChanged?: () => void;
+  onRunQueued?: () => void;
 };
 
 function percent(value?: number | null) {
@@ -63,7 +65,8 @@ export function TrackingQualityPanel({
   runId,
   videoObject,
   fps,
-  onLayersChanged
+  onLayersChanged,
+  onRunQueued
 }: TrackingQualityPanelProps) {
   const [data, setData] = useState<TrackingQualityResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -74,9 +77,11 @@ export function TrackingQualityPanel({
   const [riskFilter, setRiskFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
   const [teamFilter, setTeamFilter] = useState("all");
+  const [roleFilter, setRoleFilter] = useState("all");
   const [mergeTarget, setMergeTarget] = useState<number | null>(null);
   const [splitFrame, setSplitFrame] = useState<number | null>(null);
   const [playerId, setPlayerId] = useState<number | null>(null);
+  const [participantRole, setParticipantRole] = useState<TrackReviewItem["role_name"]>("player");
   const [note, setNote] = useState("");
   const [groundTruth, setGroundTruth] = useState<Record<string, unknown> | null>(null);
   const [groundTruthName, setGroundTruthName] = useState<string | null>(null);
@@ -84,6 +89,13 @@ export function TrackingQualityPanel({
   const [groundTruthStart, setGroundTruthStart] = useState(0);
   const [groundTruthEnd, setGroundTruthEnd] = useState(0);
   const [groundTruthStep, setGroundTruthStep] = useState(5);
+  const [groundTruthScenario, setGroundTruthScenario] = useState("crossing");
+  const [groundTruthCamera, setGroundTruthCamera] = useState("tactical");
+  const [groundTruthCritical, setGroundTruthCritical] = useState(true);
+  const [releaseClipSize, setReleaseClipSize] = useState(750);
+  const [releaseOverlap, setReleaseOverlap] = useState(0);
+  const [releasePlan, setReleasePlan] = useState<Awaited<ReturnType<typeof api.buildTrackingReleasePlan>> | null>(null);
+  const [releaseRunningIndex, setReleaseRunningIndex] = useState<number | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
   async function load() {
@@ -116,9 +128,10 @@ export function TrackingQualityPanel({
       if (riskFilter !== "all" && track.switch_risk !== riskFilter) return false;
       if (statusFilter !== "all" && track.status !== statusFilter) return false;
       if (teamFilter !== "all" && String(track.team ?? "unknown") !== teamFilter) return false;
+      if (roleFilter !== "all" && track.role_name !== roleFilter) return false;
       return true;
     });
-  }, [data, riskFilter, statusFilter, teamFilter]);
+  }, [data, riskFilter, statusFilter, teamFilter, roleFilter]);
 
   const selectedTrack = data?.tracks.find((track) => track.track_id === selectedTrackId) || null;
   const lastAvailableFrame = useMemo(
@@ -135,6 +148,7 @@ export function TrackingQualityPanel({
     if (!selectedTrack) return;
     setSplitFrame(selectedTrack.first_frame ?? null);
     setPlayerId(selectedTrack.assigned_player_id ?? null);
+    setParticipantRole(selectedTrack.role_name);
     setMergeTarget(
       data?.tracks.find((track) => track.track_id !== selectedTrack.track_id)?.track_id ?? null
     );
@@ -153,6 +167,7 @@ export function TrackingQualityPanel({
       split_frame?: number | null;
       assigned_player_id?: number | null;
       assigned_team_number?: number | null;
+      assigned_role_name?: string | null;
     } = {}
   ) {
     if (!selectedTrack) return;
@@ -246,7 +261,10 @@ export function TrackingQualityPanel({
       const response = await api.buildTrackingGroundTruthDraft(matchId, runId, {
         start_frame: groundTruthStart,
         end_frame: groundTruthEnd,
-        sample_every_frames: groundTruthStep
+        sample_every_frames: groundTruthStep,
+        scenario: groundTruthScenario,
+        camera_style: groundTruthCamera,
+        critical: groundTruthCritical
       });
       const blob = new Blob([JSON.stringify(response.ground_truth, null, 2)], {
         type: "application/json"
@@ -262,6 +280,40 @@ export function TrackingQualityPanel({
       setMessage(error instanceof Error ? error.message : "Ground-truth draft failed.");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function buildReleasePlan() {
+    setBusy(true);
+    setMessage("Building full-video release test plan...");
+    try {
+      const response = await api.buildTrackingReleasePlan(matchId, {
+        clip_size: releaseClipSize,
+        overlap_frames: releaseOverlap,
+        camera_style: groundTruthCamera
+      });
+      setReleasePlan(response);
+      setMessage(`${response.clips_count} release clips planned across ${response.source_frames} source frames.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Release plan failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function queueReleaseClip(clip: NonNullable<typeof releasePlan>["clips"][number]) {
+    setBusy(true);
+    setReleaseRunningIndex(clip.index);
+    setMessage(`Queueing release clip ${clip.index + 1}...`);
+    try {
+      const queued = await api.runMatchAnalysisPlus(matchId, clip.run_request);
+      setMessage(`Clip ${clip.index + 1} queued as run #${queued.id}. Its result is saved with this match.`);
+      onRunQueued?.();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not queue release clip.");
+    } finally {
+      setBusy(false);
+      setReleaseRunningIndex(null);
     }
   }
 
@@ -337,10 +389,56 @@ export function TrackingQualityPanel({
             <span>{assessment.reid_model || "No Re-ID model reported"}</span>
           </div>
 
+          <div className={`release-gate-panel ${assessment.release_gate_status}`}>
+            <div className="release-gate-heading">
+              <div>
+                <span className="eyebrow">Release decision</span>
+                <h3>{assessment.release_gate_status === "passed" ? "Tracking release passed" : "Tracking release blocked"}</h3>
+              </div>
+              <span className={`quality-state ${assessment.release_gate_status}`}>
+                {assessment.release_gate_status === "passed" ? <ShieldCheck size={15} /> : <AlertTriangle size={15} />}
+                {titleCase(assessment.release_gate_status || "not_ready")}
+              </span>
+            </div>
+            {assessment.release_gate?.conditions?.length ? (
+              <div className="release-condition-grid">
+                {assessment.release_gate.conditions.map((condition) => (
+                  <div className={condition.passed ? "passed" : "blocked"} key={condition.code}>
+                    {condition.passed ? <CheckCircle2 size={15} /> : <XCircle size={15} />}
+                    <span><strong>{condition.label}</strong><small>{condition.missing?.length ? `Missing: ${condition.missing.join(", ")}` : `Actual: ${String(condition.actual ?? "not measured")} · Required: ${String(condition.required ?? "-")}`}</small></span>
+                  </div>
+                ))}
+              </div>
+            ) : <p>Evaluate verified clips to activate the release decision.</p>}
+          </div>
+
+          <div className="release-plan-builder">
+            <div><span className="eyebrow">Full-video coverage</span><strong>500-1000 frame clip plan</strong></div>
+            <label><span>Clip size</span><input className="input" max="1000" min="500" onChange={(event) => setReleaseClipSize(Number(event.target.value))} step="50" type="number" value={releaseClipSize} /></label>
+            <label><span>Overlap</span><input className="input" max="250" min="0" onChange={(event) => setReleaseOverlap(Number(event.target.value))} step="25" type="number" value={releaseOverlap} /></label>
+            <button className="button" disabled={busy || releaseOverlap >= releaseClipSize} onClick={() => void buildReleasePlan()} type="button"><FileCheck2 size={16} /> Build plan</button>
+            {releasePlan ? <span className="release-plan-result"><strong>{releasePlan.clips_count}</strong> clips · {releasePlan.source_frames} frames · {releasePlan.fps} FPS</span> : null}
+            {releasePlan ? (
+              <div className="release-plan-clips">
+                {releasePlan.clips.map((clip) => (
+                  <div className={clip.critical ? "critical" : ""} key={clip.index}>
+                    <span><strong>Clip {clip.index + 1}</strong><small>F{clip.start_frame}-F{clip.end_frame} · {clip.frame_count} frames · {clip.scenarios.map(titleCase).join(", ")}</small></span>
+                    <button className="button" disabled={busy} onClick={() => void queueReleaseClip(clip)} type="button">
+                      {releaseRunningIndex === clip.index ? <RefreshCw className="spin" size={15} /> : <CheckCircle2 size={15} />} Run clip
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+
           <div className="quality-ground-truth-builder">
             <label><span>Clip start</span><input className="input" min="0" onChange={(event) => setGroundTruthStart(Number(event.target.value))} type="number" value={groundTruthStart} /></label>
             <label><span>Clip end</span><input className="input" max={lastAvailableFrame} min={groundTruthStart} onChange={(event) => setGroundTruthEnd(Number(event.target.value))} type="number" value={groundTruthEnd} /></label>
             <label><span>Sample every</span><input className="input" max="120" min="1" onChange={(event) => setGroundTruthStep(Number(event.target.value))} type="number" value={groundTruthStep} /></label>
+            <label><span>Scenario</span><select className="select" onChange={(event) => setGroundTruthScenario(event.target.value)} value={groundTruthScenario}><option value="crossing">Crossing</option><option value="crowding">Crowding</option><option value="reentry">Long re-entry</option><option value="baseline">Baseline</option></select></label>
+            <label><span>Camera</span><select className="select" onChange={(event) => setGroundTruthCamera(event.target.value)} value={groundTruthCamera}><option value="tactical">Tactical</option><option value="close_or_moving">Close / moving</option></select></label>
+            <label className="quality-critical-check"><input checked={groundTruthCritical} onChange={(event) => setGroundTruthCritical(event.target.checked)} type="checkbox" /><span>Critical clip</span></label>
             <button className="button" disabled={busy || groundTruthEnd < groundTruthStart} onClick={() => void downloadGroundTruthDraft()} type="button">
               <Download size={16} /> Ground truth draft
             </button>
@@ -362,12 +460,13 @@ export function TrackingQualityPanel({
 
           <div className="quality-table-wrap">
             <table className="table quality-table">
-              <thead><tr><th>Track</th><th>Team</th><th>Identity</th><th>Re-ID</th><th>Motion</th><th>Fragments</th><th>Risk</th><th>Status</th><th>Review</th></tr></thead>
+              <thead><tr><th>Track</th><th>Team</th><th>Role</th><th>Identity</th><th>Re-ID</th><th>Motion</th><th>Fragments</th><th>Risk</th><th>Status</th><th>Review</th></tr></thead>
               <tbody>
                 {data.tracks.map((track) => (
                   <tr key={track.track_id}>
                     <td><strong>#{track.track_id}</strong></td>
                     <td>{track.team ? `Team ${track.team}` : "Unknown"}</td>
+                    <td><strong>{titleCase(track.role_name)}</strong><small className="table-subline">{percent(track.role_confidence)}{track.role_locked ? " · locked" : " · learning"}</small></td>
                     <td><div className="quality-score"><QualityBar value={track.identity_confidence} /><span>{percent(track.identity_confidence)}</span></div></td>
                     <td>{percent(track.reid_confidence)}</td>
                     <td>{percent(track.motion_consistency)}</td>
@@ -395,6 +494,9 @@ export function TrackingQualityPanel({
             <select className="select" onChange={(event) => setTeamFilter(event.target.value)} value={teamFilter}>
               <option value="all">Both teams</option><option value="1">Team 1</option><option value="2">Team 2</option><option value="unknown">Unknown team</option>
             </select>
+            <select className="select" onChange={(event) => setRoleFilter(event.target.value)} value={roleFilter}>
+              <option value="all">All roles</option><option value="player">Players</option><option value="goalkeeper">Goalkeepers</option><option value="referee">Referees</option><option value="assistant_referee">Assistant referees</option><option value="staff_outside_pitch">Staff / outside pitch</option>
+            </select>
             <span>{filteredTracks.length} tracks</span>
           </div>
 
@@ -402,7 +504,7 @@ export function TrackingQualityPanel({
             <aside className="track-review-list">
               {filteredTracks.map((track) => (
                 <button className={track.track_id === selectedTrackId ? "active" : ""} key={track.track_id} onClick={() => setSelectedTrackId(track.track_id)} type="button">
-                  <span><strong>Track {track.track_id}</strong><small>{track.team ? `Team ${track.team}` : "Unknown team"}</small></span>
+                  <span><strong>Track {track.track_id}</strong><small>{titleCase(track.role_name)} · {track.team ? `Team ${track.team}` : "No team"}</small></span>
                   <span><RiskBadge risk={track.switch_risk} /><small>{percent(track.identity_confidence)}</small></span>
                 </button>
               ))}
@@ -433,7 +535,9 @@ export function TrackingQualityPanel({
                     <div><span>Re-ID</span><strong>{percent(selectedTrack.reid_confidence)}</strong><QualityBar value={selectedTrack.reid_confidence} /></div>
                     <div><span>Motion</span><strong>{percent(selectedTrack.motion_consistency)}</strong><QualityBar value={selectedTrack.motion_consistency} /></div>
                     <div><span>Team</span><strong>{percent(selectedTrack.team_consistency)}</strong><QualityBar value={selectedTrack.team_consistency} /></div>
+                    <div><span>Role</span><strong>{percent(selectedTrack.role_confidence)}</strong><QualityBar value={selectedTrack.role_confidence} /></div>
                   </div>
+                  <div className="role-assurance-row"><strong>{titleCase(selectedTrack.role_name)}</strong><span>{selectedTrack.role_locked ? "Locked by temporal evidence" : "Still learning"}</span></div>
                   <div className="review-issues">
                     {selectedTrack.issue_codes.length ? selectedTrack.issue_codes.map((issue) => <span key={issue}>{titleCase(issue)}</span>) : <span className="clear">No quality flags</span>}
                   </div>
@@ -456,6 +560,11 @@ export function TrackingQualityPanel({
                       <button className={selectedTrack.team === 1 ? "active" : ""} disabled={busy} onClick={() => void applyCorrection("change_team", { assigned_team_number: 1 })} type="button">Team 1</button>
                       <button className={selectedTrack.team === 2 ? "active" : ""} disabled={busy} onClick={() => void applyCorrection("change_team", { assigned_team_number: 2 })} type="button">Team 2</button>
                     </div>
+                  </div>
+                  <div className="review-control">
+                    <label htmlFor={`role-${runId}`}>Participant role</label>
+                    <div className="control-row"><select className="select" id={`role-${runId}`} value={participantRole} onChange={(event) => setParticipantRole(event.target.value as TrackReviewItem["role_name"])}><option value="player">Player</option><option value="goalkeeper">Goalkeeper</option><option value="referee">Referee</option><option value="assistant_referee">Assistant referee</option><option value="staff_outside_pitch">Staff / outside pitch</option></select><button className="button icon-button" disabled={busy || participantRole === selectedTrack.role_name} onClick={() => void applyCorrection("change_role", { assigned_role_name: participantRole })} title="Confirm participant role" type="button"><UserRoundCog size={16} /></button></div>
+                    <small>{selectedTrack.role_evidence.length ? selectedTrack.role_evidence.map(titleCase).join(" · ") : "No role evidence recorded"}</small>
                   </div>
                   <div className="review-control">
                     <label htmlFor={`player-${runId}`}>Player identity</label>
@@ -486,7 +595,7 @@ export function TrackingQualityPanel({
                 <tr key={correction.id}>
                   <td>{titleCase(correction.action)}</td>
                   <td>{correction.source_track_id != null ? `Track ${correction.source_track_id}` : "-"}</td>
-                  <td>{correction.target_track_id != null ? `Track ${correction.target_track_id}` : correction.split_frame != null ? `Frame ${correction.split_frame}` : correction.assigned_team_number != null ? `Team ${correction.assigned_team_number}` : correction.assigned_player_id != null ? `Player ${correction.assigned_player_id}` : "-"}</td>
+                  <td>{correction.target_track_id != null ? `Track ${correction.target_track_id}` : correction.split_frame != null ? `Frame ${correction.split_frame}` : correction.assigned_role_name ? titleCase(correction.assigned_role_name) : correction.assigned_team_number != null ? `Team ${correction.assigned_team_number}` : correction.assigned_player_id != null ? `Player ${correction.assigned_player_id}` : "-"}</td>
                   <td>{correction.note || "-"}</td>
                   <td>{correction.created_at ? new Date(correction.created_at).toLocaleString() : "-"}</td>
                   <td>{correction.undone ? "Undone" : "Active"}</td>

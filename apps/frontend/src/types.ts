@@ -454,6 +454,21 @@ export type TrackingQualityAssessment = {
   fragmentation?: number | null;
   predictions_object?: string | null;
   ground_truth_object?: string | null;
+  release_gate_status: string;
+  release_gate?: {
+    status: string;
+    conditions: Array<{
+      code: string;
+      label: string;
+      passed: boolean;
+      actual?: unknown;
+      required?: unknown;
+      missing?: string[];
+      status?: string;
+    }>;
+    thresholds?: Record<string, unknown>;
+    unresolved_fragments?: number;
+  } | null;
   metrics?: Record<string, unknown> | null;
   thresholds?: Record<string, number> | null;
   updated_at?: string;
@@ -465,6 +480,10 @@ export type TrackReviewItem = {
   track_id: number;
   canonical_track_id: number;
   team?: number | null;
+  role_name: "player" | "goalkeeper" | "referee" | "assistant_referee" | "staff_outside_pitch";
+  role_confidence: number;
+  role_locked: boolean;
+  role_evidence: string[];
   assigned_player_id?: number | null;
   assigned_player?: {
     id: number;
@@ -506,6 +525,7 @@ export type TrackReviewCorrection = {
   split_frame?: number | null;
   assigned_player_id?: number | null;
   assigned_team_number?: number | null;
+  assigned_role_name?: string | null;
   note?: string | null;
   undone: boolean;
   created_at?: string;

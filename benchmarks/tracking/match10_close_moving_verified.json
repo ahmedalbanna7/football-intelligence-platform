@@ -1,0 +1,362 @@
+{
+  "schema_version": "tracking_ground_truth.v2",
+  "coverage": "selected_identities",
+  "verification": {
+    "status": "verified",
+    "annotator": "codex-assisted-five-frame-visual-review",
+    "reviewed_at": "2026-08-23T21:00:00Z"
+  },
+  "source": {
+    "match_id": 10,
+    "run_id": 46,
+    "predictions_object": "matches/10/match-analysis-plus/runs/46/tracking-quality/predictions.jsonl",
+    "file_name": "13386254_3840_2160_24fps.mp4",
+    "purpose": "Close/moving camera regression covering crowding and two distinct team kits"
+  },
+  "clips": [
+    {
+      "start_frame": 36,
+      "end_frame": 324,
+      "sample_every_frames": 72,
+      "coverage": "selected_identities",
+      "scenario": "crowding",
+      "camera_style": "close_or_moving",
+      "critical": true
+    }
+  ],
+  "instructions": [
+    "Correct every identity_id and bbox in the selected frames.",
+    "Add missing visible identities and remove false detections.",
+    "Set every review_state to verified, then set verification.status to verified.",
+    "Use a stable identity_id for the same physical person across every clip."
+  ],
+  "frames": [
+    {
+      "frame": 36,
+      "objects": [
+        {
+          "identity_id": "identity-1",
+          "bbox": [
+            1894.11,
+            1104.24,
+            2073.35,
+            1544.65
+          ],
+          "source_track_id": 1,
+          "source_raw_track_id": 1,
+          "team": null,
+          "role_name": null,
+          "review_state": "verified"
+        },
+        {
+          "identity_id": "identity-2",
+          "bbox": [
+            2059.2,
+            527.66,
+            2142.39,
+            877.9
+          ],
+          "source_track_id": 2,
+          "source_raw_track_id": 2,
+          "team": null,
+          "role_name": null,
+          "review_state": "verified"
+        },
+        {
+          "identity_id": "identity-3",
+          "bbox": [
+            3187.67,
+            500.6,
+            3321.63,
+            820.02
+          ],
+          "source_track_id": 3,
+          "source_raw_track_id": 3,
+          "team": null,
+          "role_name": null,
+          "review_state": "verified"
+        },
+        {
+          "identity_id": "identity-4",
+          "bbox": [
+            1396.72,
+            407.27,
+            1490.01,
+            725.47
+          ],
+          "source_track_id": 4,
+          "source_raw_track_id": 4,
+          "team": null,
+          "role_name": null,
+          "review_state": "verified"
+        }
+      ]
+    },
+    {
+      "frame": 108,
+      "objects": [
+        {
+          "identity_id": "identity-1",
+          "bbox": [
+            1801.01,
+            985.15,
+            1934.81,
+            1397.43
+          ],
+          "source_track_id": 1,
+          "source_raw_track_id": 1,
+          "team": null,
+          "role_name": null,
+          "review_state": "verified"
+        },
+        {
+          "identity_id": "identity-2",
+          "bbox": [
+            2144.93,
+            756.7,
+            2254.06,
+            1132.7
+          ],
+          "source_track_id": 2,
+          "source_raw_track_id": 2,
+          "team": null,
+          "role_name": null,
+          "review_state": "verified"
+        },
+        {
+          "identity_id": "identity-3",
+          "bbox": [
+            3281.57,
+            691.93,
+            3404.8,
+            1065.6
+          ],
+          "source_track_id": 3,
+          "source_raw_track_id": 3,
+          "team": null,
+          "role_name": null,
+          "review_state": "verified"
+        },
+        {
+          "identity_id": "identity-4",
+          "bbox": [
+            1765.88,
+            444.2,
+            1885.55,
+            787.36
+          ],
+          "source_track_id": 4,
+          "source_raw_track_id": 4,
+          "team": null,
+          "role_name": null,
+          "review_state": "verified"
+        }
+      ]
+    },
+    {
+      "frame": 180,
+      "objects": [
+        {
+          "identity_id": "identity-1",
+          "bbox": [
+            1015.28,
+            861.45,
+            1194.86,
+            1278.83
+          ],
+          "source_track_id": 1,
+          "source_raw_track_id": 1,
+          "team": null,
+          "role_name": null,
+          "review_state": "verified"
+        },
+        {
+          "identity_id": "identity-2",
+          "bbox": [
+            1800.41,
+            744.1,
+            1941.61,
+            1114.82
+          ],
+          "source_track_id": 2,
+          "source_raw_track_id": 2,
+          "team": null,
+          "role_name": null,
+          "review_state": "verified"
+        },
+        {
+          "identity_id": "identity-3",
+          "bbox": [
+            3418.79,
+            845.18,
+            3522.22,
+            1230.28
+          ],
+          "source_track_id": 3,
+          "source_raw_track_id": 3,
+          "team": null,
+          "role_name": null,
+          "review_state": "verified"
+        },
+        {
+          "identity_id": "identity-4",
+          "bbox": [
+            1923.49,
+            433.54,
+            2032.39,
+            785.0
+          ],
+          "source_track_id": 4,
+          "source_raw_track_id": 4,
+          "team": null,
+          "role_name": null,
+          "review_state": "verified"
+        }
+      ]
+    },
+    {
+      "frame": 252,
+      "objects": [
+        {
+          "identity_id": "identity-1",
+          "bbox": [
+            1596.2,
+            629.06,
+            1761.66,
+            990.12
+          ],
+          "source_track_id": 1,
+          "source_raw_track_id": 1,
+          "team": null,
+          "role_name": null,
+          "review_state": "verified"
+        },
+        {
+          "identity_id": "identity-2",
+          "bbox": [
+            2359.36,
+            675.64,
+            2522.12,
+            1027.56
+          ],
+          "source_track_id": 2,
+          "source_raw_track_id": 2,
+          "team": null,
+          "role_name": null,
+          "review_state": "verified"
+        },
+        {
+          "identity_id": "identity-3",
+          "bbox": [
+            3088.06,
+            856.23,
+            3219.89,
+            1232.74
+          ],
+          "source_track_id": 3,
+          "source_raw_track_id": 3,
+          "team": null,
+          "role_name": null,
+          "review_state": "verified"
+        },
+        {
+          "identity_id": "identity-4",
+          "bbox": [
+            2807.7,
+            366.45,
+            2901.67,
+            694.68
+          ],
+          "source_track_id": 4,
+          "source_raw_track_id": 4,
+          "team": null,
+          "role_name": null,
+          "review_state": "verified"
+        }
+      ]
+    },
+    {
+      "frame": 324,
+      "objects": [
+        {
+          "identity_id": "identity-1",
+          "bbox": [
+            2478.44,
+            719.9,
+            2637.72,
+            1095.26
+          ],
+          "source_track_id": 1,
+          "source_raw_track_id": 1,
+          "team": null,
+          "role_name": null,
+          "review_state": "verified"
+        },
+        {
+          "identity_id": "identity-2",
+          "bbox": [
+            2618.59,
+            855.96,
+            2775.69,
+            1217.14
+          ],
+          "source_track_id": 2,
+          "source_raw_track_id": 2,
+          "team": null,
+          "role_name": null,
+          "review_state": "verified"
+        },
+        {
+          "identity_id": "identity-3",
+          "bbox": [
+            2993.23,
+            492.85,
+            3093.51,
+            786.27
+          ],
+          "source_track_id": 3,
+          "source_raw_track_id": 3,
+          "team": null,
+          "role_name": null,
+          "review_state": "verified"
+        },
+        {
+          "identity_id": "identity-4",
+          "bbox": [
+            3189.12,
+            446.82,
+            3309.64,
+            782.93
+          ],
+          "source_track_id": 4,
+          "source_raw_track_id": 4,
+          "team": null,
+          "role_name": null,
+          "review_state": "verified"
+        }
+      ]
+    }
+  ],
+  "identities": {
+    "identity-1": {
+      "team": 1,
+      "role_name": "player",
+      "review_state": "verified"
+    },
+    "identity-2": {
+      "team": 2,
+      "role_name": "player",
+      "review_state": "verified"
+    },
+    "identity-3": {
+      "team": 1,
+      "role_name": "player",
+      "review_state": "verified"
+    },
+    "identity-4": {
+      "team": 2,
+      "role_name": "player",
+      "review_state": "verified"
+    }
+  }
+}

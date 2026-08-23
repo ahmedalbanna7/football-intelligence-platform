@@ -14,6 +14,28 @@
     "source_end_frame": 749,
     "purpose": "Late-clip regression for camera motion, crowding, both teams, and an assistant referee"
   },
+  "identities": {
+    "match12-late-person-1": {"team": 1, "role_name": "player", "review_state": "verified"},
+    "match12-late-person-3": {"team": 2, "role_name": "player", "review_state": "verified"},
+    "match12-late-person-4": {"team": 1, "role_name": "player", "review_state": "verified"},
+    "match12-late-person-5": {"team": 2, "role_name": "player", "review_state": "verified"},
+    "match12-late-person-6": {"team": 2, "role_name": "player", "review_state": "verified"},
+    "match12-late-person-7": {"team": 1, "role_name": "player", "review_state": "verified"},
+    "match12-late-person-9": {"team": 2, "role_name": "player", "review_state": "verified"},
+    "match12-late-person-10": {"team": 1, "role_name": "player", "review_state": "verified"},
+    "match12-late-person-11": {"team": 2, "role_name": "player", "review_state": "verified"},
+    "match12-late-person-12": {"team": 1, "role_name": "player", "review_state": "verified"},
+    "match12-late-person-13": {"team": 1, "role_name": "player", "review_state": "verified"},
+    "match12-late-person-15": {"team": 1, "role_name": "player", "review_state": "verified"},
+    "match12-late-person-17": {"team": 2, "role_name": "player", "review_state": "verified"},
+    "match12-late-person-19": {"team": 1, "role_name": "player", "review_state": "verified"},
+    "match12-late-person-20": {"team": 0, "role_name": "assistant_referee", "review_state": "verified"},
+    "match12-late-person-21": {"team": 2, "role_name": "player", "review_state": "verified"},
+    "match12-late-person-22": {"team": 2, "role_name": "player", "review_state": "verified"}
+  },
+  "clips": [
+    {"start_frame": 15, "end_frame": 269, "source_start_frame": 495, "source_end_frame": 749, "scenario": "reentry", "camera_style": "tactical", "critical": true}
+  ],
   "frames": [
     {
       "frame": 15,

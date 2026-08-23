@@ -1,0 +1,449 @@
+{
+  "schema_version": "tracking_ground_truth.v2",
+  "coverage": "selected_identities",
+  "verification": {
+    "status": "verified",
+    "annotator": "codex-assisted-five-frame-visual-review",
+    "reviewed_at": "2026-08-23T21:45:00Z"
+  },
+  "source": {
+    "match_id": 11,
+    "run_id": 57,
+    "predictions_object": "matches/11/match-analysis-plus/runs/57/tracking-quality/predictions.jsonl",
+    "file_name": "FULL MATCH _ Croatia 1-1 Czechia _ VIP Tactical Camera _ EURO 2020 _.mp4",
+    "purpose": "Independent mid-match tactical segment with camera motion and persistent identities from both teams"
+  },
+  "clips": [
+    {
+      "start_frame": 3,
+      "end_frame": 403,
+      "source_start_frame": 90003,
+      "source_end_frame": 90403,
+      "sample_every_frames": 100,
+      "coverage": "selected_identities",
+      "scenario": "camera_motion",
+      "camera_style": "tactical",
+      "critical": true
+    }
+  ],
+  "instructions": [
+    "Correct every identity_id and bbox in the selected frames.",
+    "Add missing visible identities and remove false detections.",
+    "Set every review_state to verified, then set verification.status to verified.",
+    "Use a stable identity_id for the same physical person across every clip."
+  ],
+  "frames": [
+    {
+      "frame": 3,
+      "objects": [
+        {
+          "identity_id": "identity-9",
+          "bbox": [
+            165.2,
+            196.83,
+            173.19,
+            219.55
+          ],
+          "source_frame": 90003,
+          "source_track_id": 9,
+          "source_raw_track_id": 9,
+          "team": 1,
+          "role_name": "player",
+          "review_state": "verified"
+        },
+        {
+          "identity_id": "identity-12",
+          "bbox": [
+            320.68,
+            198.09,
+            328.73,
+            222.88
+          ],
+          "source_frame": 90003,
+          "source_track_id": 12,
+          "source_raw_track_id": 13,
+          "team": 2,
+          "role_name": "player",
+          "review_state": "verified"
+        },
+        {
+          "identity_id": "identity-15",
+          "bbox": [
+            212.39,
+            161.41,
+            217.57,
+            180.87
+          ],
+          "source_frame": 90003,
+          "source_track_id": 15,
+          "source_raw_track_id": 17,
+          "team": 1,
+          "role_name": "player",
+          "review_state": "verified"
+        },
+        {
+          "identity_id": "identity-16",
+          "bbox": [
+            230.77,
+            135.87,
+            235.85,
+            151.96
+          ],
+          "source_frame": 90003,
+          "source_track_id": 16,
+          "source_raw_track_id": 18,
+          "team": 1,
+          "role_name": "player",
+          "review_state": "verified"
+        },
+        {
+          "identity_id": "identity-18",
+          "bbox": [
+            128.84,
+            227.94,
+            137.19,
+            254.53
+          ],
+          "source_frame": 90003,
+          "source_track_id": 18,
+          "source_raw_track_id": 20,
+          "team": 1,
+          "role_name": "player",
+          "review_state": "verified"
+        }
+      ]
+    },
+    {
+      "frame": 103,
+      "objects": [
+        {
+          "identity_id": "identity-9",
+          "bbox": [
+            127.89,
+            205.06,
+            136.24,
+            230.7
+          ],
+          "source_frame": 90103,
+          "source_track_id": 9,
+          "source_raw_track_id": 9,
+          "team": 1,
+          "role_name": "player",
+          "review_state": "verified"
+        },
+        {
+          "identity_id": "identity-12",
+          "bbox": [
+            305.09,
+            193.78,
+            314.2,
+            219.93
+          ],
+          "source_frame": 90103,
+          "source_track_id": 12,
+          "source_raw_track_id": 13,
+          "team": 2,
+          "role_name": "player",
+          "review_state": "verified"
+        },
+        {
+          "identity_id": "identity-15",
+          "bbox": [
+            116.11,
+            160.6,
+            122.68,
+            182.57
+          ],
+          "source_frame": 90103,
+          "source_track_id": 15,
+          "source_raw_track_id": 17,
+          "team": 1,
+          "role_name": "player",
+          "review_state": "verified"
+        },
+        {
+          "identity_id": "identity-18",
+          "bbox": [
+            234.12,
+            196.72,
+            243.45,
+            219.38
+          ],
+          "source_frame": 90103,
+          "source_track_id": 18,
+          "source_raw_track_id": 180,
+          "team": 1,
+          "role_name": "player",
+          "review_state": "verified"
+        }
+      ]
+    },
+    {
+      "frame": 203,
+      "objects": [
+        {
+          "identity_id": "identity-12",
+          "bbox": [
+            305.43,
+            188.23,
+            313.44,
+            215.93
+          ],
+          "source_frame": 90203,
+          "source_track_id": 12,
+          "source_raw_track_id": 13,
+          "team": 2,
+          "role_name": "player",
+          "review_state": "verified"
+        },
+        {
+          "identity_id": "identity-15",
+          "bbox": [
+            110.45,
+            160.0,
+            120.03,
+            183.92
+          ],
+          "source_frame": 90203,
+          "source_track_id": 15,
+          "source_raw_track_id": 17,
+          "team": 1,
+          "role_name": "player",
+          "review_state": "verified"
+        },
+        {
+          "identity_id": "identity-18",
+          "bbox": [
+            268.19,
+            197.34,
+            280.6,
+            221.59
+          ],
+          "source_frame": 90203,
+          "source_track_id": 18,
+          "source_raw_track_id": 81,
+          "team": 1,
+          "role_name": "player",
+          "review_state": "verified"
+        },
+        {
+          "identity_id": "identity-9",
+          "bbox": [
+            127.5,
+            207.64,
+            140.58,
+            234.94
+          ],
+          "source_frame": 90203,
+          "source_track_id": 9,
+          "source_raw_track_id": 9,
+          "team": 1,
+          "role_name": "player",
+          "review_state": "verified"
+        },
+        {
+          "identity_id": "identity-16",
+          "bbox": [
+            170.93,
+            119.93,
+            176.03,
+            138.03
+          ],
+          "source_frame": 90203,
+          "source_track_id": 16,
+          "source_raw_track_id": 18,
+          "team": 1,
+          "role_name": "player",
+          "review_state": "verified"
+        }
+      ]
+    },
+    {
+      "frame": 303,
+      "objects": [
+        {
+          "identity_id": "identity-12",
+          "bbox": [
+            377.85,
+            177.0,
+            388.15,
+            206.09
+          ],
+          "source_frame": 90303,
+          "source_track_id": 12,
+          "source_raw_track_id": 13,
+          "team": 2,
+          "role_name": "player",
+          "review_state": "verified"
+        },
+        {
+          "identity_id": "identity-15",
+          "bbox": [
+            159.71,
+            156.95,
+            167.49,
+            183.56
+          ],
+          "source_frame": 90303,
+          "source_track_id": 15,
+          "source_raw_track_id": 17,
+          "team": 1,
+          "role_name": "player",
+          "review_state": "verified"
+        },
+        {
+          "identity_id": "identity-18",
+          "bbox": [
+            490.64,
+            206.56,
+            502.31,
+            235.56
+          ],
+          "source_frame": 90303,
+          "source_track_id": 18,
+          "source_raw_track_id": 81,
+          "team": 1,
+          "role_name": "player",
+          "review_state": "verified"
+        },
+        {
+          "identity_id": "identity-9",
+          "bbox": [
+            196.98,
+            215.37,
+            212.4,
+            246.16
+          ],
+          "source_frame": 90303,
+          "source_track_id": 9,
+          "source_raw_track_id": 9,
+          "team": 1,
+          "role_name": "player",
+          "review_state": "verified"
+        },
+        {
+          "identity_id": "identity-16",
+          "bbox": [
+            181.94,
+            115.17,
+            188.6,
+            133.7
+          ],
+          "source_frame": 90303,
+          "source_track_id": 16,
+          "source_raw_track_id": 14,
+          "team": 1,
+          "role_name": "player",
+          "review_state": "verified"
+        }
+      ]
+    },
+    {
+      "frame": 403,
+      "objects": [
+        {
+          "identity_id": "identity-12",
+          "bbox": [
+            369.46,
+            158.92,
+            378.7,
+            187.72
+          ],
+          "source_frame": 90403,
+          "source_track_id": 12,
+          "source_raw_track_id": 13,
+          "team": 2,
+          "role_name": "player",
+          "review_state": "verified"
+        },
+        {
+          "identity_id": "identity-15",
+          "bbox": [
+            96.21,
+            146.06,
+            107.63,
+            174.96
+          ],
+          "source_frame": 90403,
+          "source_track_id": 15,
+          "source_raw_track_id": 17,
+          "team": 1,
+          "role_name": "player",
+          "review_state": "verified"
+        },
+        {
+          "identity_id": "identity-18",
+          "bbox": [
+            532.9,
+            190.78,
+            545.6,
+            221.62
+          ],
+          "source_frame": 90403,
+          "source_track_id": 18,
+          "source_raw_track_id": 81,
+          "team": 1,
+          "role_name": "player",
+          "review_state": "verified"
+        },
+        {
+          "identity_id": "identity-9",
+          "bbox": [
+            158.1,
+            215.41,
+            175.57,
+            250.97
+          ],
+          "source_frame": 90403,
+          "source_track_id": 9,
+          "source_raw_track_id": 9,
+          "team": 1,
+          "role_name": "player",
+          "review_state": "verified"
+        },
+        {
+          "identity_id": "identity-16",
+          "bbox": [
+            115.26,
+            107.3,
+            125.5,
+            128.2
+          ],
+          "source_frame": 90403,
+          "source_track_id": 16,
+          "source_raw_track_id": 14,
+          "team": 1,
+          "role_name": "player",
+          "review_state": "verified"
+        }
+      ]
+    }
+  ],
+  "identities": {
+    "identity-9": {
+      "team": 1,
+      "role_name": "player",
+      "note": "Dark-kit left-channel player verified across five frames"
+    },
+    "identity-12": {
+      "team": 2,
+      "role_name": "player",
+      "note": "White-kit central player verified across five frames"
+    },
+    "identity-15": {
+      "team": 1,
+      "role_name": "player",
+      "note": "Dark-kit left-side player verified across five frames"
+    },
+    "identity-16": {
+      "team": 1,
+      "role_name": "player",
+      "note": "Dark-kit high-left player verified when visible"
+    },
+    "identity-18": {
+      "team": 1,
+      "role_name": "player",
+      "note": "Dark-kit player crossing from left to right verified across five frames"
+    }
+  }
+}

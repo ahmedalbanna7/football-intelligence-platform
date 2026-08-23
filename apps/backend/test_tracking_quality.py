@@ -1,6 +1,9 @@
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock
 
-from app.tracking_quality.metrics import evaluate_tracking
+from app.tracking_quality.metrics import evaluate_release_suite, evaluate_tracking
+from app.tracking_quality.service import TrackingQualityService
 
 
 def _payload(rows: list[tuple[int, str, list[float]]], prediction: bool) -> dict:
@@ -99,6 +102,78 @@ class TrackingQualityMetricTests(unittest.TestCase):
         self.assertEqual(3, metrics["evaluated_frames"])
         self.assertEqual("annotated_frames_only", metrics["evaluation_scope"])
 
+    def test_source_frame_coordinates_align_offset_runs(self) -> None:
+        predictions = _payload([(0, "1", [10, 10, 30, 60])], prediction=True)
+        predictions["observations"][0]["source_frame"] = 500
+        ground_truth = _payload([(20, "a", [10, 10, 30, 60])], prediction=False)
+        ground_truth["observations"][0]["source_frame"] = 500
+        ground_truth["clips"] = [
+            {
+                "start_frame": 20,
+                "end_frame": 20,
+                "source_start_frame": 500,
+                "source_end_frame": 500,
+                "scenario": "reentry",
+                "camera_style": "tactical",
+                "critical": True,
+            }
+        ]
+
+        metrics = evaluate_tracking(predictions, ground_truth)
+
+        self.assertEqual(100.0, metrics["idf1"])
+        self.assertEqual("source", metrics["frame_coordinate_space"])
+        self.assertEqual(500, metrics["clips"][0]["start_frame"])
+
+    def test_ground_truth_draft_preserves_original_source_frames(self) -> None:
+        service = TrackingQualityService()
+        service._get_predictions = Mock(
+            return_value={
+                "observations": [
+                    {
+                        "frame": 0,
+                        "source_frame": 90000,
+                        "track_id": 7,
+                        "raw_track_id": 12,
+                        "bbox": [10, 20, 40, 90],
+                        "team": 1,
+                        "role_name": "player",
+                    },
+                    {
+                        "frame": 10,
+                        "source_frame": 90010,
+                        "track_id": 7,
+                        "raw_track_id": 12,
+                        "bbox": [12, 20, 42, 90],
+                        "team": 1,
+                        "role_name": "player",
+                    },
+                ]
+            }
+        )
+        service._put_json = Mock()
+        assessment = SimpleNamespace(predictions_object="matches/11/run/quality/predictions.jsonl")
+        db = Mock()
+        db.query.return_value.filter.return_value.first.return_value = assessment
+        run = SimpleNamespace(id=57, match_id=11, summary_json={})
+
+        result = service.build_ground_truth_draft(
+            db,
+            run,
+            start_frame=0,
+            end_frame=10,
+            sample_every_frames=10,
+            track_ids=[7],
+            scenario="crossing",
+            camera_style="tactical",
+            critical=True,
+        )
+
+        ground_truth = result["ground_truth"]
+        self.assertEqual(90000, ground_truth["clips"][0]["source_start_frame"])
+        self.assertEqual(90010, ground_truth["clips"][0]["source_end_frame"])
+        self.assertEqual(90000, ground_truth["frames"][0]["objects"][0]["source_frame"])
+
     def test_unverified_ground_truth_is_rejected(self) -> None:
         ground_truth = _payload(self.ground_truth_rows, prediction=False)
         ground_truth["verification"]["status"] = "draft"
@@ -127,6 +202,128 @@ class TrackingQualityMetricTests(unittest.TestCase):
 
         self.assertEqual(100.0, metrics["idf1"])
         self.assertEqual("selected_identities", metrics["coverage"])
+
+    def test_release_gate_reports_per_clip_and_passes_complete_suite(self) -> None:
+        predictions = _payload(
+            [
+                (frame, "1" if identity == "a" else "2", bbox)
+                for frame, identity, bbox in self.ground_truth_rows
+            ],
+            prediction=True,
+        )
+        ground_truth = _payload(self.ground_truth_rows, prediction=False)
+        for observation in predictions["observations"]:
+            observation["team"] = 1 if observation["track_id"] == "1" else 2
+        for observation in ground_truth["observations"]:
+            observation["team"] = 1 if observation["identity_id"] == "a" else 2
+        ground_truth["clips"] = [
+            {"start_frame": 0, "end_frame": 0, "scenario": "crossing", "camera_style": "tactical", "critical": True},
+            {"start_frame": 1, "end_frame": 1, "scenario": "crowding", "camera_style": "tactical", "critical": True},
+            {"start_frame": 2, "end_frame": 2, "scenario": "reentry", "camera_style": "close_or_moving", "critical": True},
+        ]
+
+        metrics = evaluate_tracking(predictions, ground_truth)
+
+        self.assertEqual(3, len(metrics["clips"]))
+        self.assertEqual(0, metrics["cross_team"]["cross_team_switches"])
+        self.assertEqual("passed", metrics["release_gate"]["status"])
+
+    def test_release_gate_blocks_cross_team_identity_reuse(self) -> None:
+        ground_truth = _payload(self.ground_truth_rows, prediction=False)
+        predictions = _payload(
+            [(frame, "shared", bbox) for frame, _, bbox in self.ground_truth_rows],
+            prediction=True,
+        )
+        for observation in ground_truth["observations"]:
+            observation["team"] = 1 if observation["identity_id"] == "a" else 2
+        ground_truth["clips"] = [
+            {"start_frame": 0, "end_frame": 2, "scenario": "crossing", "camera_style": "tactical", "critical": True}
+        ]
+
+        metrics = evaluate_tracking(predictions, ground_truth)
+
+        self.assertEqual(1, metrics["cross_team"]["cross_team_switches"])
+        condition = next(
+            item for item in metrics["release_gate"]["conditions"]
+            if item["code"] == "cross_team_switches"
+        )
+        self.assertFalse(condition["passed"])
+
+    def test_identity_metadata_supplies_verified_team_labels(self) -> None:
+        ground_truth = _payload(self.ground_truth_rows, prediction=False)
+        ground_truth["identities"] = {
+            "a": {"team": 1, "role_name": "player"},
+            "b": {"team": 2, "role_name": "player"},
+        }
+        for observation in ground_truth["observations"]:
+            observation["team"] = None
+            observation["role_name"] = None
+        predictions = _payload(
+            [
+                (frame, "1" if identity == "a" else "2", bbox)
+                for frame, identity, bbox in self.ground_truth_rows
+            ],
+            prediction=True,
+        )
+
+        metrics = evaluate_tracking(predictions, ground_truth)
+
+        self.assertEqual("measured", metrics["cross_team"]["status"])
+        self.assertEqual(0, metrics["cross_team"]["cross_team_switches"])
+
+    def test_release_gate_requires_camera_and_scenario_coverage(self) -> None:
+        predictions = _payload(
+            [
+                (frame, "1" if identity == "a" else "2", bbox)
+                for frame, identity, bbox in self.ground_truth_rows
+            ],
+            prediction=True,
+        )
+        ground_truth = _payload(self.ground_truth_rows, prediction=False)
+        for observation in ground_truth["observations"]:
+            observation["team"] = 1 if observation["identity_id"] == "a" else 2
+        ground_truth["clips"] = [
+            {"start_frame": 0, "end_frame": 2, "scenario": "crossing", "camera_style": "tactical", "critical": True}
+        ]
+
+        metrics = evaluate_tracking(predictions, ground_truth)
+
+        self.assertEqual("blocked", metrics["release_gate"]["status"])
+        missing = {
+            item["code"]: item.get("missing", [])
+            for item in metrics["release_gate"]["conditions"]
+        }
+        self.assertIn("crowding", missing["scenario_coverage"])
+        self.assertIn("close_or_moving", missing["camera_coverage"])
+
+    def test_release_suite_combines_multiple_camera_runs(self) -> None:
+        base = {
+            "idf1": 98.0,
+            "hota": 94.0,
+            "fragmentation": 0,
+            "cross_team": {"status": "measured", "cross_team_switches": 0},
+            "release_gate": {"unresolved_fragments": 0},
+        }
+        suite = evaluate_release_suite(
+            [
+                {
+                    **base,
+                    "clips": [
+                        {"scenario": "crossing", "camera_style": "tactical", "critical": True, "id_switches": 0},
+                        {"scenario": "crowding", "camera_style": "tactical", "critical": True, "id_switches": 0},
+                    ],
+                },
+                {
+                    **base,
+                    "clips": [
+                        {"scenario": "reentry", "camera_style": "close_or_moving", "critical": True, "id_switches": 0}
+                    ],
+                },
+            ]
+        )
+
+        self.assertEqual("passed", suite["status"])
+        self.assertEqual(2, suite["cases_count"])
 
 
 if __name__ == "__main__":

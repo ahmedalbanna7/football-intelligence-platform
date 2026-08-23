@@ -16,7 +16,9 @@ physical people.
 6. After a long gap, restore an ID only when native BoT-SORT Re-ID retained the
    raw identity and the visual evidence is compatible. Otherwise create a new
    fragment for manual merge.
-7. Lock `player`, `goalkeeper`, and `referee` roles only after temporal consensus.
+7. Resolve and lock `player`, `goalkeeper`, `referee`, `assistant_referee`, and
+   `staff_outside_pitch` roles in a separate temporal classifier. Role labels do
+   not participate in identity matching.
 
 Starting a new fragment is safer than assigning an old identity to another
 person. A fragment can be merged after review; an identity switch corrupts
@@ -56,7 +58,7 @@ before approving a release.
 
 ## Current measured baseline
 
-The repository includes two verified partial-identity fixtures:
+The repository includes five verified partial-identity fixtures:
 
 - `benchmarks/tracking/match12_identity_a_verified.json` targets the first
   confirmed global identity permutation.
@@ -66,6 +68,11 @@ The repository includes two verified partial-identity fixtures:
 - `benchmarks/tracking/match12_late_multi_identity_verified.json` covers source
   frames 480-749. It contains 102 verified observations for 17 people across six
   camera, crowding, and re-entry checkpoints.
+- `benchmarks/tracking/match10_close_moving_verified.json` covers a separate
+  close/moving-camera clip with visually verified identities from both teams.
+- `benchmarks/tracking/match11_mid_tactical_verified.json` covers a 500-frame
+  mid-match tactical segment at original source frames 90003-90403. Five
+  persistent identities from both teams were verified through camera motion.
 
 On the same fixture and source frames:
 
@@ -85,9 +92,22 @@ verified 17-person fixture measured zero ID switches, zero fragmentation,
 integrated motion gate reported zero tracks over the hard-motion limit and
 rejected 19 conflicting native-ID ownership claims.
 
-These numbers validate the reviewed opening and source-frame 480-749 clips, not
-the complete match. Full-match annotation and a second camera style are still
-required before this model can pass a match-wide release gate.
+The expanded release suite measured the current candidate on all four fixtures:
+
+| Camera | Scenario | ID switches | IDF1 | HOTA | Cross-team transfers |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Tactical | Crossing | 0 | 100.000 | 100.000 | 0 |
+| Tactical | Crowding | 0 | 99.030 | 99.030 | 0 |
+| Tactical | Re-entry | 0 | 99.510 | 98.200 | 0 |
+| Close/moving | Crowding | 0 | 97.436 | 95.394 | 0 |
+| Tactical mid-match | Camera motion | 0 | 100.000 | 100.000 | 0 |
+
+The aggregate release conditions pass with minimum `IDF1 97.436`, minimum
+`HOTA 95.394`, zero critical ID switches, zero cross-team transfers, and both
+required camera styles across five measured cases. These are selected-identity benchmark results, not a
+claim of perfect full-match tracking. The manifest in
+`benchmarks/tracking/release-gate-manifest.json` records the exact coverage and
+remaining all-visible annotation recommendations.
 
 ## Release quality gate
 
@@ -98,6 +118,9 @@ required before this model can pass a match-wide release gate.
 - Report IDF1, HOTA, exact ID switches, and fragmentation from verified ground
   truth only.
 - Compare the candidate run against the previous released run on the same clips.
+- Require both tactical and close/moving camera cases in the same release suite.
+- Keep officials and outside staff out of player analytics while retaining them
+  in Track Review for role correction.
 
 Perfect identity cannot be guaranteed from every single-camera video, especially
 through long occlusion or a camera cut. The production rule is therefore:

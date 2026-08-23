@@ -743,8 +743,60 @@ class BallTrackingV2Tests(unittest.TestCase):
         self.assertEqual(7, owner)
         self.assertEqual(2, team)
 
+    def test_officials_and_outside_staff_cannot_receive_possession(self) -> None:
+        tracker = PossessionTracker(confirmation_frames=1)
+        staff = _player(180, 100, 8)
+        staff.role_name = "staff_outside_pitch"
+        assistant = _player(185, 100, 9)
+        assistant.role_name = "assistant_referee"
+        player = _player(195, 100, 7)
+        ball = AnalysisObject(1, "ball", [198, 212, 212, 226], 0.9, raw_track_id=1)
+        pitch_transform = lambda point: (point[0] * 10.0, point[1] * 10.0)
+
+        owner, team = tracker.update(
+            0,
+            [staff, assistant, player],
+            [ball],
+            {7: 2, 8: 1, 9: 1},
+            pitch_transform,
+        )
+
+        self.assertEqual(7, owner)
+        self.assertEqual(2, team)
+
 
 class ModelBundleSelectionTests(unittest.TestCase):
+    def test_pitch_preview_ignores_empty_keypoint_batches(self) -> None:
+        class FakeTensor:
+            def __init__(self, value: np.ndarray) -> None:
+                self.value = value
+
+            def cpu(self):
+                return self
+
+            def numpy(self) -> np.ndarray:
+                return self.value
+
+        class EmptyKeypoints:
+            xy = FakeTensor(np.empty((0, 32, 2), dtype=np.float32))
+            conf = FakeTensor(np.empty((0, 32), dtype=np.float32))
+
+        class EmptyResult:
+            keypoints = EmptyKeypoints()
+
+        class EmptyPitchModel:
+            def predict(self, *_args, **_kwargs):
+                return [EmptyResult()]
+
+        runner = MatchAnalysisPlusRunner()
+        score = runner._pitch_model_preview_score(
+            EmptyPitchModel(),
+            [(0, np.zeros((FRAME_HEIGHT, FRAME_WIDTH, 3), dtype=np.uint8))],
+        )
+
+        self.assertEqual(0, score["visible_keypoints_total"])
+        self.assertEqual(0, score["valid_homographies"])
+
     def test_pitch_gate_prefers_wide_stable_geometry(self) -> None:
         runner = MatchAnalysisPlusRunner()
         narrow = {

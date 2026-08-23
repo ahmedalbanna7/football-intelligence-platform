@@ -22,8 +22,24 @@ from app.services.minio_client import BUCKET_NAME, client
 PLAYER_ALIASES = {"person", "player"}
 GOALKEEPER_ALIASES = {"goalkeeper", "goal keeper"}
 REFEREE_ALIASES = {"referee", "official"}
-PERSON_ALIASES = PLAYER_ALIASES | GOALKEEPER_ALIASES | REFEREE_ALIASES
+ASSISTANT_REFEREE_ALIASES = {"assistant referee", "assistant_referee", "linesman"}
+STAFF_ALIASES = {"staff", "coach", "team staff"}
+PERSON_ALIASES = (
+    PLAYER_ALIASES
+    | GOALKEEPER_ALIASES
+    | REFEREE_ALIASES
+    | ASSISTANT_REFEREE_ALIASES
+    | STAFF_ALIASES
+)
 BALL_ALIASES = {"sports ball", "ball"}
+PARTICIPANT_ROLES = {
+    "player",
+    "goalkeeper",
+    "referee",
+    "assistant_referee",
+    "staff_outside_pitch",
+}
+ANALYTICS_ROLES = {"player", "goalkeeper"}
 TEAM_DISPLAY_COLORS = {
     0: (0, 215, 255),
     1: (245, 245, 245),
@@ -128,6 +144,27 @@ class StableTrackState:
     detection_confidences: list[float] = field(default_factory=list)
     max_motion_gate_ratio: float = 0.0
     native_reid_reentries: int = 0
+
+
+@dataclass
+class ParticipantRoleState:
+    track_id: int
+    role_name: str = "player"
+    confidence: float = 0.0
+    locked: bool = False
+    observations: int = 0
+    consecutive_role_frames: int = 0
+    last_candidate_role: str = "player"
+    scores: dict[str, float] = field(
+        default_factory=lambda: {role: 0.0 for role in PARTICIPANT_ROLES}
+    )
+    inside_pitch_observations: int = 0
+    outside_pitch_observations: int = 0
+    near_goal_observations: int = 0
+    touchline_observations: int = 0
+    team_affinity_observations: int = 0
+    detector_role_observations: dict[str, int] = field(default_factory=dict)
+    evidence: list[str] = field(default_factory=list)
 
 
 class PlayerValidityFilter:
@@ -283,6 +320,7 @@ class PitchOccupancyFilter:
         self.rejected_non_field_foot = 0
         self.metric_decisions = 0
         self.visual_fallback_decisions = 0
+        self.last_visual_mask: np.ndarray | None = None
 
     def filter(
         self,
@@ -293,6 +331,7 @@ class PitchOccupancyFilter:
     ) -> list[AnalysisObject]:
         kept: list[AnalysisObject] = []
         visual_mask = radar.playing_surface_mask(frame)
+        self.last_visual_mask = visual_mask
         for player in players:
             self.raw_seen += 1
             raw_id = player.raw_track_id if player.raw_track_id is not None else player.track_id
@@ -878,15 +917,9 @@ class TrackIdStabilizer:
                 self.rejected_long_gap_reentries += 1
                 return None
 
-        if (
-            state.role_locked
-            and observed_role != state.role_name
-            and gap > 8
-            and trusted_visual
-            and appearance < 0.90
-        ):
-            self.rejected_role_conflicts += 1
-            return None
+        # Role labels are semantic metadata, not identity evidence. A temporary
+        # referee/goalkeeper class error must never force an otherwise valid
+        # physical identity to jump to a different stable track.
 
         family_mismatch = self._color_family_mismatch(state.jersey_family, jersey_family)
         if family_mismatch and family_confidence >= 0.70:
@@ -1180,13 +1213,19 @@ class TrackIdStabilizer:
         normalized = str(role_name or "player").lower()
         if normalized in GOALKEEPER_ALIASES:
             return "goalkeeper"
+        if normalized in ASSISTANT_REFEREE_ALIASES:
+            return "assistant_referee"
+        if normalized in STAFF_ALIASES or normalized == "staff_outside_pitch":
+            return "staff_outside_pitch"
         if normalized in REFEREE_ALIASES:
             return "referee"
         return "player"
 
     def _role_vote_weight(self, role_name: str) -> float:
-        if role_name == "referee":
+        if role_name in {"referee", "assistant_referee"}:
             return 0.70
+        if role_name == "staff_outside_pitch":
+            return 0.55
         if role_name == "goalkeeper":
             return 0.85
         return 1.0
@@ -1207,7 +1246,7 @@ class TrackIdStabilizer:
         total = sum(state.role_votes.values())
         best_role = max(state.role_votes, key=state.role_votes.get)
         best_confidence = state.role_votes[best_role] / max(total, 1e-6)
-        required_streak = 8 if best_role in {"referee", "goalkeeper"} else 4
+        required_streak = 8 if best_role != "player" else 4
         if state.last_observed_role == best_role and state.role_streak >= required_streak:
             if best_confidence >= (0.74 if best_role != "player" else 0.58):
                 state.role_name = best_role
@@ -1915,14 +1954,17 @@ class TeamColorClassifier:
             if state is None or state.jersey_color is None:
                 continue
             role_name = str(getattr(state, "role_name", player.role_name or "player"))
-            if role_name == "referee":
+            if role_name in {"referee", "assistant_referee", "staff_outside_pitch"}:
                 team_by_track[player.track_id] = 0
                 self.track_confidence[player.track_id] = 1.0
                 self.official_tracks.add(player.track_id)
+                self.goalkeeper_tracks.discard(player.track_id)
                 continue
+            self.official_tracks.discard(player.track_id)
             if role_name == "goalkeeper":
                 self.goalkeeper_tracks.add(player.track_id)
             else:
+                self.goalkeeper_tracks.discard(player.track_id)
                 outfield_track_ids.add(player.track_id)
             samples[player.track_id] = (
                 state.jersey_color,
@@ -2183,6 +2225,298 @@ class TeamColorClassifier:
         if both_colored:
             return hue_gap * 0.72 + saturation_gap * 0.18 + value_gap * 0.10
         return hue_gap * 0.10 + saturation_gap * 0.48 + value_gap * 0.42
+
+
+class ParticipantRoleClassifierV2:
+    """Resolve a stable semantic role without participating in identity matching."""
+
+    def __init__(self) -> None:
+        self.states: dict[int, ParticipantRoleState] = {}
+        self.metric_observations = 0
+        self.visual_fallback_observations = 0
+        self.locked_role_count = 0
+        self.prevented_role_changes = 0
+
+    def update(
+        self,
+        players: list[AnalysisObject],
+        track_states: dict[int, StableTrackState],
+        team_by_track: dict[int, int],
+        team_classifier: TeamColorClassifier,
+        radar: "PitchRadar",
+        frame: np.ndarray,
+        surface_mask: np.ndarray | None = None,
+    ) -> None:
+        if surface_mask is None:
+            surface_mask = radar.playing_surface_mask(frame)
+        for player in players:
+            stable_state = track_states.get(player.track_id)
+            if stable_state is None:
+                continue
+            role_state = self.states.setdefault(
+                player.track_id,
+                ParticipantRoleState(track_id=player.track_id),
+            )
+            role_state.observations += 1
+            for role in PARTICIPANT_ROLES:
+                role_state.scores[role] *= 0.975
+
+            foot = (
+                (float(player.bbox[0]) + float(player.bbox[2])) / 2.0,
+                float(player.bbox[3]),
+            )
+            metric_reliable = radar.is_reliable(0.62)
+            pitch_point = radar.transform_point(foot) if metric_reliable else None
+            if metric_reliable:
+                self.metric_observations += 1
+                inside_pitch = radar.contains_image_point(foot, margin_cm=40.0)
+                surface_support = 1.0 if inside_pitch else 0.0
+            else:
+                self.visual_fallback_observations += 1
+                surface_support = self._surface_support(surface_mask, foot)
+                inside_pitch = surface_support >= 0.20
+
+            if inside_pitch:
+                role_state.inside_pitch_observations += 1
+            else:
+                role_state.outside_pitch_observations += 1
+
+            near_goal = False
+            near_touchline = False
+            if pitch_point is not None:
+                x_cm, y_cm = pitch_point
+                near_goal = min(x_cm, PITCH_LENGTH_CM - x_cm) <= 1850.0
+                near_touchline = min(y_cm, PITCH_WIDTH_CM - y_cm) <= 260.0
+                if near_goal:
+                    role_state.near_goal_observations += 1
+                if near_touchline:
+                    role_state.touchline_observations += 1
+
+            team_number = team_by_track.get(player.track_id)
+            team_confidence = float(
+                team_classifier.track_confidence.get(player.track_id, 0.0)
+            )
+            team_affinity = team_number in {1, 2} and team_confidence >= 0.62
+            if team_affinity:
+                role_state.team_affinity_observations += 1
+
+            detector_ratios = self._detector_role_ratios(stable_state)
+            for role, ratio in detector_ratios.items():
+                if ratio >= 0.45:
+                    role_state.detector_role_observations[role] = (
+                        role_state.detector_role_observations.get(role, 0) + 1
+                    )
+
+            scores = role_state.scores
+            scores["player"] += 0.50 + detector_ratios["player"] * 1.10
+            scores["goalkeeper"] += detector_ratios["goalkeeper"] * 2.40
+            scores["referee"] += detector_ratios["referee"] * 2.20
+            scores["assistant_referee"] += detector_ratios["assistant_referee"] * 2.30
+            scores["staff_outside_pitch"] += detector_ratios["staff_outside_pitch"] * 2.20
+
+            if team_affinity:
+                scores["player"] += 1.35
+                if detector_ratios["goalkeeper"] >= 0.35 and near_goal:
+                    scores["goalkeeper"] += 0.85
+            if near_goal and detector_ratios["goalkeeper"] >= 0.22:
+                scores["goalkeeper"] += 0.70
+            if near_touchline and (
+                detector_ratios["referee"] + detector_ratios["assistant_referee"]
+            ) >= 0.45:
+                # Generic football detectors commonly label both officials as
+                # referee. Persistent metric touchline evidence disambiguates
+                # the assistant without changing the physical track identity.
+                scores["assistant_referee"] += 3.10
+            if not inside_pitch:
+                scores["staff_outside_pitch"] += 6.5 if metric_reliable else 3.5
+            elif surface_support >= 0.45:
+                scores["player"] += 0.35
+
+            candidate = max(scores, key=scores.get)
+            candidate = self._eligible_candidate(
+                role_state,
+                candidate,
+                detector_ratios,
+            )
+            confidence = self._confidence(scores, candidate)
+            if candidate in {"goalkeeper", "referee", "assistant_referee"}:
+                detector_support = detector_ratios[candidate]
+                if candidate == "assistant_referee":
+                    detector_support += detector_ratios["referee"] * 0.5
+                touchline_assistant_support = (
+                    candidate == "assistant_referee"
+                    and (
+                        detector_ratios["referee"]
+                        + detector_ratios["assistant_referee"]
+                    ) >= 0.78
+                    and role_state.touchline_observations
+                    / max(role_state.observations, 1) >= 0.72
+                )
+                if detector_support >= 0.78 or touchline_assistant_support:
+                    confidence = max(confidence, 0.86)
+            if candidate == "staff_outside_pitch":
+                outside_ratio = role_state.outside_pitch_observations / max(
+                    role_state.observations,
+                    1,
+                )
+                if outside_ratio >= 0.80:
+                    confidence = max(confidence, 0.90)
+            if candidate == role_state.last_candidate_role:
+                role_state.consecutive_role_frames += 1
+            else:
+                role_state.last_candidate_role = candidate
+                role_state.consecutive_role_frames = 1
+
+            if role_state.locked:
+                if candidate != role_state.role_name:
+                    self.prevented_role_changes += 1
+            else:
+                role_state.role_name = candidate
+                role_state.confidence = confidence
+                required_observations = 20 if candidate == "player" else 14
+                required_streak = 10 if candidate == "player" else 8
+                required_confidence = 0.84 if candidate == "player" else 0.78
+                if (
+                    role_state.observations >= required_observations
+                    and role_state.consecutive_role_frames >= required_streak
+                    and confidence >= required_confidence
+                ):
+                    role_state.locked = True
+                    self.locked_role_count += 1
+
+            role_state.evidence = self._evidence_codes(
+                role_state,
+                detector_ratios,
+                team_affinity,
+                metric_reliable,
+            )
+            stable_state.role_name = role_state.role_name
+            stable_state.role_locked = role_state.locked
+            player.role_name = role_state.role_name
+
+    def get(self, track_id: int) -> ParticipantRoleState | None:
+        return self.states.get(track_id)
+
+    def summary(self) -> dict[str, Any]:
+        role_counts: dict[str, int] = {}
+        review_required = 0
+        for state in self.states.values():
+            role_counts[state.role_name] = role_counts.get(state.role_name, 0) + 1
+            if state.confidence < 0.72 or not state.locked:
+                review_required += 1
+        return {
+            "engine": "participant_role_classifier_v2_temporal_geometry",
+            "role_counts": role_counts,
+            "tracks_evaluated": len(self.states),
+            "locked_roles": sum(1 for state in self.states.values() if state.locked),
+            "tracks_needing_role_review": review_required,
+            "metric_observations": self.metric_observations,
+            "visual_fallback_observations": self.visual_fallback_observations,
+            "prevented_role_changes": self.prevented_role_changes,
+            "roles": {
+                str(track_id): {
+                    "role_name": state.role_name,
+                    "confidence": round(state.confidence, 4),
+                    "locked": state.locked,
+                    "observations": state.observations,
+                    "evidence": list(state.evidence),
+                    "inside_pitch_ratio": round(
+                        state.inside_pitch_observations / max(state.observations, 1),
+                        4,
+                    ),
+                    "outside_pitch_ratio": round(
+                        state.outside_pitch_observations / max(state.observations, 1),
+                        4,
+                    ),
+                }
+                for track_id, state in sorted(self.states.items())
+            },
+        }
+
+    def _eligible_candidate(
+        self,
+        state: ParticipantRoleState,
+        candidate: str,
+        detector_ratios: dict[str, float],
+    ) -> str:
+        observations = max(state.observations, 1)
+        outside_ratio = state.outside_pitch_observations / observations
+        near_goal_ratio = state.near_goal_observations / observations
+        touchline_ratio = state.touchline_observations / observations
+        team_affinity_ratio = state.team_affinity_observations / observations
+        if candidate == "staff_outside_pitch":
+            if state.observations < 6 or outside_ratio < 0.62:
+                return "player"
+        elif candidate == "assistant_referee":
+            official_ratio = detector_ratios["referee"] + detector_ratios["assistant_referee"]
+            if state.observations < 10 or official_ratio < 0.48 or touchline_ratio < 0.45:
+                return "referee" if official_ratio >= 0.58 else "player"
+        elif candidate == "referee":
+            if state.observations < 8 or detector_ratios["referee"] < 0.52:
+                return "player"
+        elif candidate == "goalkeeper":
+            detector_support = detector_ratios["goalkeeper"] >= 0.46
+            geometric_support = near_goal_ratio >= 0.72 and team_affinity_ratio >= 0.35
+            if state.observations < 10 or not (detector_support or geometric_support):
+                return "player"
+        return candidate
+
+    def _detector_role_ratios(
+        self,
+        state: StableTrackState,
+    ) -> dict[str, float]:
+        normalized = {role: 0.0 for role in PARTICIPANT_ROLES}
+        for role, score in state.role_votes.items():
+            target = role if role in PARTICIPANT_ROLES else "player"
+            normalized[target] += max(0.0, float(score))
+        total = max(sum(normalized.values()), 1e-6)
+        return {role: value / total for role, value in normalized.items()}
+
+    def _confidence(self, scores: dict[str, float], candidate: str) -> float:
+        ordered = sorted((max(0.0, value) for value in scores.values()), reverse=True)
+        total = max(sum(ordered), 1e-6)
+        margin = (ordered[0] - ordered[1]) / max(ordered[0], 1e-6) if len(ordered) > 1 else 1.0
+        share = max(0.0, scores[candidate]) / total
+        return float(np.clip(share * 0.62 + margin * 0.38, 0.0, 1.0))
+
+    def _surface_support(
+        self,
+        mask: np.ndarray | None,
+        point: tuple[float, float],
+    ) -> float:
+        if mask is None:
+            return 0.5
+        x, y = int(round(point[0])), int(round(point[1]))
+        if x < 0 or y < 0 or x >= mask.shape[1] or y >= mask.shape[0]:
+            return 0.0
+        radius = max(5, int(round(mask.shape[1] * 0.004)))
+        crop = mask[
+            max(0, y - radius) : min(mask.shape[0], y + radius + 1),
+            max(0, x - radius) : min(mask.shape[1], x + radius + 1),
+        ]
+        return float(np.mean(crop > 0)) if crop.size else 0.0
+
+    def _evidence_codes(
+        self,
+        state: ParticipantRoleState,
+        detector_ratios: dict[str, float],
+        team_affinity: bool,
+        metric_reliable: bool,
+    ) -> list[str]:
+        observations = max(state.observations, 1)
+        evidence = ["metric_pitch_geometry" if metric_reliable else "visual_pitch_fallback"]
+        if team_affinity:
+            evidence.append("team_kit_affinity")
+        if state.outside_pitch_observations / observations >= 0.40:
+            evidence.append("outside_pitch_history")
+        if state.near_goal_observations / observations >= 0.50:
+            evidence.append("goal_area_history")
+        if state.touchline_observations / observations >= 0.45:
+            evidence.append("touchline_history")
+        strongest_detector = max(detector_ratios, key=detector_ratios.get)
+        if detector_ratios[strongest_detector] >= 0.45:
+            evidence.append(f"detector_{strongest_detector}")
+        return evidence
 
 
 @dataclass
@@ -2791,7 +3125,7 @@ class PossessionTracker:
         ball_pitch = pitch_transform(ball_center)
         nearest: tuple[float, AnalysisObject] | None = None
         for player in players:
-            if player.is_predicted or player.role_name == "referee":
+            if player.is_predicted or player.role_name not in ANALYTICS_ROLES:
                 continue
             foot = ((player.bbox[0] + player.bbox[2]) / 2, player.bbox[3])
             player_pitch = pitch_transform(foot)
@@ -2924,7 +3258,11 @@ class PitchRadar:
             keypoints = results[0].keypoints
             source = keypoints.xy.cpu().numpy()
             if source.ndim == 3:
+                if source.shape[0] == 0:
+                    return
                 source = source[0]
+            if source.ndim != 2 or source.shape[0] == 0 or source.shape[1] < 2:
+                return
             confidence = keypoints.conf
             if confidence is None:
                 confidence_values = np.ones(len(source), dtype=np.float32)
@@ -5065,6 +5403,7 @@ class MatchAnalysisPlusRunner:
             reference_palettes_bgr=kit_reference_config["palettes"],
             team_labels=kit_reference_config["team_labels"],
         )
+        participant_role_classifier = ParticipantRoleClassifierV2()
         ball_filter = BallStaticFilter()
         ball_tracker = BallTrackerV2()
         possession_tracker = PossessionTracker()
@@ -5127,18 +5466,33 @@ class MatchAnalysisPlusRunner:
                 radar,
             )
             players = track_stabilizer.update(frames_processed, raw_players, frame)
+            participant_role_classifier.update(
+                players=players,
+                track_states=track_stabilizer.tracks,
+                team_by_track=team_by_track,
+                team_classifier=team_classifier,
+                radar=radar,
+                frame=frame,
+                surface_mask=pitch_occupancy_filter.last_visual_mask,
+            )
+            # Resolve team once per frame after roles so officials and staff
+            # cannot pollute kit anchors or inflate classifier observations.
+            team_classifier.update(players, track_stabilizer.tracks, team_by_track)
+            analytics_players = [
+                player for player in players if player.role_name in ANALYTICS_ROLES
+            ]
             reliable_pitch_transform = radar.transform_point if radar.is_reliable() else None
             filtered_balls = ball_filter.filter(
                 frames_processed,
                 raw_balls,
-                players,
+                analytics_players,
                 width,
                 pitch_transform=reliable_pitch_transform,
             )
             balls = ball_tracker.update(
                 frames_processed,
                 filtered_balls,
-                players,
+                analytics_players,
                 width,
                 pitch_transform=reliable_pitch_transform,
             )
@@ -5160,12 +5514,13 @@ class MatchAnalysisPlusRunner:
                 if item.confidence is not None:
                     confidence_values.append(item.confidence)
 
-            team_classifier.update(players, track_stabilizer.tracks, team_by_track)
             self._record_tracking_quality(
                 frame=frame,
                 frame_index=frames_processed,
+                source_frame_index=actual_start_frame + frames_processed,
                 fps=fps,
                 players=players,
+                team_by_track=team_by_track,
                 predictions_file=quality_predictions_file,
                 review_interval=quality_review_interval,
                 review_observations=quality_review_observations,
@@ -5186,7 +5541,7 @@ class MatchAnalysisPlusRunner:
             )
             _, current_control = possession_tracker.update(
                 frames_processed,
-                players,
+                analytics_players,
                 balls,
                 team_by_track,
                 pitch_transform=radar.transform_point,
@@ -5208,7 +5563,7 @@ class MatchAnalysisPlusRunner:
             radar.draw(
                 annotated,
                 frame_index=frames_processed,
-                players=players,
+                players=analytics_players,
                 balls=balls,
                 team_by_track=team_by_track,
             )
@@ -5236,9 +5591,14 @@ class MatchAnalysisPlusRunner:
         track_role_counts: dict[str, int] = {}
         for track_id in sorted(track_frames):
             state = track_stabilizer.tracks.get(track_id)
+            role_state = participant_role_classifier.get(track_id)
             video_samples = track_video_samples.get(track_id, [])
             pitch_samples = track_pitch_samples.get(track_id, [])
-            stable_role = state.role_name if state is not None else "player"
+            stable_role = (
+                role_state.role_name
+                if role_state is not None
+                else state.role_name if state is not None else "player"
+            )
             track_role_counts[stable_role] = track_role_counts.get(stable_role, 0) + 1
             tracks.append(
                 {
@@ -5305,11 +5665,13 @@ class MatchAnalysisPlusRunner:
                     else None,
                     "role_name": stable_role,
                     "role_confidence": round(
-                        max(state.role_votes.values()) / max(sum(state.role_votes.values()), 1e-6),
+                        role_state.confidence,
                         4,
                     )
-                    if state is not None and state.role_votes
+                    if role_state is not None
                     else 0.0,
+                    "role_locked": role_state.locked if role_state is not None else False,
+                    "role_evidence": list(role_state.evidence) if role_state is not None else [],
                     "role_votes": dict(state.role_votes) if state is not None else {},
                     "team_confidence": team_classifier.track_confidence.get(track_id, 0.0),
                 }
@@ -5326,6 +5688,17 @@ class MatchAnalysisPlusRunner:
             crop_files=quality_crop_files,
             tracker_runtime=tracker_runtime or self._tracker_runtime_diagnostics(model),
         )
+        role_summary = participant_role_classifier.summary()
+        for quality_track in tracking_quality.get("tracks", []):
+            role_state = participant_role_classifier.get(int(quality_track["track_id"]))
+            if role_state is None:
+                continue
+            quality_track["role_name"] = role_state.role_name
+            quality_track["role_confidence"] = round(role_state.confidence, 4)
+            quality_track["role_locked"] = role_state.locked
+            quality_track["role_evidence"] = list(role_state.evidence)
+            if role_state.confidence < 0.72:
+                quality_track.setdefault("issue_codes", []).append("role_needs_review")
         quality_by_track = {
             int(track["track_id"]): track
             for track in tracking_quality.get("tracks", [])
@@ -5365,6 +5738,7 @@ class MatchAnalysisPlusRunner:
             "output_content_type": "video/mp4",
             "frames_processed": frames_processed,
             "max_frames": max_frames,
+            "source_total_frames": source_frames,
             "source_start_frame": actual_start_frame,
             "source_end_frame": actual_start_frame + frames_processed - 1,
             "fps": round(float(fps), 3),
@@ -5385,6 +5759,7 @@ class MatchAnalysisPlusRunner:
             "player_filter": player_filter.summary(),
             "pitch_occupancy_filter": pitch_occupancy_filter.summary(),
             "team_classifier": team_classifier.summary(),
+            "participant_role_classifier": role_summary,
             "kit_references": kit_reference_config["summary"],
             "id_stabilizer": track_stabilizer.summary(),
             "tracking_quality": tracking_quality,
@@ -5420,8 +5795,10 @@ class MatchAnalysisPlusRunner:
         self,
         frame: np.ndarray,
         frame_index: int,
+        source_frame_index: int,
         fps: float,
         players: list[AnalysisObject],
+        team_by_track: dict[int, int],
         predictions_file: Any,
         review_interval: int,
         review_observations: dict[int, list[dict[str, Any]]],
@@ -5436,9 +5813,12 @@ class MatchAnalysisPlusRunner:
             bbox = [round(float(value), 2) for value in player.bbox]
             observation = {
                 "frame": frame_index,
+                "source_frame": source_frame_index,
                 "track_id": player.track_id,
                 "raw_track_id": player.raw_track_id,
                 "bbox": bbox,
+                "team": team_by_track.get(player.track_id),
+                "role_name": player.role_name,
                 "confidence": round(float(player.confidence), 4)
                 if player.confidence is not None
                 else None,
@@ -5642,6 +6022,9 @@ class MatchAnalysisPlusRunner:
                 video_samples.append(
                     [frame_index, int(round(foot[0])), int(round(foot[1]))]
                 )
+
+            if player.role_name not in ANALYTICS_ROLES:
+                continue
 
             pitch_xy = pitch_transform(foot)
             if pitch_xy is None:
@@ -5853,6 +6236,8 @@ class MatchAnalysisPlusRunner:
         role_prefix = {
             "goalkeeper": "GK ",
             "referee": "REF ",
+            "assistant_referee": "AR ",
+            "staff_outside_pitch": "STAFF ",
         }.get(player.role_name, "")
         label = f"{role_prefix}{player.track_id}"
         text_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)[0]
@@ -5936,6 +6321,10 @@ class MatchAnalysisPlusRunner:
     def _map_role_name(self, raw_name: str) -> str:
         if raw_name in GOALKEEPER_ALIASES:
             return "goalkeeper"
+        if raw_name in ASSISTANT_REFEREE_ALIASES:
+            return "assistant_referee"
+        if raw_name in STAFF_ALIASES:
+            return "staff_outside_pitch"
         if raw_name in REFEREE_ALIASES:
             return "referee"
         if raw_name in BALL_ALIASES:
@@ -6281,7 +6670,13 @@ class MatchAnalysisPlusRunner:
             keypoints = results[0].keypoints
             source = keypoints.xy.cpu().numpy()
             if source.ndim == 3:
+                if source.shape[0] == 0:
+                    frame_scores.append(frame_score)
+                    continue
                 source = source[0]
+            if source.ndim != 2 or source.shape[0] == 0 or source.shape[1] < 2:
+                frame_scores.append(frame_score)
+                continue
             confidence = keypoints.conf
             confidence_values = (
                 np.ones(len(source), dtype=np.float32)

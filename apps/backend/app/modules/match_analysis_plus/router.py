@@ -18,6 +18,7 @@ from app.models.match_video import MatchVideo
 from app.queues.events import MatchAnalysisRequestedEvent
 from app.queues.publisher import publish_match_analysis_requested
 from app.services.minio_client import BUCKET_NAME, client
+from app.tracking_quality.metrics import evaluate_release_suite
 from app.tracking_quality.service import TrackingQualityService
 
 router = APIRouter()
@@ -37,6 +38,7 @@ class TrackCorrectionRequest(BaseModel):
     split_frame: int | None = None
     assigned_player_id: int | None = None
     assigned_team_number: int | None = None
+    assigned_role_name: str | None = None
     note: str | None = Field(default=None, max_length=1000)
 
 
@@ -50,6 +52,34 @@ class TrackingGroundTruthDraftRequest(BaseModel):
     end_frame: int = Field(ge=0)
     sample_every_frames: int = Field(default=5, ge=1, le=120)
     track_ids: list[int] = Field(default_factory=list)
+    scenario: str = Field(default="general", max_length=60)
+    camera_style: str = Field(default="tactical", max_length=60)
+    critical: bool = False
+
+
+class TrackingCriticalRange(BaseModel):
+    start_frame: int = Field(ge=0)
+    end_frame: int = Field(ge=0)
+    scenario: str = Field(default="critical", max_length=60)
+
+
+class TrackingReleasePlanRequest(BaseModel):
+    clip_size: int = Field(default=750, ge=500, le=1000)
+    overlap_frames: int = Field(default=0, ge=0, le=250)
+    camera_style: str = Field(default="tactical", max_length=60)
+    critical_ranges: list[TrackingCriticalRange] = Field(default_factory=list)
+
+
+class TrackingReleaseSuiteCase(BaseModel):
+    match_id: int
+    run_id: int
+    ground_truth: dict[str, Any]
+    iou_threshold: float = Field(default=0.5, ge=0.05, le=0.95)
+
+
+class TrackingReleaseSuiteRequest(BaseModel):
+    cases: list[TrackingReleaseSuiteCase] = Field(min_length=1)
+    thresholds: dict[str, Any] = Field(default_factory=dict)
 
 
 quality_service = TrackingQualityService()
@@ -119,6 +149,38 @@ def get_match_analysis_modes():
             },
         ]
     }
+
+
+@router.post("/quality/release-gate/suite")
+def evaluate_tracking_release_suite(
+    payload: TrackingReleaseSuiteRequest,
+    db: Session = Depends(get_db),
+):
+    measured_cases: list[dict[str, Any]] = []
+    case_results: list[dict[str, Any]] = []
+    try:
+        for release_case in payload.cases:
+            run = get_run_or_404(db, release_case.match_id, release_case.run_id)
+            metrics = quality_service.benchmark(
+                db,
+                run,
+                release_case.ground_truth,
+                release_case.iou_threshold,
+            )
+            measured_cases.append(metrics)
+            case_results.append(
+                {
+                    "match_id": release_case.match_id,
+                    "run_id": release_case.run_id,
+                    "metrics": metrics,
+                }
+            )
+        return {
+            "suite": evaluate_release_suite(measured_cases, payload.thresholds),
+            "cases": case_results,
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/{match_id}")
@@ -283,6 +345,90 @@ def get_tracking_quality(
     return quality_service.get_quality(db, run)
 
 
+@router.post("/{match_id}/quality/release-gate/plan")
+def build_tracking_release_plan(
+    match_id: int,
+    payload: TrackingReleasePlanRequest,
+    db: Session = Depends(get_db),
+):
+    video = get_latest_video(db, match_id)
+    if video is None:
+        raise HTTPException(status_code=404, detail="No uploaded video found for this match")
+    if payload.overlap_frames >= payload.clip_size:
+        raise HTTPException(status_code=400, detail="overlap_frames must be smaller than clip_size")
+    for critical_range in payload.critical_ranges:
+        if critical_range.end_frame < critical_range.start_frame:
+            raise HTTPException(status_code=400, detail="Critical range end must follow its start")
+
+    source_url = client.presigned_get_object(
+        BUCKET_NAME,
+        video.object_name,
+        expires=timedelta(minutes=10),
+    )
+    probe = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=avg_frame_rate,nb_frames,duration",
+            "-of", "json", source_url,
+        ],
+        capture_output=True,
+        check=False,
+        timeout=45,
+    )
+    if probe.returncode != 0:
+        raise HTTPException(status_code=422, detail="Could not inspect match video")
+    stream = (json.loads(probe.stdout.decode("utf-8")) or {}).get("streams", [{}])[0]
+    rate_parts = str(stream.get("avg_frame_rate") or "25/1").split("/", 1)
+    fps = float(rate_parts[0]) / max(float(rate_parts[1]) if len(rate_parts) > 1 else 1.0, 1e-6)
+    source_frames = int(stream.get("nb_frames") or 0)
+    if source_frames <= 0:
+        source_frames = int(round(float(stream.get("duration") or 0.0) * fps))
+    if source_frames <= 0:
+        raise HTTPException(status_code=422, detail="Video frame count is unavailable")
+
+    stride = payload.clip_size - payload.overlap_frames
+    clips: list[dict[str, Any]] = []
+    start_frame = 0
+    while start_frame < source_frames:
+        end_frame = min(source_frames - 1, start_frame + payload.clip_size - 1)
+        matched_ranges = [
+            item
+            for item in payload.critical_ranges
+            if item.start_frame <= end_frame and item.end_frame >= start_frame
+        ]
+        scenarios = sorted({item.scenario.lower() for item in matched_ranges})
+        clips.append(
+            {
+                "index": len(clips),
+                "start_frame": start_frame,
+                "end_frame": end_frame,
+                "frame_count": end_frame - start_frame + 1,
+                "camera_style": payload.camera_style.lower(),
+                "critical": bool(matched_ranges),
+                "scenarios": scenarios or ["baseline"],
+                "run_request": {
+                    "mode": "FULL_ANALYSIS",
+                    "start_frame": start_frame,
+                    "max_frames": end_frame - start_frame + 1,
+                },
+            }
+        )
+        if end_frame >= source_frames - 1:
+            break
+        start_frame += stride
+    return {
+        "match_id": match_id,
+        "video_id": video.id,
+        "source_frames": source_frames,
+        "fps": round(fps, 4),
+        "clip_size": payload.clip_size,
+        "overlap_frames": payload.overlap_frames,
+        "clips_count": len(clips),
+        "critical_clips_count": sum(1 for clip in clips if clip["critical"]),
+        "clips": clips,
+    }
+
+
 @router.post("/{match_id}/runs/{run_id}/quality/corrections")
 def create_tracking_correction(
     match_id: int,
@@ -294,7 +440,14 @@ def create_tracking_correction(
     try:
         correction = quality_service.apply_correction(db, run, payload.model_dump())
         recalculation = None
-        if payload.action.lower() in {"reject", "merge", "split", "assign_player", "change_team"}:
+        if payload.action.lower() in {
+            "reject",
+            "merge",
+            "split",
+            "assign_player",
+            "change_team",
+            "change_role",
+        }:
             recalculation = quality_service.recalculate(db, run)
         response = quality_service.get_quality(db, run)
         response["correction_id"] = correction.id
@@ -376,6 +529,9 @@ def build_tracking_ground_truth_draft(
             end_frame=payload.end_frame,
             sample_every_frames=payload.sample_every_frames,
             track_ids=payload.track_ids,
+            scenario=payload.scenario,
+            camera_style=payload.camera_style,
+            critical=payload.critical,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

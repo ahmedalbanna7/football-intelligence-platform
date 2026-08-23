@@ -27,6 +27,13 @@ QUALITY_THRESHOLDS = {
     "high_risk_fragments": 2,
     "high_risk_raw_id_transitions": 4,
 }
+ALLOWED_PARTICIPANT_ROLES = {
+    "player",
+    "goalkeeper",
+    "referee",
+    "assistant_referee",
+    "staff_outside_pitch",
+}
 
 
 def _utc_now() -> datetime:
@@ -41,6 +48,7 @@ class TrackingQualityService:
         "split",
         "assign_player",
         "change_team",
+        "change_role",
     }
 
     def sync_from_summary(
@@ -81,6 +89,10 @@ class TrackingQualityService:
             "benchmark": quality.get("benchmark", {"status": "ground_truth_required"}),
         }
         assessment.thresholds_json = quality.get("thresholds", QUALITY_THRESHOLDS)
+        release_gate = (quality.get("benchmark") or {}).get("release_gate")
+        if isinstance(release_gate, dict):
+            assessment.release_gate_status = str(release_gate.get("status") or "not_ready")
+            assessment.release_gate_json = release_gate
 
         quality_tracks = quality.get("tracks", [])
         existing = {
@@ -100,6 +112,13 @@ class TrackingQualityService:
                 )
                 db.add(item)
             item.team_number = self._optional_int(track.get("team"))
+            if item.role_evidence_json != ["manual_track_review"]:
+                item.role_name = str(track.get("role_name") or "player")
+                item.role_confidence = float(track.get("role_confidence", 0.0))
+                item.role_locked = bool(track.get("role_locked", False))
+                item.role_evidence_json = [
+                    str(value) for value in track.get("role_evidence", [])
+                ]
             if item.status not in {"approved", "rejected", "merged", "split"}:
                 item.status = "pending"
             item.identity_confidence = float(track.get("identity_confidence", 0.0))
@@ -195,6 +214,7 @@ class TrackingQualityService:
         split_frame = self._optional_int(payload.get("split_frame"))
         assigned_player_id = self._optional_int(payload.get("assigned_player_id"))
         assigned_team_number = self._optional_int(payload.get("assigned_team_number"))
+        assigned_role_name = self._optional_role(payload.get("assigned_role_name"))
 
         if action == "approve":
             source.status = "approved"
@@ -223,6 +243,13 @@ class TrackingQualityService:
             if assigned_team_number not in {1, 2}:
                 raise ValueError("assigned_team_number must be 1 or 2")
             source.team_number = assigned_team_number
+        elif action == "change_role":
+            if assigned_role_name is None:
+                raise ValueError("assigned_role_name must be a supported participant role")
+            source.role_name = assigned_role_name
+            source.role_confidence = 1.0
+            source.role_locked = True
+            source.role_evidence_json = ["manual_track_review"]
 
         correction = TrackReviewCorrection(
             run_id=run.id,
@@ -232,6 +259,7 @@ class TrackingQualityService:
             split_frame=split_frame,
             assigned_player_id=assigned_player_id,
             assigned_team_number=assigned_team_number,
+            assigned_role_name=assigned_role_name,
             before_json=before,
             after_json=self._snapshot_item(source),
             note=payload.get("note"),
@@ -345,6 +373,9 @@ class TrackingQualityService:
         assessment.idf1 = float(metrics["idf1"])
         assessment.hota = float(metrics["hota"])
         assessment.fragmentation = int(metrics["fragmentation"])
+        release_gate = metrics.get("release_gate") or {}
+        assessment.release_gate_status = str(release_gate.get("status") or "not_ready")
+        assessment.release_gate_json = release_gate
         assessment.ground_truth_object = ground_truth_object
         assessment.metrics_json = {
             **(assessment.metrics_json or {}),
@@ -368,6 +399,9 @@ class TrackingQualityService:
         end_frame: int,
         sample_every_frames: int,
         track_ids: list[int] | None = None,
+        scenario: str = "general",
+        camera_style: str = "tactical",
+        critical: bool = False,
     ) -> dict[str, Any]:
         if end_frame < start_frame:
             raise ValueError("end_frame must be greater than or equal to start_frame")
@@ -386,6 +420,7 @@ class TrackingQualityService:
         predictions = self._get_predictions(BUCKET_NAME, assessment.predictions_object)
         selected_ids = set(track_ids or [])
         frames: dict[int, list[dict[str, Any]]] = {}
+        source_frames: dict[int, int] = {}
         for observation in predictions.get("observations", []):
             frame_index = int(observation.get("frame", -1))
             track_id = int(observation.get("track_id", -1))
@@ -395,12 +430,18 @@ class TrackingQualityService:
                 continue
             if selected_ids and track_id not in selected_ids:
                 continue
+            source_frame = observation.get("source_frame")
+            if source_frame is not None:
+                source_frames[frame_index] = int(source_frame)
             frames.setdefault(frame_index, []).append(
                 {
                     "identity_id": f"identity-{track_id}",
                     "bbox": observation["bbox"],
+                    "source_frame": int(source_frame) if source_frame is not None else None,
                     "source_track_id": track_id,
                     "source_raw_track_id": observation.get("raw_track_id"),
+                    "team": observation.get("team"),
+                    "role_name": observation.get("role_name"),
                     "review_state": "unverified",
                 }
             )
@@ -409,6 +450,7 @@ class TrackingQualityService:
 
         payload = {
             "schema_version": "tracking_ground_truth.v2",
+            "coverage": "all_visible_identities" if not selected_ids else "selected_identities",
             "verification": {
                 "status": "draft",
                 "annotator": None,
@@ -423,8 +465,19 @@ class TrackingQualityService:
                 {
                     "start_frame": start_frame,
                     "end_frame": end_frame,
+                    **(
+                        {
+                            "source_start_frame": min(source_frames.values()),
+                            "source_end_frame": max(source_frames.values()),
+                        }
+                        if source_frames
+                        else {}
+                    ),
                     "sample_every_frames": sample_every_frames,
                     "coverage": "all_visible_identities" if not selected_ids else "selected_identities",
+                    "scenario": str(scenario or "general").lower(),
+                    "camera_style": str(camera_style or "tactical").lower(),
+                    "critical": bool(critical),
                 }
             ],
             "instructions": [
@@ -502,6 +555,11 @@ class TrackingQualityService:
                     next_track_id += 1
             elif correction.action == "change_team":
                 source["team"] = correction.assigned_team_number
+            elif correction.action == "change_role" and correction.assigned_role_name:
+                source["role_name"] = correction.assigned_role_name
+                source["role_confidence"] = 1.0
+                source["role_locked"] = True
+                source["role_evidence"] = ["manual_track_review"]
             elif correction.action == "assign_player" and correction.assigned_player_id:
                 player = db.get(Player, correction.assigned_player_id)
                 source["player_id"] = correction.assigned_player_id
@@ -606,6 +664,8 @@ class TrackingQualityService:
             "fragmentation": item.fragmentation,
             "predictions_object": item.predictions_object,
             "ground_truth_object": item.ground_truth_object,
+            "release_gate_status": item.release_gate_status,
+            "release_gate": item.release_gate_json,
             "metrics": item.metrics_json,
             "thresholds": item.thresholds_json,
             "updated_at": item.updated_at,
@@ -618,6 +678,10 @@ class TrackingQualityService:
             "track_id": item.track_id,
             "canonical_track_id": item.canonical_track_id,
             "team": item.team_number,
+            "role_name": item.role_name,
+            "role_confidence": item.role_confidence,
+            "role_locked": item.role_locked,
+            "role_evidence": item.role_evidence_json or [],
             "assigned_player_id": item.assigned_player_id,
             "assigned_player": {
                 "id": item.assigned_player.id,
@@ -652,6 +716,7 @@ class TrackingQualityService:
             "split_frame": item.split_frame,
             "assigned_player_id": item.assigned_player_id,
             "assigned_team_number": item.assigned_team_number,
+            "assigned_role_name": item.assigned_role_name,
             "note": item.note,
             "undone": item.undone,
             "created_at": item.created_at,
@@ -661,6 +726,10 @@ class TrackingQualityService:
         return {
             "canonical_track_id": item.canonical_track_id,
             "team_number": item.team_number,
+            "role_name": item.role_name,
+            "role_confidence": item.role_confidence,
+            "role_locked": item.role_locked,
+            "role_evidence_json": item.role_evidence_json,
             "assigned_player_id": item.assigned_player_id,
             "status": item.status,
         }
@@ -668,6 +737,10 @@ class TrackingQualityService:
     def _restore_snapshot(self, item: TrackReviewItem, snapshot: dict[str, Any]) -> None:
         item.canonical_track_id = int(snapshot["canonical_track_id"])
         item.team_number = self._optional_int(snapshot.get("team_number"))
+        item.role_name = str(snapshot.get("role_name") or "player")
+        item.role_confidence = float(snapshot.get("role_confidence", 0.0))
+        item.role_locked = bool(snapshot.get("role_locked", False))
+        item.role_evidence_json = list(snapshot.get("role_evidence_json") or [])
         item.assigned_player_id = self._optional_int(snapshot.get("assigned_player_id"))
         item.status = str(snapshot.get("status", "pending"))
 
@@ -728,3 +801,7 @@ class TrackingQualityService:
 
     def _optional_float(self, value: Any) -> float | None:
         return float(value) if value is not None else None
+
+    def _optional_role(self, value: Any) -> str | None:
+        normalized = str(value or "").strip().lower()
+        return normalized if normalized in ALLOWED_PARTICIPANT_ROLES else None

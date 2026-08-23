@@ -2603,6 +2603,7 @@ function MatchAnalysisPlusPage() {
             fps={summary.fps}
             matchId={activeId || selectedRun.match_id}
             onLayersChanged={() => runs.refresh()}
+            onRunQueued={() => runs.refresh()}
             runId={selectedRun.id}
             videoObject={selectedRun.output_object}
           />

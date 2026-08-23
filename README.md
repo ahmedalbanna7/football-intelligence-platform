@@ -16,6 +16,8 @@ The project is built as a practical foundation for football clubs, academies, an
 - BoT-SORT Re-ID runtime diagnostics and per-track identity confidence.
 - Tracking Quality Gate with ID-switch risk, fragmentation review, crops, merge/split corrections, and undo history.
 - Ground-truth evaluation for IDF1, HOTA, exact ID switches, and track fragmentation.
+- Per-clip Tracking Release Gate with cross-team identity checks and multi-camera suite coverage.
+- Participant Role Classifier v2 for players, goalkeepers, referees, assistant referees, and outside staff.
 - Static-field-marker ball filtering to reduce false ball detections.
 - Team profile and opponent team management.
 - Player roster, shirt number, tactical zone, and assignment data models.
@@ -94,7 +96,8 @@ flowchart TD
     RawObjects --> Tracker["BoT-SORT + Re-ID"]
     Tracker --> Stabilizer["Stable Track ID Layer"]
     Stabilizer --> QualityGate["Tracking Quality Gate"]
-    QualityGate --> TeamClassifier["Team Classifier"]
+    QualityGate --> RoleClassifier["Participant Role Classifier v2"]
+    RoleClassifier --> TeamClassifier["Team Classifier"]
     TeamClassifier --> TacticalIdentity["Tactical Identity Layer"]
     TacticalIdentity --> Analytics["Analytics Engine"]
     Analytics --> Reports["Reports + Artifacts"]
@@ -210,7 +213,7 @@ flowchart LR
 | Tracking quality | `GET /match-analysis-plus/{match_id}/runs/{run_id}/quality`, corrections, recalculation, benchmark |
 | AI status | `GET /ai/yolo/status` |
 
-Detailed quality-gate behavior and the ground-truth JSON contract are documented in [docs/TRACKING_QUALITY_GATE.md](docs/TRACKING_QUALITY_GATE.md). The conservative association rules, Match 12 regression clips, and release thresholds are in [docs/tracking-accuracy-v2.md](docs/tracking-accuracy-v2.md).
+Detailed quality-gate behavior and the ground-truth JSON contract are documented in [docs/TRACKING_QUALITY_GATE.md](docs/TRACKING_QUALITY_GATE.md). The conservative association rules, measured regression results, and release thresholds are in [docs/tracking-accuracy-v2.md](docs/tracking-accuracy-v2.md). Verified fixtures and their exact coverage are catalogued in [benchmarks/tracking/README.md](benchmarks/tracking/README.md).
 
 ## Repository Layout
 

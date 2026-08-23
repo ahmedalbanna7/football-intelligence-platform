@@ -12,6 +12,28 @@
     "reference_run_id": 49,
     "purpose": "Multi-participant regression covering both teams and an assistant referee"
   },
+  "identities": {
+    "match12-person-1": {"team": 1, "role_name": "player", "review_state": "verified"},
+    "match12-person-3": {"team": 1, "role_name": "player", "review_state": "verified"},
+    "match12-person-4": {"team": 1, "role_name": "player", "review_state": "verified"},
+    "match12-person-5": {"team": 2, "role_name": "player", "review_state": "verified"},
+    "match12-person-6": {"team": 1, "role_name": "player", "review_state": "verified"},
+    "match12-person-7": {"team": 1, "role_name": "player", "review_state": "verified"},
+    "match12-person-8": {"team": 2, "role_name": "player", "review_state": "verified"},
+    "match12-person-10": {"team": 2, "role_name": "player", "review_state": "verified"},
+    "match12-person-12": {"team": 2, "role_name": "player", "review_state": "verified"},
+    "match12-person-13": {"team": 1, "role_name": "player", "review_state": "verified"},
+    "match12-person-16": {"team": 0, "role_name": "assistant_referee", "review_state": "verified"},
+    "match12-person-17": {"team": 1, "role_name": "player", "review_state": "verified"},
+    "match12-person-18": {"team": 0, "role_name": "assistant_referee", "review_state": "verified"},
+    "match12-person-21": {"team": 2, "role_name": "player", "review_state": "verified"},
+    "match12-person-22": {"team": 2, "role_name": "player", "review_state": "verified"},
+    "match12-person-23": {"team": 1, "role_name": "player", "review_state": "verified"},
+    "match12-person-25": {"team": 2, "role_name": "player", "review_state": "verified"}
+  },
+  "clips": [
+    {"start_frame": 15, "end_frame": 39, "scenario": "crowding", "camera_style": "tactical", "critical": true}
+  ],
   "frames": [
     {
       "frame": 15,

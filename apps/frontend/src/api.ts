@@ -148,6 +148,7 @@ export const api = {
       split_frame?: number | null;
       assigned_player_id?: number | null;
       assigned_team_number?: number | null;
+      assigned_role_name?: string | null;
       note?: string | null;
     }
   ) {
@@ -199,6 +200,9 @@ export const api = {
       end_frame: number;
       sample_every_frames: number;
       track_ids?: number[];
+      scenario?: string;
+      camera_style?: string;
+      critical?: boolean;
     }
   ) {
     return request<{
@@ -207,6 +211,44 @@ export const api = {
       annotation_count: number;
       ground_truth: Record<string, unknown>;
     }>(`/match-analysis-plus/${matchId}/runs/${runId}/quality/ground-truth/draft`, {
+      method: "POST",
+      json: payload
+    });
+  },
+
+  buildTrackingReleasePlan(
+    matchId: number,
+    payload: {
+      clip_size: number;
+      overlap_frames: number;
+      camera_style: string;
+      critical_ranges?: Array<{ start_frame: number; end_frame: number; scenario: string }>;
+    }
+  ) {
+    return request<{
+      match_id: number;
+      video_id: number;
+      source_frames: number;
+      fps: number;
+      clip_size: number;
+      overlap_frames: number;
+      clips_count: number;
+      critical_clips_count: number;
+      clips: Array<{
+        index: number;
+        start_frame: number;
+        end_frame: number;
+        frame_count: number;
+        camera_style: string;
+        critical: boolean;
+        scenarios: string[];
+        run_request: {
+          mode: string;
+          start_frame: number;
+          max_frames: number;
+        };
+      }>;
+    }>(`/match-analysis-plus/${matchId}/quality/release-gate/plan`, {
       method: "POST",
       json: payload
     });

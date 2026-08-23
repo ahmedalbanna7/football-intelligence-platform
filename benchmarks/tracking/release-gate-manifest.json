@@ -1,0 +1,86 @@
+{
+  "schema_version": "tracking_release_manifest.v1",
+  "release_name": "tracking-accuracy-v2-expanded",
+  "thresholds": {
+    "minimum_idf1": 95.0,
+    "minimum_hota": 90.0,
+    "maximum_critical_id_switches": 0,
+    "maximum_cross_team_switches": 0,
+    "required_scenarios": ["crossing", "crowding", "reentry"],
+    "required_camera_styles": ["tactical", "close_or_moving"]
+  },
+  "verified_cases": [
+    {
+      "fixture": "match12_identity_a_verified.json",
+      "match_id": 12,
+      "camera_style": "tactical",
+      "scenario": "crossing",
+      "critical": true,
+      "coverage": "selected_identities",
+      "status": "verified"
+    },
+    {
+      "fixture": "match12_multi_identity_verified.json",
+      "match_id": 12,
+      "camera_style": "tactical",
+      "scenario": "crowding",
+      "critical": true,
+      "coverage": "selected_identities",
+      "status": "verified"
+    },
+    {
+      "fixture": "match12_late_multi_identity_verified.json",
+      "match_id": 12,
+      "camera_style": "tactical",
+      "scenario": "reentry",
+      "additional_scenarios": ["camera_motion", "crowding"],
+      "critical": true,
+      "coverage": "selected_identities",
+      "status": "verified"
+    },
+    {
+      "fixture": "match10_close_moving_verified.json",
+      "match_id": 10,
+      "camera_style": "close_or_moving",
+      "scenario": "crowding",
+      "critical": true,
+      "coverage": "selected_identities",
+      "status": "verified"
+    },
+    {
+      "fixture": "match11_mid_tactical_verified.json",
+      "match_id": 11,
+      "camera_style": "tactical",
+      "scenario": "camera_motion",
+      "critical": true,
+      "source_start_frame": 90003,
+      "source_end_frame": 90403,
+      "coverage": "selected_identities",
+      "status": "verified"
+    }
+  ],
+  "recommended_expansion": [
+    {
+      "camera_style": "close_or_moving",
+      "scenario": "crossing",
+      "coverage": "all_visible_identities",
+      "status": "recommended_for_full_match_certification"
+    },
+    {
+      "camera_style": "close_or_moving",
+      "scenario": "crowding",
+      "coverage": "all_visible_identities",
+      "status": "recommended_for_full_match_certification"
+    }
+  ],
+  "latest_suite": {
+    "status": "passed",
+    "cases_count": 5,
+    "minimum_idf1": 97.436,
+    "minimum_hota": 95.394,
+    "critical_id_switches": 0,
+    "cross_team_switches": 0,
+    "unresolved_ground_truth_fragments": 0
+  },
+  "note": "The selected-identity release suite passes. Results apply only to visually reviewed identities and frames; all-visible annotation remains recommended before claiming full-match certification."
+}

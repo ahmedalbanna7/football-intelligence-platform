@@ -12,6 +12,12 @@
     "reference_run_id": 47,
     "purpose": "Regression for the first confirmed global stable-ID permutation"
   },
+  "identities": {
+    "match12-player-a": {"team": 1, "role_name": "player", "review_state": "verified"}
+  },
+  "clips": [
+    {"start_frame": 15, "end_frame": 39, "scenario": "crossing", "camera_style": "tactical", "critical": true}
+  ],
   "frames": [
     {
       "frame": 15,

@@ -45,6 +45,12 @@ class TrackingQualityAssessment(Base):
     fragmentation: Mapped[int | None] = mapped_column(Integer, nullable=True)
     predictions_object: Mapped[str | None] = mapped_column(String(500), nullable=True)
     ground_truth_object: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    release_gate_status: Mapped[str] = mapped_column(
+        String(40),
+        default="not_ready",
+        nullable=False,
+    )
+    release_gate_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     metrics_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     thresholds_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
@@ -73,6 +79,10 @@ class TrackReviewItem(Base):
     track_id: Mapped[int] = mapped_column(Integer, nullable=False)
     canonical_track_id: Mapped[int] = mapped_column(Integer, nullable=False)
     team_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    role_name: Mapped[str] = mapped_column(String(40), default="player", nullable=False)
+    role_confidence: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    role_locked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    role_evidence_json: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     assigned_player_id: Mapped[int | None] = mapped_column(
         ForeignKey("players.id", ondelete="SET NULL"),
         nullable=True,
@@ -121,6 +131,7 @@ class TrackReviewCorrection(Base):
         nullable=True,
     )
     assigned_team_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    assigned_role_name: Mapped[str | None] = mapped_column(String(40), nullable=True)
     before_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     after_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
