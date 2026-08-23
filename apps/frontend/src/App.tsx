@@ -2703,6 +2703,8 @@ function MatchAnalysisPlusPage() {
                     <tr><th>Static ball candidates rejected</th><td>{summary.ball_filter?.filtered_static_candidates ?? 0}</td></tr>
                     <tr><th>Penalty spot false balls rejected</th><td>{summary.ball_filter?.penalty_spot_rejections ?? 0}</td></tr>
                     <tr><th>Ball observed / interpolated</th><td>{summary.ball_filter?.tracker?.observed_frames ?? 0} / {summary.ball_filter?.tracker?.interpolated_frames ?? 0}</td></tr>
+                    <tr><th>Ball quality gate</th><td>{summary.ball_filter?.quality_gate?.status ?? "-"}</td></tr>
+                    <tr><th>Longest ball interpolation</th><td>{summary.ball_filter?.tracker?.maximum_interpolation_streak ?? 0} frames</td></tr>
                     <tr><th>Team kit references</th><td>{Object.keys(summary.team_classifier?.kit_anchors_bgr || {}).length}</td></tr>
                     <tr><th>Team color source</th><td>{summary.kit_references?.source || "online_appearance_clustering"}</td></tr>
                     <tr>
@@ -2779,6 +2781,8 @@ function MatchAnalysisPlusPage() {
                     <tr><th>Team 1 control</th><td>{summary.team_ball_control?.team_1_percent ?? 0}%</td></tr>
                     <tr><th>Team 2 control</th><td>{summary.team_ball_control?.team_2_percent ?? 0}%</td></tr>
                     <tr><th>Possession changes</th><td>{summary.possession?.transitions ?? 0}</td></tr>
+                    <tr><th>Completed passes</th><td>{summary.possession?.completed_passes ?? 0}</td></tr>
+                    <tr><th>Turnovers</th><td>{summary.possession?.turnovers ?? 0}</td></tr>
                     <tr><th>Output</th><td>{summary.output_object}</td></tr>
                   </tbody>
                 </table>

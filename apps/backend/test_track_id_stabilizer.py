@@ -764,6 +764,60 @@ class BallTrackingV2Tests(unittest.TestCase):
         self.assertEqual(7, owner)
         self.assertEqual(2, team)
 
+    def test_confirmed_same_team_transition_creates_completed_pass(self) -> None:
+        tracker = PossessionTracker(confirmation_frames=1)
+        passer = _player(100, 100, 7)
+        receiver = _player(400, 100, 8)
+        pitch_transform = lambda point: (point[0] * 10.0, point[1] * 10.0)
+        passer_ball = AnalysisObject(1, "ball", [114, 212, 128, 226], 0.95)
+        released_ball = AnalysisObject(1, "ball", [270, 212, 284, 226], 0.90)
+        receiver_ball = AnalysisObject(1, "ball", [414, 212, 428, 226], 0.95)
+
+        tracker.update(0, [passer, receiver], [passer_ball], {7: 1, 8: 1}, pitch_transform)
+        tracker.update(1, [passer, receiver], [released_ball], {7: 1, 8: 1}, pitch_transform)
+        tracker.update(2, [passer, receiver], [receiver_ball], {7: 1, 8: 1}, pitch_transform)
+
+        summary = tracker.summary()
+        self.assertEqual(1, summary["completed_passes"])
+        self.assertEqual("completed_pass", summary["events"][0]["type"])
+        self.assertEqual(7, summary["events"][0]["from_track_id"])
+        self.assertEqual(8, summary["events"][0]["to_track_id"])
+
+    def test_cross_team_transition_creates_turnover(self) -> None:
+        tracker = PossessionTracker(confirmation_frames=1)
+        first = _player(100, 100, 7)
+        second = _player(400, 100, 8)
+        pitch_transform = lambda point: (point[0] * 10.0, point[1] * 10.0)
+        first_ball = AnalysisObject(1, "ball", [114, 212, 128, 226], 0.95)
+        second_ball = AnalysisObject(1, "ball", [414, 212, 428, 226], 0.95)
+
+        tracker.update(0, [first, second], [first_ball], {7: 1, 8: 2}, pitch_transform)
+        tracker.update(1, [first, second], [second_ball], {7: 1, 8: 2}, pitch_transform)
+
+        summary = tracker.summary()
+        self.assertEqual(1, summary["turnovers"])
+        self.assertEqual("turnover", summary["events"][0]["type"])
+
+    def test_ball_quality_gate_requires_specialized_model_and_metric_path(self) -> None:
+        runner = MatchAnalysisPlusRunner()
+        tracker_summary = {
+            "observed_frames": 10,
+            "pitch_samples": 10,
+            "maximum_interpolation_streak": 2,
+            "max_interpolation_frames": 10,
+        }
+        filter_summary = {
+            "penalty_spot_rejections": 3,
+            "filtered_static_candidates": 5,
+        }
+
+        passed = runner._ball_quality_gate(100, tracker_summary, filter_summary, True)
+        blocked = runner._ball_quality_gate(100, tracker_summary, filter_summary, False)
+
+        self.assertEqual("passed", passed["status"])
+        self.assertEqual("needs_review", blocked["status"])
+        self.assertIn("specialized_ball_model", blocked["failed_conditions"])
+
 
 class ModelBundleSelectionTests(unittest.TestCase):
     def test_pitch_preview_ignores_empty_keypoint_batches(self) -> None:

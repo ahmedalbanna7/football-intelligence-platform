@@ -398,6 +398,12 @@ class TrackingQualityService:
             corrected,
             float(corrected.get("fps") or summary.get("fps") or 25.0),
         )
+        canonical_possession = self._canonicalize_possession(
+            summary.get("possession") or {},
+            corrections,
+            corrected,
+        )
+        canonical_analytics["possession"] = canonical_possession
         analytics_object = f"{prefix}/canonical_analytics.json"
         report_object = f"{prefix}/canonical_report.json"
         canonical_report = self._build_canonical_report(run, canonical_analytics)
@@ -441,6 +447,7 @@ class TrackingQualityService:
             **canonical_analytics,
             "object_name": analytics_object,
         }
+        summary["possession"] = canonical_possession
         summary["canonical_report"] = {
             "status": "ready",
             "object_name": report_object,
@@ -921,6 +928,7 @@ class TrackingQualityService:
                 for track in analytics.get("tracks", [])
                 if track.get("role_name") in ANALYTICS_PARTICIPANT_ROLES
             ],
+            "possession": analytics.get("possession", {}),
             "participants_excluded_from_player_analytics": analytics.get("excluded_roles", {}),
             "quality": {
                 "coordinate_system": analytics.get("coordinate_system"),
@@ -928,6 +936,104 @@ class TrackingQualityService:
                 "canonical_identity_required": True,
             },
         }
+
+    def _canonicalize_possession(
+        self,
+        possession: dict[str, Any],
+        corrections: list[TrackReviewCorrection],
+        layers: dict[str, Any],
+    ) -> dict[str, Any]:
+        track_metadata = {
+            int(track.get("canonical_track_id") or track["track_id"]): track
+            for track in layers.get("tracks", [])
+        }
+        events = []
+        for raw_event in possession.get("events", []):
+            event = deepcopy(raw_event)
+            frame = int(event.get("frame", 0))
+            start_frame = int(event.get("start_frame", frame))
+            from_track_id = self._canonical_track_id_at_frame(
+                self._optional_int(event.get("from_track_id")),
+                start_frame,
+                corrections,
+            )
+            to_track_id = self._canonical_track_id_at_frame(
+                self._optional_int(event.get("to_track_id")),
+                frame,
+                corrections,
+            )
+            if from_track_id is None or to_track_id is None or from_track_id == to_track_id:
+                continue
+            event["from_track_id"] = from_track_id
+            event["to_track_id"] = to_track_id
+            event["from_team"] = track_metadata.get(from_track_id, {}).get(
+                "team", event.get("from_team")
+            )
+            event["to_team"] = track_metadata.get(to_track_id, {}).get(
+                "team", event.get("to_team")
+            )
+            same_team = (
+                event.get("from_team") is not None
+                and event.get("from_team") == event.get("to_team")
+            )
+            if same_team and event.get("travel_m") is not None and float(event["travel_m"]) >= 1.2:
+                event["type"] = "completed_pass"
+            elif (
+                event.get("from_team") is not None
+                and event.get("to_team") is not None
+                and event.get("from_team") != event.get("to_team")
+            ):
+                event["type"] = "turnover"
+            else:
+                event["type"] = "possession_change"
+            events.append(event)
+
+        player_frames: dict[str, int] = {}
+        for raw_track_id, frames in (possession.get("player_frames") or {}).items():
+            canonical_track_id = self._canonical_track_id_at_frame(
+                self._optional_int(raw_track_id),
+                0,
+                corrections,
+            )
+            if canonical_track_id is None:
+                continue
+            key = str(canonical_track_id)
+            player_frames[key] = player_frames.get(key, 0) + int(frames)
+        return {
+            **possession,
+            "engine": "canonical_metric_ball_possession_and_pass_detection_v2",
+            "player_frames": player_frames,
+            "transitions": len(events),
+            "completed_passes": sum(1 for event in events if event["type"] == "completed_pass"),
+            "turnovers": sum(1 for event in events if event["type"] == "turnover"),
+            "events": events,
+            "canonical_track_ids": True,
+        }
+
+    def _canonical_track_id_at_frame(
+        self,
+        track_id: int | None,
+        frame: int,
+        corrections: list[TrackReviewCorrection],
+    ) -> int | None:
+        if track_id is None:
+            return None
+        canonical_track_id = track_id
+        for correction in corrections:
+            if correction.source_track_id != canonical_track_id:
+                continue
+            if correction.action == "reject":
+                return None
+            if correction.action == "merge" and correction.target_track_id is not None:
+                canonical_track_id = int(correction.target_track_id)
+            elif (
+                correction.action == "split"
+                and correction.target_track_id is not None
+                and correction.split_frame is not None
+                and frame >= int(correction.split_frame)
+            ):
+                canonical_track_id = int(correction.target_track_id)
+        return canonical_track_id
 
     def _observation_score(self, observation: dict[str, Any]) -> float:
         return float(

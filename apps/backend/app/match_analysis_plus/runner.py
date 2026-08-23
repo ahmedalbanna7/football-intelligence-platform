@@ -2826,13 +2826,17 @@ class BallStaticFilter:
         )
 
 
-class BallTrackerV2:
-    """Single-ball alpha-beta/Kalman-style tracker with short occlusion recovery."""
+class BallTrackerV3:
+    """Single-ball constant-velocity Kalman tracker with guarded occlusion recovery."""
 
     def __init__(self, max_interpolation_frames: int = 10) -> None:
         self.max_interpolation_frames = max_interpolation_frames
         self.position: np.ndarray | None = None
         self.velocity = np.zeros(2, dtype=np.float64)
+        self.kalman_state: np.ndarray | None = None
+        self.kalman_covariance = np.diag([120.0, 120.0, 36.0, 36.0]).astype(np.float64)
+        self.predicted_state: np.ndarray | None = None
+        self.predicted_covariance: np.ndarray | None = None
         self.size = np.array([12.0, 12.0], dtype=np.float64)
         self.last_frame = -1
         self.last_observed_frame = -1
@@ -2844,6 +2848,9 @@ class BallTrackerV2:
         self.rejected_gate = 0
         self.reinitializations = 0
         self.expired_track_resets = 0
+        self.current_interpolation_streak = 0
+        self.maximum_interpolation_streak = 0
+        self.mahalanobis_rejections = 0
         self.track_id = 1
         self.pitch_path: list[dict[str, float | int | bool]] = []
 
@@ -2871,14 +2878,19 @@ class BallTrackerV2:
                     return []
                 self.position = measured
                 self.velocity[:] = 0.0
+                self.kalman_state = np.array(
+                    [measured[0], measured[1], 0.0, 0.0],
+                    dtype=np.float64,
+                )
+                self.kalman_covariance = np.diag(
+                    [64.0, 64.0, 25.0, 25.0]
+                ).astype(np.float64)
                 self.reinitializations += 1
             else:
-                delta_frames = max(1, frame_index - self.last_frame)
-                predicted = self.position + self.velocity * delta_frames
-                residual = measured - predicted
-                self.position = predicted + residual * 0.72
-                measured_velocity = residual / delta_frames
-                self.velocity = self.velocity * 0.76 + measured_velocity * 0.24
+                self._correct_kalman(
+                    measured,
+                    float(measurement.confidence or 0.5),
+                )
             self.size = self.size * 0.80 + np.array(
                 [
                     max(2.0, measurement.bbox[2] - measurement.bbox[0]),
@@ -2890,6 +2902,7 @@ class BallTrackerV2:
             self.last_observed_frame = frame_index
             self.confidence = min(0.99, self.confidence * 0.72 + float(measurement.confidence or 0.5) * 0.28 + 0.18)
             self.observed_frames += 1
+            self.current_interpolation_streak = 0
             output = self._object(measurement.raw_track_id, predicted=False)
             self._record_pitch(frame_index, output, pitch_transform, predicted=False)
             return [output]
@@ -2900,21 +2913,30 @@ class BallTrackerV2:
         if gap > self.max_interpolation_frames:
             self.confidence *= 0.75
             return []
-        delta_frames = max(1, frame_index - self.last_frame)
-        self.position = self.position + self.velocity * delta_frames
-        self.velocity *= 0.94
+        if self.predicted_state is None or self.predicted_covariance is None:
+            return []
+        self.kalman_state = self.predicted_state.copy()
+        self.kalman_state[2:] *= 0.96
+        self.kalman_covariance = self.predicted_covariance.copy()
+        self.position = self.kalman_state[:2].copy()
+        self.velocity = self.kalman_state[2:].copy()
         self.last_frame = frame_index
         self.confidence *= 0.82
         if self.confidence < 0.22:
             return []
         self.interpolated_frames += 1
+        self.current_interpolation_streak += 1
+        self.maximum_interpolation_streak = max(
+            self.maximum_interpolation_streak,
+            self.current_interpolation_streak,
+        )
         output = self._object(None, predicted=True)
         self._record_pitch(frame_index, output, pitch_transform, predicted=True)
         return [output]
 
     def summary(self) -> dict[str, Any]:
         return {
-            "engine": "single_ball_kalman_tracker_v2",
+            "engine": "single_ball_constant_velocity_kalman_v3",
             "track_id": self.track_id,
             "observed_frames": self.observed_frames,
             "interpolated_frames": self.interpolated_frames,
@@ -2923,13 +2945,65 @@ class BallTrackerV2:
             "expired_track_resets": self.expired_track_resets,
             "current_confidence": round(self.confidence, 4),
             "max_interpolation_frames": self.max_interpolation_frames,
+            "maximum_interpolation_streak": self.maximum_interpolation_streak,
+            "mahalanobis_rejections": self.mahalanobis_rejections,
+            "state_covariance_trace": round(float(np.trace(self.kalman_covariance)), 3),
             "pitch_samples": len(self.pitch_path),
         }
 
     def _predict(self, frame_index: int) -> np.ndarray | None:
-        if self.position is None:
+        if self.kalman_state is None:
             return None
-        return self.position + self.velocity * max(1, frame_index - self.last_frame)
+        delta_frames = max(1, frame_index - self.last_frame)
+        transition = np.array(
+            [
+                [1.0, 0.0, delta_frames, 0.0],
+                [0.0, 1.0, 0.0, delta_frames],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            dtype=np.float64,
+        )
+        process_scale = max(1.0, float(delta_frames))
+        process_noise = np.diag(
+            [5.0, 5.0, 1.8, 1.8]
+        ).astype(np.float64) * process_scale
+        self.predicted_state = transition @ self.kalman_state
+        self.predicted_covariance = (
+            transition @ self.kalman_covariance @ transition.T + process_noise
+        )
+        return self.predicted_state[:2].copy()
+
+    def _correct_kalman(
+        self,
+        measurement: np.ndarray,
+        detection_confidence: float,
+    ) -> None:
+        if self.predicted_state is None or self.predicted_covariance is None:
+            return
+        observation = np.array(
+            [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
+            dtype=np.float64,
+        )
+        noise_value = 24.0 - min(1.0, max(0.0, detection_confidence)) * 16.0
+        measurement_noise = np.eye(2, dtype=np.float64) * noise_value
+        innovation = measurement - observation @ self.predicted_state
+        innovation_covariance = (
+            observation @ self.predicted_covariance @ observation.T
+            + measurement_noise
+        )
+        gain = (
+            self.predicted_covariance
+            @ observation.T
+            @ np.linalg.inv(innovation_covariance)
+        )
+        self.kalman_state = self.predicted_state + gain @ innovation
+        identity = np.eye(4, dtype=np.float64)
+        self.kalman_covariance = (
+            identity - gain @ observation
+        ) @ self.predicted_covariance
+        self.position = self.kalman_state[:2].copy()
+        self.velocity = self.kalman_state[2:].copy()
 
     def _expire_lost_track(self, frame_index: int) -> None:
         if self.position is None or self.last_observed_frame < 0:
@@ -2937,12 +3011,16 @@ class BallTrackerV2:
         if frame_index - self.last_observed_frame <= self.max_interpolation_frames:
             return
         self.position = None
+        self.kalman_state = None
+        self.predicted_state = None
+        self.predicted_covariance = None
         self.velocity[:] = 0.0
         self.last_frame = -1
         self.last_observed_frame = -1
         self.pending_position = None
         self.pending_frame = -1
         self.confidence = 0.0
+        self.current_interpolation_streak = 0
         self.expired_track_resets += 1
 
     def _select_measurement(
@@ -2969,7 +3047,21 @@ class BallTrackerV2:
                 if distance > gate:
                     self.rejected_gate += 1
                     continue
-                score = 1.0 - distance / gate + float(detection.confidence or 0.0) * 0.45 + proximity_bonus
+                mahalanobis = 0.0
+                if self.predicted_covariance is not None:
+                    covariance = self.predicted_covariance[:2, :2] + np.eye(2) * 12.0
+                    residual = center - predicted
+                    mahalanobis = float(residual.T @ np.linalg.inv(covariance) @ residual)
+                    if mahalanobis > 16.0:
+                        self.mahalanobis_rejections += 1
+                        continue
+                score = (
+                    1.0
+                    - distance / gate
+                    - min(1.0, mahalanobis / 16.0) * 0.25
+                    + float(detection.confidence or 0.0) * 0.45
+                    + proximity_bonus
+                )
             plausible.append((score, detection))
         return max(plausible, key=lambda item: item[0])[1] if plausible else None
 
@@ -3048,6 +3140,10 @@ class BallTrackerV2:
         return ((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2)
 
 
+# Backward-compatible import for existing integrations and saved test suites.
+BallTrackerV2 = BallTrackerV3
+
+
 class PossessionTracker:
     def __init__(self, confirmation_frames: int = 3, hold_frames: int = 8) -> None:
         self.confirmation_frames = confirmation_frames
@@ -3061,6 +3157,12 @@ class PossessionTracker:
         self.player_frames: dict[int, int] = {}
         self.transitions = 0
         self.unassigned_frames = 0
+        self.completed_passes = 0
+        self.turnovers = 0
+        self.events: list[dict[str, Any]] = []
+        self.release_frame: int | None = None
+        self.release_pitch: tuple[float, float] | None = None
+        self.last_control_pitch: tuple[float, float] | None = None
 
     def update(
         self,
@@ -3070,16 +3172,29 @@ class PossessionTracker:
         team_by_track: dict[int, int],
         pitch_transform: Any,
     ) -> tuple[int | None, int | None]:
-        observed_balls = [ball for ball in balls if not ball.is_predicted]
-        if not observed_balls:
+        if not balls:
             if self.current_team is not None and frame_index - self.last_observed_frame <= self.hold_frames:
                 self._count_current()
                 return self.current_player, self.current_team
             self.unassigned_frames += 1
             return None, None
-        ball = observed_balls[0]
+        ball = balls[0]
+        ball_center = (
+            (ball.bbox[0] + ball.bbox[2]) / 2,
+            (ball.bbox[1] + ball.bbox[3]) / 2,
+        )
+        ball_pitch = pitch_transform(ball_center)
+        if ball.is_predicted:
+            if self.current_team is not None and frame_index - self.last_observed_frame <= self.hold_frames:
+                self._count_current()
+                return self.current_player, self.current_team
+            self.unassigned_frames += 1
+            return None, None
         nearest = self._nearest_player(ball, players, pitch_transform)
         if nearest is None or nearest[0] > 240.0:
+            if self.current_player is not None and self.release_frame is None:
+                self.release_frame = frame_index
+                self.release_pitch = ball_pitch or self.last_control_pitch
             self.unassigned_frames += 1
             return self.current_player, self.current_team
         player = nearest[1]
@@ -3091,8 +3206,17 @@ class PossessionTracker:
         if self.candidate_hits >= self.confirmation_frames:
             if self.current_player is not None and self.current_player != player.track_id:
                 self.transitions += 1
+                self._record_transition(
+                    frame_index=frame_index,
+                    next_player=player.track_id,
+                    next_team=team_by_track.get(player.track_id),
+                    ball_pitch=ball_pitch,
+                )
             self.current_player = player.track_id
             self.current_team = team_by_track.get(player.track_id)
+            self.last_control_pitch = ball_pitch
+            self.release_frame = None
+            self.release_pitch = None
         self.last_observed_frame = frame_index
         self._count_current()
         return self.current_player, self.current_team
@@ -3100,14 +3224,73 @@ class PossessionTracker:
     def summary(self) -> dict[str, Any]:
         total = max(1, sum(self.team_frames.values()))
         return {
-            "engine": "nearest_player_possession_hysteresis_v1",
+            "engine": "metric_ball_possession_and_pass_detection_v2",
             "team_1_percent": round(self.team_frames[1] * 100 / total, 2),
             "team_2_percent": round(self.team_frames[2] * 100 / total, 2),
             "player_frames": {str(key): value for key, value in sorted(self.player_frames.items())},
             "transitions": self.transitions,
+            "completed_passes": self.completed_passes,
+            "turnovers": self.turnovers,
+            "events": self.events,
             "unassigned_frames": self.unassigned_frames,
             "confirmation_frames": self.confirmation_frames,
+            "pass_detection": {
+                "minimum_travel_m": 1.2,
+                "same_team_required": True,
+                "uses_canonical_track_ids": True,
+                "predicted_ball_frames_can_hold_but_not_change_possession": True,
+            },
         }
+
+    def _record_transition(
+        self,
+        frame_index: int,
+        next_player: int,
+        next_team: int | None,
+        ball_pitch: tuple[float, float] | None,
+    ) -> None:
+        previous_player = self.current_player
+        previous_team = self.current_team
+        start_frame = self.release_frame if self.release_frame is not None else self.last_observed_frame
+        start_pitch = self.release_pitch or self.last_control_pitch
+        travel_m = None
+        if start_pitch is not None and ball_pitch is not None:
+            travel_m = float(np.hypot(
+                ball_pitch[0] - start_pitch[0],
+                ball_pitch[1] - start_pitch[1],
+            ) / 100.0)
+        duration_frames = max(1, frame_index - max(0, start_frame))
+        same_team = previous_team is not None and previous_team == next_team
+        event_type = "possession_change"
+        confidence = 0.68
+        if (
+            same_team
+            and previous_player is not None
+            and previous_player != next_player
+            and travel_m is not None
+            and travel_m >= 1.2
+        ):
+            event_type = "completed_pass"
+            self.completed_passes += 1
+            confidence = min(0.98, 0.72 + min(0.20, travel_m / 50.0))
+        elif previous_team is not None and next_team is not None and previous_team != next_team:
+            event_type = "turnover"
+            self.turnovers += 1
+            confidence = 0.86
+        self.events.append(
+            {
+                "type": event_type,
+                "frame": frame_index,
+                "start_frame": start_frame,
+                "duration_frames": duration_frames,
+                "from_track_id": previous_player,
+                "to_track_id": next_player,
+                "from_team": previous_team,
+                "to_team": next_team,
+                "travel_m": round(travel_m, 3) if travel_m is not None else None,
+                "confidence": round(confidence, 4),
+            }
+        )
 
     def _count_current(self) -> None:
         if self.current_team in self.team_frames:
@@ -5552,7 +5735,7 @@ class MatchAnalysisPlusRunner:
         )
         participant_role_classifier = ParticipantRoleClassifierV2()
         ball_filter = BallStaticFilter()
-        ball_tracker = BallTrackerV2()
+        ball_tracker = BallTrackerV3()
         possession_tracker = PossessionTracker()
         radar = PitchRadar(
             pitch_model,
@@ -5871,6 +6054,14 @@ class MatchAnalysisPlusRunner:
         )
         radar_summary = radar.summary()
         pitch_quality_gate = radar_summary["quality_gate"]
+        ball_tracker_summary = ball_tracker.summary()
+        ball_filter_summary = ball_filter.summary()
+        ball_quality_gate = self._ball_quality_gate(
+            frames_processed=frames_processed,
+            tracker_summary=ball_tracker_summary,
+            filter_summary=ball_filter_summary,
+            dedicated_model_active=dedicated_ball_model is not None,
+        )
 
         return {
             "status": "ok",
@@ -5913,8 +6104,9 @@ class MatchAnalysisPlusRunner:
             "id_stabilizer": track_stabilizer.summary(),
             "tracking_quality": tracking_quality,
             "ball_filter": {
-                **ball_filter.summary(),
-                "tracker": ball_tracker.summary(),
+                **ball_filter_summary,
+                "tracker": ball_tracker_summary,
+                "quality_gate": ball_quality_gate,
             },
             "radar": radar_summary,
             "metric_tracking": {
@@ -6350,6 +6542,69 @@ class MatchAnalysisPlusRunner:
         if nearest is None or nearest[0] > 250.0:
             return ball_control[-1] if ball_control else None
         return team_by_track.get(nearest[1].track_id, 1)
+
+    def _ball_quality_gate(
+        self,
+        frames_processed: int,
+        tracker_summary: dict[str, Any],
+        filter_summary: dict[str, Any],
+        dedicated_model_active: bool,
+    ) -> dict[str, Any]:
+        minimum_observed_frames = max(2, min(20, frames_processed // 50))
+        observed_frames = int(tracker_summary.get("observed_frames", 0))
+        pitch_samples = int(tracker_summary.get("pitch_samples", 0))
+        maximum_interpolation = int(
+            tracker_summary.get("maximum_interpolation_streak", 0)
+        )
+        conditions = [
+            {
+                "code": "specialized_ball_model",
+                "passed": dedicated_model_active,
+                "value": dedicated_model_active,
+                "required": True,
+            },
+            {
+                "code": "observed_ball_coverage",
+                "passed": observed_frames >= minimum_observed_frames,
+                "value": observed_frames,
+                "required": minimum_observed_frames,
+            },
+            {
+                "code": "bounded_interpolation",
+                "passed": maximum_interpolation <= int(
+                    tracker_summary.get("max_interpolation_frames", 10)
+                ),
+                "value": maximum_interpolation,
+                "required": tracker_summary.get("max_interpolation_frames", 10),
+            },
+            {
+                "code": "metric_ball_path",
+                "passed": pitch_samples > 0,
+                "value": pitch_samples,
+                "required": "> 0",
+            },
+            {
+                "code": "static_false_positive_filter",
+                "passed": "penalty_spot_rejections" in filter_summary,
+                "value": {
+                    "penalty_spot_rejections": filter_summary.get(
+                        "penalty_spot_rejections", 0
+                    ),
+                    "static_candidates": filter_summary.get(
+                        "filtered_static_candidates", 0
+                    ),
+                },
+                "required": "active",
+            },
+        ]
+        failed = [condition["code"] for condition in conditions if not condition["passed"]]
+        return {
+            "status": "passed" if not failed else "needs_review",
+            "conditions": conditions,
+            "failed_conditions": failed,
+            "possession_ready": not failed,
+            "pass_detection_ready": not failed,
+        }
 
     def _draw_overlay(
         self,

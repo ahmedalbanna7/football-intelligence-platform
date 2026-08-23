@@ -299,6 +299,14 @@ export type MatchAnalysisPlusSummary = {
       interpolated_frames: number;
       rejected_motion_gate: number;
       current_confidence: number;
+      maximum_interpolation_streak?: number;
+      mahalanobis_rejections?: number;
+    };
+    quality_gate?: {
+      status: "passed" | "needs_review";
+      failed_conditions: string[];
+      possession_ready: boolean;
+      pass_detection_ready: boolean;
     };
   };
   team_classifier?: {
@@ -454,6 +462,20 @@ export type MatchAnalysisPlusSummary = {
     team_2_percent: number;
     player_frames: Record<string, number>;
     transitions: number;
+    completed_passes?: number;
+    turnovers?: number;
+    events?: Array<{
+      type: "completed_pass" | "turnover" | "possession_change";
+      frame: number;
+      start_frame: number;
+      duration_frames: number;
+      from_track_id?: number | null;
+      to_track_id: number;
+      from_team?: number | null;
+      to_team?: number | null;
+      travel_m?: number | null;
+      confidence: number;
+    }>;
     unassigned_frames: number;
   };
   elapsed_ms: number;

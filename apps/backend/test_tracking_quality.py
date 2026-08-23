@@ -423,6 +423,42 @@ class TrackingQualityMetricTests(unittest.TestCase):
         self.assertEqual("goalkeeper", corrected["observations"][0]["role_name"])
         self.assertEqual("player", corrected["observations"][1]["role_name"])
 
+    def test_possession_events_follow_canonical_merge_ids(self) -> None:
+        service = TrackingQualityService()
+        merge = SimpleNamespace(
+            action="merge",
+            source_track_id=5,
+            target_track_id=2,
+            split_frame=None,
+        )
+        possession = {
+            "player_frames": {"5": 20, "7": 15},
+            "events": [
+                {
+                    "type": "completed_pass",
+                    "frame": 30,
+                    "start_frame": 25,
+                    "from_track_id": 5,
+                    "to_track_id": 7,
+                    "from_team": 1,
+                    "to_team": 1,
+                    "travel_m": 8.0,
+                }
+            ],
+        }
+        layers = {
+            "tracks": [
+                {"track_id": 2, "canonical_track_id": 2, "team": 1},
+                {"track_id": 7, "canonical_track_id": 7, "team": 1},
+            ]
+        }
+
+        canonical = service._canonicalize_possession(possession, [merge], layers)
+
+        self.assertEqual(2, canonical["events"][0]["from_track_id"])
+        self.assertEqual(1, canonical["completed_passes"])
+        self.assertTrue(canonical["canonical_track_ids"])
+
 
 if __name__ == "__main__":
     unittest.main()
