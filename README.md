@@ -266,6 +266,7 @@ YOLO_MODEL_PATH=yolo11n.pt
 YOLO_CONFIDENCE=0.25
 YOLO_IMAGE_SIZE=640
 YOLO_DEVICE=cpu
+YOLO_BATCH_SIZE=8
 
 MATCH_ANALYSIS_AUTO_QUEUE_ON_UPLOAD=true
 MATCH_ANALYSIS_DEFAULT_MODE=FULL_ANALYSIS
@@ -277,6 +278,15 @@ MATCH_ANALYSIS_DEFAULT_MAX_FRAMES=450
 ```bash
 docker compose up -d --build
 ```
+
+For an NVIDIA CUDA worker, use the versioned GPU override:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build match-analysis-worker
+```
+
+See [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) for driver requirements,
+runtime verification, detection-cache behavior, and performance diagnostics.
 
 The first startup downloads the versioned `production-v2-hybrid` model bundle
 from the project's GitHub Release. Every weight is checked against its expected
@@ -329,21 +339,29 @@ mindmap
       My team profile
       Opponent profiles
       Kit image references
-      Jersey color classifier
+      Goalkeeper kit references
+      Shadow robust team identity
+      Team identity quality gate
     Tactical Identity
       Roster links
       Shirt number metadata
       Zone model
       Confidence reasons
     Analytics
-      Distance
-      Speed
-      Movement summaries
-      Ball control foundation
+      Metric distance and speed
+      Player heatmaps
+      Possession and passing candidates
+      Pressure and formations
+      Space control
     Reports
-      JSON summaries
-      PDF endpoint foundation
-      Future charts and heatmaps
+      Team and player JSON
+      PDF reports
+      Team charts and heatmaps
+      Run comparison
+    Performance
+      CPU and CUDA profiles
+      Reusable detection cache
+      Progress FPS and ETA
 ```
 
 ## Roadmap
@@ -361,8 +379,8 @@ gantt
     Jersey OCR                       :v2, after v1, 21d
     TeamClassifier validation        :v3, after v1, 14d
     section Intelligence
-    Real analytics v1                :i1, after v2, 21d
-    Reports v2 charts and heatmaps   :i2, after i1, 21d
+    Real analytics v1                :done, i1, 2026-08-10, 10d
+    Reports v2 charts and heatmaps   :done, i2, 2026-08-20, 5d
     LLM coach recommendations        :i3, after i1, 21d
     section Live
     RTSP/live processing             :l1, after i2, 30d
@@ -383,7 +401,7 @@ This project is intentionally modular:
 - Default YOLO models are general-purpose and may confuse field markers, logos, or white spots with a ball.
 - Stable track IDs are improved by a custom stabilization layer, but long occlusions still require stronger player re-identification.
 - Jersey number OCR is foundational and needs more validation on real kit crops.
-- Some analytics and reports are still early-stage and will become more accurate as tracking improves.
+- Metric analytics are released only when the tracking, pitch, team, and ball quality gates allow them; blocked values remain explicit rather than guessed.
 - CPU inference is supported, but GPU inference is recommended for long videos and production workloads.
 
 ## Contributing

@@ -35,7 +35,7 @@ import type {
   Player,
   PrimaryTeamProfile,
   MatchAnalysisPlusRun,
-  ReportResponse,
+  MatchAnalysisReportV2,
   RouteKey,
   RosterPlayer,
   Team
@@ -427,6 +427,10 @@ function MyTeamPage() {
               <span className="label">Alternate kit image</span>
               <input className="input" name="alternate_kit_image" type="file" accept="image/*" />
             </label>
+            <label className="field">
+              <span className="label">Goalkeeper kit image</span>
+              <input className="input" name="goalkeeper_kit_image" type="file" accept="image/*" />
+            </label>
             <div className="field full">
               <button className="button primary" type="submit">
                 <Shield size={16} /> Save profile
@@ -445,6 +449,10 @@ function MyTeamPage() {
             <div>
               <div className="label">Alternate</div>
               <p className="muted">{profile.data?.alternate_kit_image_object_name || "Not uploaded"}</p>
+            </div>
+            <div>
+              <div className="label">Goalkeeper</div>
+              <p className="muted">{profile.data?.goalkeeper_kit_image_object_name || "Not uploaded"}</p>
             </div>
           </div>
         </div>
@@ -665,6 +673,10 @@ function TeamsPage() {
                   <span className="label">Alternate kit</span>
                   <input className="input" name="alternate_kit_image" type="file" accept="image/*" />
                 </label>
+                <label className="field">
+                  <span className="label">Goalkeeper kit</span>
+                  <input className="input" name="goalkeeper_kit_image" type="file" accept="image/*" />
+                </label>
                 <label className="field full">
                   <span className="label">Notes</span>
                   <textarea className="textarea" name="notes" defaultValue={selectedTeam?.notes || ""} />
@@ -674,6 +686,7 @@ function TeamsPage() {
               <div className="grid" style={{ marginTop: 14 }}>
                 <p className="muted small">Primary kit: {selectedTeam?.primary_kit_image_object_name || "Not uploaded"}</p>
                 <p className="muted small">Alternate kit: {selectedTeam?.alternate_kit_image_object_name || "Not uploaded"}</p>
+                <p className="muted small">Goalkeeper kit: {selectedTeam?.goalkeeper_kit_image_object_name || "Not uploaded"}</p>
               </div>
               {message ? <p className="badge">{message}</p> : null}
             </div>
@@ -2418,6 +2431,7 @@ function MatchAnalysisPlusPage() {
   const [matchId, setMatchId] = useState<number | null>(null);
   const [maxFrames, setMaxFrames] = useState(450);
   const [startFrame, setStartFrame] = useState(0);
+  const [reuseRunId, setReuseRunId] = useState<number | null>(null);
   const [manualCalibration, setManualCalibration] = useState(false);
   const [calibrationPoints, setCalibrationPoints] = useState<ManualCalibrationPoint[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
@@ -2441,6 +2455,13 @@ function MatchAnalysisPlusPage() {
       : Promise.resolve(null),
     [visualLayersObject]
   );
+  const runtimeProgress = selectedRun?.analysis_config?.runtime_progress;
+
+  useEffect(() => {
+    if (!selectedRun || !["queued", "processing"].includes(selectedRun.status)) return;
+    const timer = window.setInterval(() => runs.refresh(), 3000);
+    return () => window.clearInterval(timer);
+  }, [selectedRun?.id, selectedRun?.status, activeId]);
 
   async function runAnalysis() {
     if (!activeId) return;
@@ -2457,7 +2478,8 @@ function MatchAnalysisPlusPage() {
         start_frame: Math.max(0, startFrame),
         calibration_points: manualCalibration
           ? calibrationPoints.map(({ image_x, image_y, pitch_x, pitch_y }) => ({ image_x, image_y, pitch_x, pitch_y }))
-          : []
+          : [],
+        reuse_run_id: reuseRunId
       });
       setSelectedRunId(response.id);
       setVideoError(null);
@@ -2488,6 +2510,15 @@ function MatchAnalysisPlusPage() {
               type="number"
               value={startFrame}
             />
+          </label>
+          <label className="toolbar">
+            <span className="label">Detection source</span>
+            <select className="select" onChange={(event) => setReuseRunId(event.target.value ? Number(event.target.value) : null)} style={{ maxWidth: 230 }} value={reuseRunId || ""}>
+              <option value="">Fresh YOLO inference</option>
+              {(runs.data?.runs || [])
+                .filter((run) => run.status === "processed" && run.summary?.performance?.detection_cache?.object_name)
+                .map((run) => <option key={run.id} value={run.id}>Reuse detections from run #{run.id}</option>)}
+            </select>
           </label>
           <label className="toolbar">
             <span className="label">Max frames</span>
@@ -2589,6 +2620,17 @@ function MatchAnalysisPlusPage() {
                 <tbody>
                   <tr><th>Run</th><td>#{selectedRun.id}</td></tr>
                   <tr><th>Status</th><td>{selectedRun.status}</td></tr>
+                  <tr>
+                    <th>Progress</th>
+                    <td>
+                      {runtimeProgress?.percent != null ? (
+                        <div className="run-progress">
+                          <progress max={100} value={runtimeProgress.percent} />
+                          <span>{runtimeProgress.percent}% · {runtimeProgress.processed_frames}/{runtimeProgress.total_frames || "?"} · ETA {runtimeProgress.eta_seconds ?? "-"}s</span>
+                        </div>
+                      ) : runtimeProgress?.stage || "-"}
+                    </td>
+                  </tr>
                   <tr><th>Quality gate</th><td>{selectedRun.quality?.status?.replaceAll("_", " ") || "Not evaluated"}</td></tr>
                   <tr><th>Profile</th><td>{selectedRun.mode === "FULL_ANALYSIS" ? "Full analysis" : "Legacy run"}</td></tr>
                   <tr><th>Source frames</th><td>{selectedRun.analysis_config?.start_frame ?? summary?.source_start_frame ?? 0} to {summary?.source_end_frame ?? "-"}</td></tr>
@@ -2623,6 +2665,7 @@ function MatchAnalysisPlusPage() {
               label={`${summary.ball_filter?.tracker?.interpolated_frames ?? 0} interpolated frames`}
             />
             <StatCard title="Elapsed" value={`${summary.elapsed_ms} ms`} label={summary.output_codec || "codec"} />
+            <StatCard title="Performance" value={`${summary.performance?.processing_fps ?? summary.processing_fps ?? 0} FPS`} label={`${summary.performance?.gpu_active ? "GPU" : "CPU"} · ${summary.performance?.yolo_skipped_frames ?? 0} cached`} />
           </section>
 
           <InteractiveAnalysisViewer
@@ -2711,6 +2754,9 @@ function MatchAnalysisPlusPage() {
                       <th>Team appearance engine</th>
                       <td>{summary.team_classifier?.engine || "-"}</td>
                     </tr>
+                    <tr><th>Team identity gate</th><td>{summary.team_classifier?.quality_gate?.status ?? "-"}</td></tr>
+                    <tr><th>Similar kits</th><td>{summary.team_classifier?.quality_gate?.similar_kits_detected ? "Manual review recommended" : "Separated"}</td></tr>
+                    <tr><th>Goalkeeper kit matches</th><td>{summary.team_classifier?.goalkeeper_reference_matches ?? 0}</td></tr>
                     <tr>
                       <th>Classified / ambiguous kit observations</th>
                       <td>
@@ -2840,89 +2886,110 @@ function ReportsPage() {
   const matches = useAsyncData(() => api.listMatches(20), []);
   const [matchId, setMatchId] = useState<number | null>(null);
   const activeId = matchId || matches.data?.items?.[0]?.id || null;
-  const report = useAsyncData<ReportResponse | null>(() => (activeId ? api.getReport(activeId) : Promise.resolve(null)), [activeId]);
-  const reportData = report.data?.report?.data;
-  const counts = reportData?.counts;
-  const summary = reportData?.summary as Record<string, unknown> | undefined;
-  const charts = reportData?.charts as
-    | {
-        team_distance?: Array<Record<string, unknown>>;
-        player_speed?: Array<Record<string, unknown>>;
-      }
-    | undefined;
-  const teams = reportData?.teams as
-    | {
-        primary_team?: Array<Record<string, unknown>>;
-        opponent_team?: Array<Record<string, unknown>>;
-      }
-    | undefined;
-  const manualAssignments = reportData?.identity?.manual_assignments || [];
+  const [runId, setRunId] = useState<number | null>(null);
+  const [playerTrackId, setPlayerTrackId] = useState<number | null>(null);
+  const [comparisonRunId, setComparisonRunId] = useState<number | null>(null);
+  const [comparison, setComparison] = useState<Record<string, unknown> | null>(null);
+  const runs = useAsyncData(
+    () => activeId ? api.getMatchAnalysisPlus(activeId) : Promise.resolve({ match_id: 0, match_title: "", runs: [], latest: null }),
+    [activeId]
+  );
+  const reportRuns = (runs.data?.runs || []).filter((run) => run.status === "processed" && run.summary?.reports_v2?.status === "ready");
+  const activeRun = reportRuns.find((run) => run.id === runId) || reportRuns[0] || null;
+  const report = useAsyncData<MatchAnalysisReportV2 | null>(
+    () => activeId && activeRun ? api.getMatchAnalysisReport(activeId, activeRun.id) : Promise.resolve(null),
+    [activeId, activeRun?.id]
+  );
+  const selectedPlayer = report.data?.players.find((player) => Number(player.track_id) === playerTrackId) || report.data?.players[0];
+  const passing = report.data?.events?.passing_candidates as Record<string, unknown> | undefined;
+
+  async function compareRuns() {
+    if (!activeId || !activeRun || !comparisonRunId || comparisonRunId === activeRun.id) return;
+    setComparison(await api.compareMatchAnalysisReports([
+      { match_id: activeId, run_id: comparisonRunId },
+      { match_id: activeId, run_id: activeRun.id }
+    ]));
+  }
 
   return (
     <section className="grid">
       <div className="card">
         <div className="toolbar">
-          <select className="select" value={activeId || ""} onChange={(event) => setMatchId(Number(event.target.value))} style={{ maxWidth: 420 }}>
+          <select className="select" value={activeId || ""} onChange={(event) => { setMatchId(Number(event.target.value)); setRunId(null); setComparison(null); }} style={{ maxWidth: 420 }}>
             {(matches.data?.items || []).map((match) => <option key={match.id} value={match.id}>#{match.id} {match.title}</option>)}
           </select>
-          <button className="button" onClick={report.refresh} type="button">
+          <select className="select" onChange={(event) => { setRunId(Number(event.target.value)); setComparison(null); }} style={{ maxWidth: 240 }} value={activeRun?.id || ""}>
+            {reportRuns.map((run) => <option key={run.id} value={run.id}>Run #{run.id} · {run.summary?.frames_processed} frames</option>)}
+          </select>
+          <button className="button" onClick={() => { runs.refresh(); report.refresh(); }} type="button">
             <RefreshCw size={16} /> Refresh
           </button>
-          {activeId ? (
-            <a className="button" href={api.reportPdfUrl(activeId)}>
+          {activeId && activeRun ? (
+            <a className="button primary" href={api.matchAnalysisReportPdfUrl(activeId, activeRun.id)} target="_blank" rel="noreferrer">
               <FileText size={16} /> PDF
             </a>
           ) : null}
         </div>
       </div>
-      <div className="grid four">
-        <StatCard title="Detections" value={counts?.detections ?? "-"} />
-        <StatCard title="Tracks" value={counts?.tracks ?? "-"} />
-        <StatCard title="Events" value={counts?.events ?? "-"} />
-        <StatCard title="Identity" value={manualAssignments.length || counts?.identity_resolved || counts?.identity_assignments || "-"} />
-      </div>
-      <section className="grid two">
-        <div className="card">
-          <h2 className="section-title">Match Summary</h2>
-          <div className="table-wrap" style={{ marginTop: 14 }}>
-            <table className="table">
-              <tbody>
-                <tr><th>Primary team</th><td>{String(summary?.primary_team_name || "-")}</td></tr>
-                <tr><th>Opponent</th><td>{String(summary?.opponent_team_name || "-")}</td></tr>
-                <tr><th>Type</th><td>{String(summary?.match_type || "-")}</td></tr>
-                <tr><th>Scope</th><td>{String(summary?.analysis_scope || "-")}</td></tr>
-              </tbody>
-            </table>
+      {!activeRun ? <Empty>Run Match Analysis + to generate Reports v2.</Empty> : null}
+      {report.data ? (
+        <>
+          <div className="grid four">
+            <StatCard title="Teams" value={report.data.teams.length} label={report.data.analysis_scope} />
+            <StatCard title="Players" value={report.data.players.length} label="scope-filtered" />
+            <StatCard title="Passes" value={Number(passing?.completed_passes || 0)} label={`${Number(passing?.turnovers || 0)} turnovers`} />
+            <StatCard title="Analytics gate" value={report.data.quality.analytics?.status || "-"} label="metric release" />
           </div>
-        </div>
-        <div className="card">
-          <h2 className="section-title">Team Distance</h2>
-          <MiniDataTable rows={charts?.team_distance || []} columns={["team_context", "players_count", "total_distance"]} />
-        </div>
-      </section>
-      <section className="grid two">
-        <div className="card">
-          <h2 className="section-title">My Team Players</h2>
-          <MiniDataTable rows={teams?.primary_team || []} columns={["track_id", "recognized_shirt_number", "distance", "average_speed", "max_speed"]} />
-        </div>
-        <div className="card">
-          <h2 className="section-title">Opponent Players</h2>
-          <MiniDataTable rows={teams?.opponent_team || []} columns={["track_id", "recognized_shirt_number", "distance", "average_speed", "max_speed"]} />
-        </div>
-      </section>
-      <div className="card">
-        <h2 className="section-title">Manual Identities</h2>
-        <MiniDataTable
-          rows={manualAssignments.map((item) => ({
-            track_id: item.track_id,
-            player: item.resolved_player?.name,
-            number: item.resolved_player?.jersey_number,
-            team_context: item.team_context,
-            confidence: item.confidence
-          }))}
-          columns={["track_id", "player", "number", "team_context", "confidence"]}
-        />
-      </div>
+
+          <section className="grid two">
+            <div className="card">
+              <h2 className="section-title">Team Reports</h2>
+              <MiniDataTable rows={report.data.teams} columns={["name", "players_count", "total_distance_m", "average_speed_kmh", "possession_percent", "space_control_percent"]} />
+            </div>
+            <div className="card">
+              <h2 className="section-title">Quality Gates</h2>
+              <MiniDataTable
+                rows={Object.entries(report.data.quality).map(([gate, value]) => ({ gate, status: value?.status || "-", failed: value?.failed_conditions?.join(", ") || "-" }))}
+                columns={["gate", "status", "failed"]}
+              />
+            </div>
+          </section>
+
+          <section className="grid two">
+            <div className="card">
+              <h2 className="section-title">Team Charts</h2>
+              <img alt="Team comparison chart" className="report-artifact-image" src={api.objectUrl(report.data.artifacts.team_chart)} />
+            </div>
+            <div className="card">
+              <h2 className="section-title">Player Heatmaps</h2>
+              <img alt="Player heatmap atlas" className="report-artifact-image" src={api.objectUrl(report.data.artifacts.player_heatmaps)} />
+            </div>
+          </section>
+
+          <section className="grid two">
+            <div className="card">
+              <div className="section-header">
+                <h2 className="section-title">Player Report</h2>
+                <select className="select" onChange={(event) => setPlayerTrackId(Number(event.target.value))} style={{ maxWidth: 240 }} value={Number(selectedPlayer?.track_id || "")}>
+                  {report.data.players.map((player) => <option key={String(player.track_id)} value={Number(player.track_id)}>Track {String(player.track_id)} · Team {String(player.team)}</option>)}
+                </select>
+              </div>
+              {selectedPlayer ? <MiniDataTable rows={[selectedPlayer]} columns={["track_id", "team", "role_name", "player_name", "distance_m", "average_speed_kmh", "max_speed_kmh", "heatmap_samples"]} /> : <Empty>No players in this analysis scope.</Empty>}
+            </div>
+            <div className="card">
+              <h2 className="section-title">Compare Runs</h2>
+              <div className="toolbar" style={{ marginTop: 14 }}>
+                <select className="select" onChange={(event) => setComparisonRunId(Number(event.target.value))} value={comparisonRunId || ""}>
+                  <option value="">Baseline run</option>
+                  {reportRuns.filter((run) => run.id !== activeRun.id).map((run) => <option key={run.id} value={run.id}>Run #{run.id}</option>)}
+                </select>
+                <button className="button" disabled={!comparisonRunId} onClick={compareRuns} type="button"><BarChart3 size={16} /> Compare</button>
+              </div>
+              {comparison ? <MiniDataTable rows={(comparison.runs as Array<Record<string, unknown>>) || []} columns={["match_id", "run_id", "analysis_scope"]} /> : <p className="muted small">Select a previous quality-gated run for interval or match comparison.</p>}
+            </div>
+          </section>
+        </>
+      ) : null}
     </section>
   );
 }

@@ -50,6 +50,7 @@ def serialize_team(team: Team) -> dict:
         "team_type": team.team_type,
         "primary_kit_image_object_name": team.primary_kit_image_object_name,
         "alternate_kit_image_object_name": team.alternate_kit_image_object_name,
+        "goalkeeper_kit_image_object_name": team.goalkeeper_kit_image_object_name,
         "notes": team.notes,
     }
 
@@ -183,6 +184,7 @@ async def update_team_profile(
     notes: str | None = Form(None),
     primary_kit_image: UploadFile | None = File(None),
     alternate_kit_image: UploadFile | None = File(None),
+    goalkeeper_kit_image: UploadFile | None = File(None),
     db: Session = Depends(get_db),
 ):
     team = db.get(Team, team_id)
@@ -214,10 +216,16 @@ async def update_team_profile(
         alternate_kit_image,
         object_prefix,
     )
+    goalkeeper_kit_object_name = await upload_optional_asset(
+        goalkeeper_kit_image,
+        object_prefix,
+    )
     if primary_kit_object_name is not None:
         team.primary_kit_image_object_name = primary_kit_object_name
     if alternate_kit_object_name is not None:
         team.alternate_kit_image_object_name = alternate_kit_object_name
+    if goalkeeper_kit_object_name is not None:
+        team.goalkeeper_kit_image_object_name = goalkeeper_kit_object_name
 
     db.commit()
     db.refresh(team)

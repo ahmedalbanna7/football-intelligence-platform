@@ -45,6 +45,7 @@ export type Team = {
   team_type?: string;
   primary_kit_image_object_name?: string | null;
   alternate_kit_image_object_name?: string | null;
+  goalkeeper_kit_image_object_name?: string | null;
   notes?: string | null;
 };
 
@@ -67,6 +68,7 @@ export type PrimaryTeamProfile = {
   team_name?: string;
   primary_kit_image_object_name?: string | null;
   alternate_kit_image_object_name?: string | null;
+  goalkeeper_kit_image_object_name?: string | null;
 };
 
 export type RosterPlayer = {
@@ -319,6 +321,16 @@ export type MatchAnalysisPlusSummary = {
     official_tracks?: number[];
     goalkeeper_tracks?: number[];
     anchor_initializations: number;
+    assignment_sources?: Record<string, string>;
+    goalkeeper_reference_matches?: number;
+    quality_gate?: {
+      status: "passed" | "needs_review";
+      failed_conditions: string[];
+      average_track_confidence: number;
+      ambiguous_observation_ratio: number;
+      similar_kits_detected: boolean;
+      shadow_invariant_color_distance: boolean;
+    };
   };
   kit_references?: {
     source: string;
@@ -438,6 +450,53 @@ export type MatchAnalysisPlusSummary = {
     base_object_name?: string | null;
     overlay_object_name: string;
   };
+  analytics_real_v1?: {
+    object_name?: string;
+    status: string;
+    analysis_scope: string;
+    selected_teams: number[];
+    quality_gate: {
+      status: string;
+      failed_conditions: string[];
+      metric_outputs_released: boolean;
+      ball_outputs_released: boolean;
+    };
+    players: Array<Record<string, unknown>>;
+    teams: Record<string, Record<string, unknown>>;
+    passing_candidates: Record<string, unknown>;
+    formations: Record<string, unknown>;
+    space_control: Record<string, unknown>;
+  };
+  reports_v2?: {
+    status: string;
+    schema_version: string;
+    teams_count: number;
+    players_count: number;
+    artifacts: {
+      json: string;
+      pdf: string;
+      team_chart: string;
+      player_heatmaps: string;
+    };
+  };
+  performance?: {
+    engine: string;
+    processing_fps: number;
+    configured_device: string;
+    cuda_available: boolean;
+    gpu_active: boolean;
+    cache_hit_frames: number;
+    yolo_inference_frames: number;
+    yolo_skipped_frames: number;
+    detection_seconds: number;
+    rendering_seconds: number;
+    detection_cache?: {
+      status: string;
+      object_name: string;
+      source: string;
+      reusable_without_yolo: boolean;
+    };
+  };
   tracks?: Array<{
     track_id: number;
     canonical_track_id?: number;
@@ -497,6 +556,16 @@ export type MatchAnalysisPlusRun = {
   max_frames: number;
   analysis_config?: {
     start_frame?: number;
+    reuse_run_id?: number | null;
+    runtime_progress?: {
+      stage: string;
+      processed_frames: number;
+      total_frames?: number | null;
+      percent?: number | null;
+      processing_fps?: number;
+      eta_seconds?: number | null;
+      cache_hit_frames?: number;
+    };
     calibration_points?: Array<{
       image_x: number;
       image_y: number;
@@ -520,6 +589,26 @@ export type MatchAnalysisPlusRun = {
     idf1?: number | null;
     hota?: number | null;
   } | null;
+};
+
+export type MatchAnalysisReportV2 = {
+  schema_version: "reports_v2";
+  engine: string;
+  generated_at: string;
+  analysis_scope: string;
+  quality: Record<string, { status?: string; failed_conditions?: string[] }>;
+  match: Record<string, unknown>;
+  teams: Array<Record<string, unknown>>;
+  players: Array<Record<string, unknown>>;
+  events: Record<string, unknown>;
+  charts: Record<string, unknown>;
+  heatmaps: Array<Record<string, unknown>>;
+  artifacts: {
+    json: string;
+    pdf: string;
+    team_chart: string;
+    player_heatmaps: string;
+  };
 };
 
 export type TrackingQualityAssessment = {

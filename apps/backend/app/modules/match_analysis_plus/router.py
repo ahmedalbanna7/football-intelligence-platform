@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 import json
+import io
 import subprocess
 from typing import Any
 
@@ -20,6 +21,7 @@ from app.queues.publisher import publish_match_analysis_requested
 from app.services.minio_client import BUCKET_NAME, client
 from app.tracking_quality.metrics import evaluate_release_suite
 from app.tracking_quality.service import TrackingQualityService
+from app.match_analysis_plus.reports_v2 import ReportsV2Builder
 
 router = APIRouter()
 
@@ -29,6 +31,7 @@ class MatchAnalysisRunRequest(BaseModel):
     max_frames: int = 450
     start_frame: int = Field(default=0, ge=0)
     calibration_points: list[dict[str, float]] = Field(default_factory=list)
+    reuse_run_id: int | None = Field(default=None, ge=1)
 
 
 class TrackCorrectionRequest(BaseModel):
@@ -82,7 +85,35 @@ class TrackingReleaseSuiteRequest(BaseModel):
     thresholds: dict[str, Any] = Field(default_factory=dict)
 
 
+class ReportComparisonCase(BaseModel):
+    match_id: int
+    run_id: int
+
+
+class ReportComparisonRequest(BaseModel):
+    cases: list[ReportComparisonCase] = Field(min_length=2, max_length=8)
+
+
 quality_service = TrackingQualityService()
+report_builder = ReportsV2Builder()
+
+
+def load_json_object(object_name: str) -> dict[str, Any]:
+    response = client.get_object(BUCKET_NAME, object_name)
+    try:
+        return json.loads(response.read().decode("utf-8"))
+    finally:
+        response.close()
+        response.release_conn()
+
+
+def load_binary_object(object_name: str) -> bytes:
+    response = client.get_object(BUCKET_NAME, object_name)
+    try:
+        return response.read()
+    finally:
+        response.close()
+        response.release_conn()
 
 
 def get_latest_video(db: Session, match_id: int) -> MatchVideo | None:
@@ -220,6 +251,17 @@ async def run_match_analysis_plus(
     if video is None:
         raise HTTPException(status_code=404, detail="No uploaded video found for this match")
 
+    reuse_detections_object: str | None = None
+    if payload.reuse_run_id is not None:
+        source_run = get_run_or_404(db, match_id, payload.reuse_run_id)
+        if source_run.video_id != video.id:
+            raise HTTPException(status_code=400, detail="Detection cache belongs to another video")
+        reuse_detections_object = (
+            ((source_run.summary_json or {}).get("performance") or {}).get("detection_cache") or {}
+        ).get("object_name")
+        if not reuse_detections_object:
+            raise HTTPException(status_code=400, detail="Selected run has no reusable detection cache")
+
     run = MatchAnalysisRun(
         match_id=match_id,
         video_id=video.id,
@@ -230,6 +272,14 @@ async def run_match_analysis_plus(
         analysis_config_json={
             "start_frame": max(payload.start_frame, 0),
             "calibration_points": payload.calibration_points,
+            "reuse_run_id": payload.reuse_run_id,
+            "reuse_detections_object": reuse_detections_object,
+            "runtime_progress": {
+                "stage": "queued",
+                "processed_frames": 0,
+                "percent": 0.0,
+                "eta_seconds": None,
+            },
         },
     )
     db.add(run)
@@ -250,6 +300,7 @@ async def run_match_analysis_plus(
                 max_frames=run.max_frames,
                 start_frame=max(payload.start_frame, 0),
                 calibration_points=payload.calibration_points,
+                reuse_detections_object=reuse_detections_object,
             )
         )
     except Exception as exc:
@@ -333,6 +384,57 @@ def get_match_analysis_run(
 ):
     run = get_run_or_404(db, match_id, run_id)
     return serialize_run(run)
+
+
+@router.get("/{match_id}/runs/{run_id}/report")
+def get_match_analysis_report(
+    match_id: int,
+    run_id: int,
+    db: Session = Depends(get_db),
+):
+    run = get_run_or_404(db, match_id, run_id)
+    reports = (run.summary_json or {}).get("reports_v2") or {}
+    object_name = (reports.get("artifacts") or {}).get("json")
+    if not object_name:
+        raise HTTPException(status_code=404, detail="Reports v2 is not available for this run")
+    return load_json_object(object_name)
+
+
+@router.get("/{match_id}/runs/{run_id}/report.pdf")
+def get_match_analysis_report_pdf(
+    match_id: int,
+    run_id: int,
+    db: Session = Depends(get_db),
+):
+    run = get_run_or_404(db, match_id, run_id)
+    reports = (run.summary_json or {}).get("reports_v2") or {}
+    object_name = (reports.get("artifacts") or {}).get("pdf")
+    if not object_name:
+        raise HTTPException(status_code=404, detail="Reports v2 PDF is not available for this run")
+    return Response(
+        content=load_binary_object(object_name),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="match-{match_id}-run-{run_id}.pdf"'},
+    )
+
+
+@router.post("/reports/compare")
+def compare_match_analysis_reports(
+    payload: ReportComparisonRequest,
+    db: Session = Depends(get_db),
+):
+    reports: list[tuple[int, int, dict[str, Any]]] = []
+    for case in payload.cases:
+        run = get_run_or_404(db, case.match_id, case.run_id)
+        report_summary = (run.summary_json or {}).get("reports_v2") or {}
+        object_name = (report_summary.get("artifacts") or {}).get("json")
+        if not object_name:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Reports v2 is not available for run {case.run_id}",
+            )
+        reports.append((case.match_id, case.run_id, load_json_object(object_name)))
+    return report_builder.compare(reports)
 
 
 @router.get("/{match_id}/runs/{run_id}/quality")

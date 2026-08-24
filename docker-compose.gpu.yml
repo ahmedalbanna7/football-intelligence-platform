@@ -1,0 +1,18 @@
+services:
+  match-analysis-worker:
+    image: sports-platform-match-analysis-worker-gpu
+    build:
+      context: ./apps/backend
+      args:
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cu124
+        TORCH_VERSION: 2.5.1
+        TORCHVISION_VERSION: 0.20.1
+    environment:
+      YOLO_DEVICE: "0"
+      YOLO_CONFIG_DIR: /tmp
+      PYTHONPATH: /app:/opt/sports-main
+    gpus: all
+    ipc: host
+    shm_size: 8gb
+    cpus: "4.0"
+    mem_limit: 8g

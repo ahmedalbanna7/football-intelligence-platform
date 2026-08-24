@@ -4,6 +4,7 @@ import type {
   Player,
   PrimaryTeamProfile,
   MatchAnalysisPlusRun,
+  MatchAnalysisReportV2,
   ReportResponse,
   RosterPlayer,
   Team,
@@ -67,6 +68,23 @@ export const api = {
     return `${API_BASE_URL}/matches/${matchId}/report.pdf`;
   },
 
+  getMatchAnalysisReport(matchId: number, runId: number) {
+    return request<MatchAnalysisReportV2>(
+      `/match-analysis-plus/${matchId}/runs/${runId}/report`
+    );
+  },
+
+  matchAnalysisReportPdfUrl(matchId: number, runId: number) {
+    return `${API_BASE_URL}/match-analysis-plus/${matchId}/runs/${runId}/report.pdf`;
+  },
+
+  compareMatchAnalysisReports(cases: Array<{ match_id: number; run_id: number }>) {
+    return request<Record<string, unknown>>("/match-analysis-plus/reports/compare", {
+      method: "POST",
+      json: { cases }
+    });
+  },
+
   objectUrl(objectName: string) {
     return `${API_BASE_URL}/matches/artifacts/object?object_name=${encodeURIComponent(objectName)}`;
   },
@@ -109,6 +127,7 @@ export const api = {
       pitch_x: number;
       pitch_y: number;
     }>;
+    reuse_run_id?: number | null;
   }) {
     return request<MatchAnalysisPlusRun>(`/match-analysis-plus/${matchId}/run`, {
       method: "POST",

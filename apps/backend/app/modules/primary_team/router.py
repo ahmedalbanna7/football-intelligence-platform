@@ -38,6 +38,7 @@ def serialize_profile(profile: PrimaryTeamProfile | None) -> dict | None:
         "team_name": profile.team_name,
         "primary_kit_image_object_name": profile.primary_kit_image_object_name,
         "alternate_kit_image_object_name": profile.alternate_kit_image_object_name,
+        "goalkeeper_kit_image_object_name": profile.goalkeeper_kit_image_object_name,
         "created_at": profile.created_at,
         "updated_at": profile.updated_at,
     }
@@ -130,6 +131,7 @@ async def upsert_primary_team_profile(
     team_name: str = Form(...),
     primary_kit_image: UploadFile | None = File(None),
     alternate_kit_image: UploadFile | None = File(None),
+    goalkeeper_kit_image: UploadFile | None = File(None),
     db: Session = Depends(get_db),
 ):
     profile = get_active_profile(db)
@@ -150,11 +152,17 @@ async def upsert_primary_team_profile(
         alternate_kit_image,
         object_prefix,
     )
+    goalkeeper_kit_object_name = await upload_optional_asset(
+        goalkeeper_kit_image,
+        object_prefix,
+    )
 
     if primary_kit_object_name is not None:
         profile.primary_kit_image_object_name = primary_kit_object_name
     if alternate_kit_object_name is not None:
         profile.alternate_kit_image_object_name = alternate_kit_object_name
+    if goalkeeper_kit_object_name is not None:
+        profile.goalkeeper_kit_image_object_name = goalkeeper_kit_object_name
 
     team = db.query(Team).filter(Team.name == team_name).first()
     if team is not None:
@@ -163,6 +171,8 @@ async def upsert_primary_team_profile(
             team.primary_kit_image_object_name = profile.primary_kit_image_object_name
         if profile.alternate_kit_image_object_name:
             team.alternate_kit_image_object_name = profile.alternate_kit_image_object_name
+        if profile.goalkeeper_kit_image_object_name:
+            team.goalkeeper_kit_image_object_name = profile.goalkeeper_kit_image_object_name
 
     db.commit()
     db.refresh(profile)

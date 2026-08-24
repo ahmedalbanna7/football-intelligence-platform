@@ -39,6 +39,11 @@ class Team(Base):
         nullable=True,
     )
 
+    goalkeeper_kit_image_object_name: Mapped[str | None] = mapped_column(
+        String(500),
+        nullable=True,
+    )
+
     notes: Mapped[str | None] = mapped_column(
         Text,
         nullable=True,

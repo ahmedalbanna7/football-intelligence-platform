@@ -19,6 +19,8 @@ from app.models.tracking_quality import (
 )
 from app.services.minio_client import BUCKET_NAME, client
 from app.tracking_quality.metrics import evaluate_tracking
+from app.match_analysis_plus.analytics_v1 import AnalyticsRealV1
+from app.match_analysis_plus.reports_v2 import ReportsV2Builder
 
 
 QUALITY_THRESHOLDS = {
@@ -53,6 +55,10 @@ class TrackingQualityService:
         "change_team",
         "change_role",
     }
+
+    def __init__(self) -> None:
+        self.analytics_engine = AnalyticsRealV1()
+        self.report_builder = ReportsV2Builder()
 
     def sync_from_summary(
         self,
@@ -404,11 +410,52 @@ class TrackingQualityService:
             corrected,
         )
         canonical_analytics["possession"] = canonical_possession
+        match = run.match
+        team_context = {
+            "analysis_scope": getattr(match, "analysis_scope", "both_teams_full"),
+            "analyze_primary_players": bool(getattr(match, "analyze_primary_players", True)),
+            "analyze_opponent_players": bool(getattr(match, "analyze_opponent_players", True)),
+            "team_labels": {
+                "1": getattr(match, "primary_team_name", None) or "Team 1",
+                "2": getattr(match, "another_team_name", None)
+                or getattr(match, "opponent_team_name", None)
+                or "Team 2",
+            },
+            "formations": {
+                "1": getattr(match, "formation", None),
+                "2": getattr(match, "another_formation", None),
+            },
+        }
+        analytics_real = self.analytics_engine.build(
+            layers=corrected,
+            possession=canonical_possession,
+            pitch_gate=((summary.get("radar") or {}).get("quality_gate") or {}),
+            ball_gate=((summary.get("ball_filter") or {}).get("quality_gate") or {}),
+            team_identity=summary.get("team_classifier") or {},
+            team_context=team_context,
+        )
         analytics_object = f"{prefix}/canonical_analytics.json"
         report_object = f"{prefix}/canonical_report.json"
         canonical_report = self._build_canonical_report(run, canonical_analytics)
         self._put_json(BUCKET_NAME, analytics_object, canonical_analytics)
         self._put_json(BUCKET_NAME, report_object, canonical_report)
+        analytics_real_object = f"{prefix}/analytics_v1.corrected.json"
+        report_v2_object = f"{prefix}/reports-v2/report.corrected.json"
+        report_v2_pdf_object = f"{prefix}/reports-v2/report.corrected.pdf"
+        team_chart_object = f"{prefix}/reports-v2/team-overview.corrected.png"
+        heatmap_atlas_object = f"{prefix}/reports-v2/player-heatmaps.corrected.png"
+        report_v2 = self.report_builder.build(analytics_real, summary, team_context)
+        report_v2["artifacts"] = {
+            "json": report_v2_object,
+            "pdf": report_v2_pdf_object,
+            "team_chart": team_chart_object,
+            "player_heatmaps": heatmap_atlas_object,
+        }
+        self._put_json(BUCKET_NAME, analytics_real_object, analytics_real)
+        self._put_bytes(BUCKET_NAME, report_v2_object, json.dumps(report_v2, ensure_ascii=False).encode("utf-8"), "application/json")
+        self._put_bytes(BUCKET_NAME, report_v2_pdf_object, self.report_builder.pdf(report_v2), "application/pdf")
+        self._put_bytes(BUCKET_NAME, team_chart_object, self.report_builder.team_chart_png(report_v2), "image/png")
+        self._put_bytes(BUCKET_NAME, heatmap_atlas_object, self.report_builder.heatmap_atlas_png(report_v2), "image/png")
 
         assessment = (
             db.query(TrackingQualityAssessment)
@@ -454,6 +501,18 @@ class TrackingQualityService:
             "schema_version": canonical_report["schema_version"],
             "teams_count": len(canonical_report["teams"]),
             "players_count": len(canonical_report["players"]),
+        }
+        summary["analytics_real_v1"] = {
+            **analytics_real,
+            "object_name": analytics_real_object,
+        }
+        summary["reports_v2"] = {
+            "status": "ready",
+            "schema_version": report_v2["schema_version"],
+            "teams_count": len(report_v2["teams"]),
+            "players_count": len(report_v2["players"]),
+            "artifacts": report_v2["artifacts"],
+            "canonical_corrections_applied": len(corrections),
         }
         summary["canonical_video"] = {
             "status": "ready",
@@ -1276,6 +1335,21 @@ class TrackingQualityService:
             io.BytesIO(data),
             length=len(data),
             content_type="application/json",
+        )
+
+    def _put_bytes(
+        self,
+        bucket: str,
+        object_name: str,
+        payload: bytes,
+        content_type: str,
+    ) -> None:
+        client.put_object(
+            bucket,
+            object_name,
+            io.BytesIO(payload),
+            length=len(payload),
+            content_type=content_type,
         )
 
     def _put_jsonl(

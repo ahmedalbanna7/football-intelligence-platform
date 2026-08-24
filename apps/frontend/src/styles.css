@@ -2259,3 +2259,29 @@ button {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
+.report-artifact-image {
+  display: block;
+  width: 100%;
+  max-height: 440px;
+  object-fit: contain;
+  border: 1px solid #d8e0e8;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.run-progress {
+  display: grid;
+  gap: 6px;
+  min-width: min(320px, 70vw);
+}
+
+.run-progress progress {
+  width: 100%;
+  height: 10px;
+  accent-color: #00866f;
+}
+
+.run-progress span {
+  color: #526171;
+  font-size: 12px;
+}

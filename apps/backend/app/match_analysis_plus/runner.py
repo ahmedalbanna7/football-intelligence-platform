@@ -5,6 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import perf_counter
 from typing import Any
+from collections.abc import Callable
 import colorsys
 import gc
 import io
@@ -16,6 +17,8 @@ import cv2
 import numpy as np
 
 from app.core.config import settings
+from app.match_analysis_plus.analytics_v1 import AnalyticsRealV1
+from app.match_analysis_plus.reports_v2 import ReportsV2Builder
 from app.services.minio_client import BUCKET_NAME, client
 
 
@@ -1910,11 +1913,12 @@ class TrackIdStabilizer:
 
 
 class TeamColorClassifier:
-    """Separate the two outfield kits without letting officials move the anchors."""
+    """Resolve stable team identity from kit references and temporal appearance."""
 
     def __init__(
         self,
         reference_palettes_bgr: dict[int, list[tuple[int, int, int]]] | None = None,
+        goalkeeper_reference_palettes_bgr: dict[int, list[tuple[int, int, int]]] | None = None,
         team_labels: dict[int, str] | None = None,
     ) -> None:
         self.reference_palettes_bgr = {
@@ -1923,6 +1927,11 @@ class TeamColorClassifier:
             if colors
         }
         self.reference_seeded_teams = set(self.reference_palettes_bgr)
+        self.goalkeeper_reference_palettes_bgr = {
+            int(team): list(colors)
+            for team, colors in (goalkeeper_reference_palettes_bgr or {}).items()
+            if colors
+        }
         self.team_labels = {
             int(team): str(label)
             for team, label in (team_labels or {}).items()
@@ -1940,6 +1949,8 @@ class TeamColorClassifier:
         self.ambiguous_observations = 0
         self.official_tracks: set[int] = set()
         self.goalkeeper_tracks: set[int] = set()
+        self.goalkeeper_reference_matches = 0
+        self.assignment_sources: dict[int, str] = {}
 
     def update(
         self,
@@ -1987,8 +1998,16 @@ class TeamColorClassifier:
 
         assignments: dict[int, int] = {}
         for track_id, (color, appearance) in samples.items():
-            team, confidence = self._nearest_team(color, appearance)
+            role_name = str(getattr(track_states.get(track_id), "role_name", "player"))
+            team, confidence, source = self._nearest_team(
+                color,
+                appearance,
+                role_name=role_name,
+            )
             assignments[track_id] = team
+            self.assignment_sources[track_id] = source
+            if source == "goalkeeper_kit_reference":
+                self.goalkeeper_reference_matches += 1
             votes = self.track_votes.setdefault(track_id, {1: 0.0, 2: 0.0})
             votes[1] *= 0.90
             votes[2] *= 0.90
@@ -2011,8 +2030,9 @@ class TeamColorClassifier:
             )
 
     def summary(self) -> dict[str, Any]:
+        quality_gate = self.quality_gate()
         return {
-            "engine": "stable_kit_appearance_classifier_v3",
+            "engine": "team_identity_v3_shadow_robust",
             "kit_anchors_bgr": {
                 str(team): list(color)
                 for team, color in sorted(self.anchors.items())
@@ -2022,6 +2042,10 @@ class TeamColorClassifier:
                 for team, colors in sorted(self.reference_palettes_bgr.items())
             },
             "reference_seeded_teams": sorted(self.reference_seeded_teams),
+            "goalkeeper_reference_palettes_bgr": {
+                str(team): [list(color) for color in colors]
+                for team, colors in sorted(self.goalkeeper_reference_palettes_bgr.items())
+            },
             "reference_source": (
                 "stored_kit_images"
                 if self.reference_seeded_teams
@@ -2040,11 +2064,67 @@ class TeamColorClassifier:
                 str(track_id): confidence
                 for track_id, confidence in sorted(self.track_confidence.items())
             },
+            "assignment_sources": {
+                str(track_id): source
+                for track_id, source in sorted(self.assignment_sources.items())
+            },
             "color_observations": self.observations,
             "ambiguous_observations": self.ambiguous_observations,
             "official_tracks": sorted(self.official_tracks),
             "goalkeeper_tracks": sorted(self.goalkeeper_tracks),
+            "goalkeeper_reference_matches": self.goalkeeper_reference_matches,
             "anchor_initializations": self.anchor_initializations,
+            "quality_gate": quality_gate,
+            "manual_correction_available": True,
+            "roster_linkage": "prepared_for_manual_assignment_or_jersey_ocr",
+        }
+
+    def quality_gate(self) -> dict[str, Any]:
+        confidences = [
+            value
+            for track_id, value in self.track_confidence.items()
+            if track_id not in self.official_tracks
+        ]
+        average_confidence = float(np.mean(confidences)) if confidences else 0.0
+        ambiguous_ratio = self.ambiguous_observations / max(self.observations, 1)
+        anchor_separation = None
+        if 1 in self.anchors and 2 in self.anchors:
+            anchor_separation = self._color_distance(self.anchors[1], self.anchors[2])
+        conditions = [
+            {
+                "code": "two_team_anchors",
+                "passed": len(self.anchors) == 2,
+                "value": len(self.anchors),
+                "required": 2,
+            },
+            {
+                "code": "average_track_confidence",
+                "passed": average_confidence >= 0.72,
+                "value": round(average_confidence, 4),
+                "required": 0.72,
+            },
+            {
+                "code": "bounded_ambiguity",
+                "passed": ambiguous_ratio <= 0.30,
+                "value": round(ambiguous_ratio, 4),
+                "required": "<= 0.30",
+            },
+            {
+                "code": "kit_separation",
+                "passed": anchor_separation is not None and anchor_separation >= 0.12,
+                "value": round(anchor_separation, 4) if anchor_separation is not None else None,
+                "required": ">= 0.12",
+            },
+        ]
+        failed = [condition["code"] for condition in conditions if not condition["passed"]]
+        return {
+            "status": "passed" if not failed else "needs_review",
+            "conditions": conditions,
+            "failed_conditions": failed,
+            "average_track_confidence": round(average_confidence, 4),
+            "ambiguous_observation_ratio": round(ambiguous_ratio, 4),
+            "similar_kits_detected": anchor_separation is not None and anchor_separation < 0.18,
+            "shadow_invariant_color_distance": True,
         }
 
     def _ensure_anchors(
@@ -2109,10 +2189,15 @@ class TeamColorClassifier:
         self,
         color: tuple[int, int, int],
         appearance: np.ndarray | None,
-    ) -> tuple[int, float]:
+        role_name: str = "player",
+    ) -> tuple[int, float, str]:
         distances: dict[int, float] = {}
         for team, anchor in self.anchors.items():
-            reference_colors = self.reference_palettes_bgr.get(team) or [anchor]
+            goalkeeper_colors = self.goalkeeper_reference_palettes_bgr.get(team, [])
+            if role_name == "goalkeeper" and goalkeeper_colors:
+                reference_colors = goalkeeper_colors
+            else:
+                reference_colors = self.reference_palettes_bgr.get(team) or [anchor]
             distances[team] = min(
                 self._sample_distance(
                     (color, appearance),
@@ -2124,8 +2209,15 @@ class TeamColorClassifier:
                 for reference_color in reference_colors
             )
         team = min(distances, key=distances.get)
+        source = (
+            "goalkeeper_kit_reference"
+            if role_name == "goalkeeper" and team in self.goalkeeper_reference_palettes_bgr
+            else "stored_kit_reference"
+            if team in self.reference_seeded_teams
+            else "online_appearance_cluster"
+        )
         if len(distances) < 2:
-            return team, 0.50
+            return team, 0.50, source
         ordered = sorted(distances.values())
         margin = max(0.0, ordered[1] - ordered[0])
         confidence = max(
@@ -2137,7 +2229,7 @@ class TeamColorClassifier:
                 + max(0.0, 0.22 - ordered[0]) * 0.45,
             ),
         )
-        return team, confidence
+        return team, confidence, source
 
     def _update_anchors(
         self,
@@ -2217,14 +2309,16 @@ class TeamColorClassifier:
     ) -> float:
         pixels = np.array([[list(first), list(second)]], dtype=np.uint8)
         hsv = cv2.cvtColor(pixels, cv2.COLOR_BGR2HSV)[0]
+        lab = cv2.cvtColor(pixels, cv2.COLOR_BGR2LAB)[0].astype(np.float32)
         hue_gap = abs(float(hsv[0, 0]) - float(hsv[1, 0]))
         hue_gap = min(hue_gap, 180.0 - hue_gap) / 90.0
         saturation_gap = abs(float(hsv[0, 1]) - float(hsv[1, 1])) / 255.0
         value_gap = abs(float(hsv[0, 2]) - float(hsv[1, 2])) / 255.0
         both_colored = hsv[0, 1] >= 42 and hsv[1, 1] >= 42
+        chroma_gap = float(np.linalg.norm(lab[0, 1:3] - lab[1, 1:3])) / 181.0
         if both_colored:
-            return hue_gap * 0.72 + saturation_gap * 0.18 + value_gap * 0.10
-        return hue_gap * 0.10 + saturation_gap * 0.48 + value_gap * 0.42
+            return hue_gap * 0.58 + saturation_gap * 0.16 + chroma_gap * 0.22 + value_gap * 0.04
+        return hue_gap * 0.08 + saturation_gap * 0.34 + chroma_gap * 0.38 + value_gap * 0.20
 
 
 class ParticipantRoleClassifierV2:
@@ -5539,6 +5633,8 @@ class MatchAnalysisPlusRunner:
             "candidates": {},
         }
         self.ball_detection_mode = "shared_detector"
+        self.analytics_engine = AnalyticsRealV1()
+        self.report_builder = ReportsV2Builder()
 
     def run(
         self,
@@ -5552,6 +5648,8 @@ class MatchAnalysisPlusRunner:
         start_frame: int = 0,
         calibration_points: list[dict[str, float]] | None = None,
         team_context: dict[str, Any] | None = None,
+        reuse_detections_object: str | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         requested_mode = (mode or "FULL_ANALYSIS").upper()
         if requested_mode not in self.supported_modes:
@@ -5566,9 +5664,41 @@ class MatchAnalysisPlusRunner:
             thumbnail_path = temp_path / "thumbnail.jpg"
             quality_crops_dir = temp_path / "tracking-quality-crops"
             quality_predictions_path = temp_path / "tracking_quality_predictions.jsonl"
+            detection_cache_path = temp_path / "detections.jsonl"
+            reuse_detection_cache_path = temp_path / "reused_detections.jsonl"
             quality_crops_dir.mkdir(parents=True, exist_ok=True)
 
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "stage": "downloading_source",
+                        "processed_frames": 0,
+                        "total_frames": max_frames if max_frames > 0 else None,
+                        "percent": 0.0,
+                        "processing_fps": 0.0,
+                        "eta_seconds": None,
+                        "cache_hit_frames": 0,
+                    }
+                )
             self._download_video(bucket, object_name, input_path)
+            if reuse_detections_object:
+                self._download_video(
+                    bucket,
+                    reuse_detections_object,
+                    reuse_detection_cache_path,
+                )
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "stage": "preparing_models",
+                        "processed_frames": 0,
+                        "total_frames": max_frames if max_frames > 0 else None,
+                        "percent": 0.0,
+                        "processing_fps": 0.0,
+                        "eta_seconds": None,
+                        "cache_hit_frames": 0,
+                    }
+                )
             summary = self._process_video(
                 input_path=input_path,
                 raw_output_path=raw_output_path,
@@ -5581,14 +5711,42 @@ class MatchAnalysisPlusRunner:
                 start_frame=max(0, start_frame),
                 calibration_points=calibration_points or [],
                 team_context=team_context or {},
+                detection_cache_path=detection_cache_path,
+                reuse_detection_cache_path=(
+                    reuse_detection_cache_path if reuse_detections_object else None
+                ),
+                progress_callback=progress_callback,
             )
 
             visual_layers_payload = summary.pop("_visual_layers_payload", None)
+            analytics_payload = summary.pop("_analytics_payload", None)
+
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "stage": "building_artifacts",
+                        "processed_frames": summary.get("frames_processed", 0),
+                        "total_frames": summary.get("frames_processed", 0),
+                        "percent": 99.0,
+                        "processing_fps": summary.get("processing_fps", 0.0),
+                        "eta_seconds": None,
+                        "cache_hit_frames": (summary.get("performance") or {}).get(
+                            "cache_hit_frames",
+                            0,
+                        ),
+                    }
+                )
 
             output_object = f"{artifact_prefix}/output.mp4"
             summary_object = f"{artifact_prefix}/summary.json"
             thumbnail_object = f"{artifact_prefix}/thumbnail.jpg"
             visual_layers_object = f"{artifact_prefix}/visual_layers.json"
+            analytics_object = f"{artifact_prefix}/analytics_v1.json"
+            detection_cache_object = f"{artifact_prefix}/performance/detections.jsonl"
+            report_object = f"{artifact_prefix}/reports-v2/report.json"
+            report_pdf_object = f"{artifact_prefix}/reports-v2/report.pdf"
+            team_chart_object = f"{artifact_prefix}/reports-v2/team-overview.png"
+            heatmap_atlas_object = f"{artifact_prefix}/reports-v2/player-heatmaps.png"
             quality_predictions_object = (
                 f"{artifact_prefix}/tracking-quality/predictions.jsonl"
             )
@@ -5609,6 +5767,64 @@ class MatchAnalysisPlusRunner:
                         "heatmap_sample_rate_hz"
                     ],
                 }
+            if analytics_payload is not None:
+                self._put_json(bucket, analytics_object, analytics_payload)
+                summary["analytics_real_v1"] = {
+                    **analytics_payload,
+                    "object_name": analytics_object,
+                }
+                report_payload = self.report_builder.build(
+                    analytics_payload,
+                    summary,
+                    team_context or {},
+                )
+                report_payload["artifacts"] = {
+                    "json": report_object,
+                    "pdf": report_pdf_object,
+                    "team_chart": team_chart_object,
+                    "player_heatmaps": heatmap_atlas_object,
+                }
+                self._put_bytes(
+                    bucket,
+                    team_chart_object,
+                    self.report_builder.team_chart_png(report_payload),
+                    "image/png",
+                )
+                self._put_bytes(
+                    bucket,
+                    heatmap_atlas_object,
+                    self.report_builder.heatmap_atlas_png(report_payload),
+                    "image/png",
+                )
+                self._put_bytes(
+                    bucket,
+                    report_pdf_object,
+                    self.report_builder.pdf(report_payload),
+                    "application/pdf",
+                )
+                self._put_json(bucket, report_object, report_payload)
+                summary["reports_v2"] = {
+                    "status": "ready",
+                    "schema_version": report_payload["schema_version"],
+                    "teams_count": len(report_payload["teams"]),
+                    "players_count": len(report_payload["players"]),
+                    "artifacts": report_payload["artifacts"],
+                }
+            if detection_cache_path.exists():
+                self._put_file(
+                    bucket,
+                    detection_cache_object,
+                    detection_cache_path,
+                    "application/x-ndjson",
+                )
+                performance = dict(summary.get("performance") or {})
+                performance["detection_cache"] = {
+                    "status": "ready",
+                    "object_name": detection_cache_object,
+                    "source": "reused" if reuse_detections_object else "generated",
+                    "reusable_without_yolo": True,
+                }
+                summary["performance"] = performance
             tracking_quality = summary.get("tracking_quality")
             if tracking_quality is not None:
                 for track in tracking_quality.get("tracks", []):
@@ -5651,6 +5867,21 @@ class MatchAnalysisPlusRunner:
                 "worker": "match-analysis-worker",
             }
             self._put_json(bucket, summary_object, payload)
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "stage": "completed",
+                        "processed_frames": summary.get("frames_processed", 0),
+                        "total_frames": summary.get("frames_processed", 0),
+                        "percent": 100.0,
+                        "processing_fps": summary.get("processing_fps", 0.0),
+                        "eta_seconds": 0.0,
+                        "cache_hit_frames": (summary.get("performance") or {}).get(
+                            "cache_hit_frames",
+                            0,
+                        ),
+                    }
+                )
             return payload
 
     def _process_video(
@@ -5666,6 +5897,9 @@ class MatchAnalysisPlusRunner:
         start_frame: int,
         calibration_points: list[dict[str, float]],
         team_context: dict[str, Any],
+        detection_cache_path: Path,
+        reuse_detection_cache_path: Path | None,
+        progress_callback: Callable[[dict[str, Any]], None] | None,
     ) -> dict[str, Any]:
         start = perf_counter()
         capture = cv2.VideoCapture(str(input_path))
@@ -5682,15 +5916,35 @@ class MatchAnalysisPlusRunner:
         if requested_start_frame:
             capture.set(cv2.CAP_PROP_POS_FRAMES, requested_start_frame)
         actual_start_frame = int(capture.get(cv2.CAP_PROP_POS_FRAMES) or requested_start_frame)
-        model = self._select_model_for_video(capture, actual_start_frame)
+        cached_objects_by_frame = self._load_detection_cache(
+            reuse_detection_cache_path,
+            expected_start_frame=actual_start_frame,
+        )
+        model = None
+        if cached_objects_by_frame:
+            self.model_mode = "cached-football-detections"
+            self.ball_detection_mode = "cached_ball_detections"
+            self.model_selection = {
+                "strategy": "reusable_detection_cache_v1",
+                "selected": "cached_detections",
+                "reason": "YOLO inference skipped for cached frames",
+                "cached_frames": len(cached_objects_by_frame),
+                "analysis_image_size": self.active_image_size,
+                "candidates": {},
+            }
+        else:
+            model = self._select_model_for_video(capture, actual_start_frame)
         pitch_model = self._select_pitch_model_for_video(
             capture,
             actual_start_frame,
             source_frames,
         )
-        self._reset_tracker_state(model)
+        if model is not None:
+            self._reset_tracker_state(model)
         dedicated_ball_model = None
         if (
+            model is not None
+            and
             self.ball_model_path is not None
             and str(self.ball_model_path) != str(self.model_path)
         ):
@@ -5731,6 +5985,9 @@ class MatchAnalysisPlusRunner:
         )
         team_classifier = TeamColorClassifier(
             reference_palettes_bgr=kit_reference_config["palettes"],
+            goalkeeper_reference_palettes_bgr=kit_reference_config[
+                "goalkeeper_palettes"
+            ],
             team_labels=kit_reference_config["team_labels"],
         )
         participant_role_classifier = ParticipantRoleClassifierV2()
@@ -5759,22 +6016,56 @@ class MatchAnalysisPlusRunner:
             else 1,
         )
         quality_predictions_file = quality_predictions_path.open("w", encoding="utf-8")
+        detection_cache_file = detection_cache_path.open("w", encoding="utf-8")
+        cache_hit_frames = 0
+        inference_frames = 0
+        detection_elapsed_seconds = 0.0
+        rendering_elapsed_seconds = 0.0
 
         while max_frames <= 0 or frames_processed < max_frames:
             ok, frame = capture.read()
             if not ok:
                 break
 
-            raw_objects = self._detect_and_track(
-                model,
-                frame,
-                mode,
-                include_ball=dedicated_ball_model is None,
+            detection_started = perf_counter()
+            cached_objects = cached_objects_by_frame.get(frames_processed)
+            if cached_objects is not None:
+                raw_objects = [self._deserialize_analysis_object(item) for item in cached_objects]
+                cache_hit_frames += 1
+            else:
+                if model is None:
+                    raise ValueError(
+                        "Detection cache does not cover the requested frame range; run a fresh analysis first"
+                    )
+                raw_objects = self._detect_and_track(
+                    model,
+                    frame,
+                    mode,
+                    include_ball=dedicated_ball_model is None,
+                )
+                if dedicated_ball_model is not None and frames_processed % 2 == 0:
+                    raw_objects.extend(self._detect_dedicated_balls(dedicated_ball_model, frame))
+                inference_frames += 1
+            detection_cache_file.write(
+                json.dumps(
+                    {
+                        "frame": frames_processed,
+                        "source_frame": actual_start_frame + frames_processed,
+                        "objects": [self._serialize_analysis_object(item) for item in raw_objects],
+                    },
+                    separators=(",", ":"),
+                )
+                + "\n"
             )
-            if dedicated_ball_model is not None and frames_processed % 2 == 0:
-                raw_objects.extend(self._detect_dedicated_balls(dedicated_ball_model, frame))
-            if not tracker_runtime:
+            detection_elapsed_seconds += perf_counter() - detection_started
+            if not tracker_runtime and model is not None:
                 tracker_runtime = self._tracker_runtime_diagnostics(model)
+            elif not tracker_runtime and cached_objects_by_frame:
+                tracker_runtime = {
+                    "engine": "cached_raw_tracks",
+                    "reid": {"requested": True, "active": True, "model": "source_run"},
+                    "stable_identity_layer": "identity_isolation_stabilizer_v5_conservative_reid",
+                }
             raw_detections_count += len(raw_objects)
             shape_valid_players = player_filter.filter(
                 [item for item in raw_objects if item.class_name == "player"],
@@ -5879,6 +6170,7 @@ class MatchAnalysisPlusRunner:
             if current_control is not None:
                 ball_control.append(current_control)
 
+            rendering_started = perf_counter()
             annotated = frame.copy()
             self._draw_overlay(
                 annotated,
@@ -5900,7 +6192,31 @@ class MatchAnalysisPlusRunner:
             if frames_processed == 0:
                 cv2.imwrite(str(thumbnail_path), annotated)
             writer.write(annotated)
+            rendering_elapsed_seconds += perf_counter() - rendering_started
             frames_processed += 1
+            if progress_callback is not None and (
+                frames_processed == 1
+                or frames_processed % 20 == 0
+                or (expected_frames and frames_processed >= expected_frames)
+            ):
+                elapsed_seconds = max(perf_counter() - start, 0.001)
+                rate = frames_processed / elapsed_seconds
+                remaining = max(0, expected_frames - frames_processed) if expected_frames else None
+                progress_callback(
+                    {
+                        "stage": "processing",
+                        "processed_frames": frames_processed,
+                        "total_frames": expected_frames or None,
+                        "percent": round(frames_processed * 100.0 / expected_frames, 2)
+                        if expected_frames
+                        else None,
+                        "processing_fps": round(rate, 3),
+                        "eta_seconds": round(remaining / max(rate, 1e-6), 1)
+                        if remaining is not None
+                        else None,
+                        "cache_hit_frames": cache_hit_frames,
+                    }
+                )
             if frames_processed == 1 or frames_processed % 50 == 0:
                 elapsed_seconds = max(perf_counter() - start, 0.001)
                 print(
@@ -5911,6 +6227,7 @@ class MatchAnalysisPlusRunner:
                 )
 
         quality_predictions_file.close()
+        detection_cache_file.close()
         capture.release()
         writer.release()
         if frames_processed == 0:
@@ -6062,6 +6379,16 @@ class MatchAnalysisPlusRunner:
             filter_summary=ball_filter_summary,
             dedicated_model_active=dedicated_ball_model is not None,
         )
+        team_identity_summary = team_classifier.summary()
+        possession_summary = possession_tracker.summary()
+        analytics_real_v1 = self.analytics_engine.build(
+            layers=visual_layers_payload,
+            possession=possession_summary,
+            pitch_gate=pitch_quality_gate,
+            ball_gate=ball_quality_gate,
+            team_identity=team_identity_summary,
+            team_context=team_context,
+        )
 
         return {
             "status": "ok",
@@ -6083,6 +6410,14 @@ class MatchAnalysisPlusRunner:
             "source_end_frame": actual_start_frame + frames_processed - 1,
             "fps": round(float(fps), 3),
             "processing_fps": processing_fps,
+            "performance": self._performance_summary(
+                frames_processed=frames_processed,
+                processing_fps=processing_fps,
+                cache_hit_frames=cache_hit_frames,
+                inference_frames=inference_frames,
+                detection_elapsed_seconds=detection_elapsed_seconds,
+                rendering_elapsed_seconds=rendering_elapsed_seconds,
+            ),
             "resolution": [width, height],
             "detections_count": detections_count,
             "raw_detections_count": raw_detections_count,
@@ -6098,7 +6433,7 @@ class MatchAnalysisPlusRunner:
             "raw_tracks_count": len(track_stabilizer.raw_ids_seen),
             "player_filter": player_filter.summary(),
             "pitch_occupancy_filter": pitch_occupancy_filter.summary(),
-            "team_classifier": team_classifier.summary(),
+            "team_classifier": team_identity_summary,
             "participant_role_classifier": role_summary,
             "kit_references": kit_reference_config["summary"],
             "id_stabilizer": track_stabilizer.summary(),
@@ -6125,7 +6460,10 @@ class MatchAnalysisPlusRunner:
                 "team_1_percent": round(team_1 * 100 / total_control, 2),
                 "team_2_percent": round(team_2 * 100 / total_control, 2),
             },
-            "possession": possession_tracker.summary(),
+            "possession": possession_summary,
+            "analysis_scope": team_context.get("analysis_scope") or "both_teams_full",
+            "analytics_real_v1": analytics_real_v1,
+            "_analytics_payload": analytics_real_v1,
             "notes": [
                 "sports-main source is vendored in apps/match-analysis-worker/sports-main",
                 "every run executes player, ball, tracking, team classification, and pitch radar analysis",
@@ -6246,6 +6584,87 @@ class MatchAnalysisPlusRunner:
                 reset()
         if predictor is not None and hasattr(predictor, "vid_path"):
             predictor.vid_path = [None for _ in getattr(predictor, "vid_path", [None])]
+
+    def _load_detection_cache(
+        self,
+        path: Path | None,
+        expected_start_frame: int,
+    ) -> dict[int, list[dict[str, Any]]]:
+        if path is None or not path.exists():
+            return {}
+        cached: dict[int, list[dict[str, Any]]] = {}
+        with path.open("r", encoding="utf-8") as file:
+            for line in file:
+                if not line.strip():
+                    continue
+                payload = json.loads(line)
+                source_frame = int(payload.get("source_frame", payload.get("frame", 0)))
+                local_frame = source_frame - expected_start_frame
+                if local_frame < 0:
+                    continue
+                cached[local_frame] = list(payload.get("objects") or [])
+        return cached
+
+    def _serialize_analysis_object(self, item: AnalysisObject) -> dict[str, Any]:
+        return {
+            "track_id": int(item.track_id),
+            "class_name": item.class_name,
+            "bbox": [round(float(value), 3) for value in item.bbox],
+            "confidence": round(float(item.confidence), 5) if item.confidence is not None else None,
+            "raw_track_id": item.raw_track_id,
+            "is_predicted": bool(item.is_predicted),
+            "role_name": item.role_name,
+        }
+
+    def _deserialize_analysis_object(self, payload: dict[str, Any]) -> AnalysisObject:
+        return AnalysisObject(
+            track_id=int(payload["track_id"]),
+            class_name=str(payload["class_name"]),
+            bbox=[float(value) for value in payload["bbox"]],
+            confidence=float(payload["confidence"]) if payload.get("confidence") is not None else None,
+            raw_track_id=int(payload["raw_track_id"]) if payload.get("raw_track_id") is not None else None,
+            is_predicted=bool(payload.get("is_predicted", False)),
+            role_name=str(payload.get("role_name") or "player"),
+        )
+
+    def _performance_summary(
+        self,
+        frames_processed: int,
+        processing_fps: float,
+        cache_hit_frames: int,
+        inference_frames: int,
+        detection_elapsed_seconds: float,
+        rendering_elapsed_seconds: float,
+    ) -> dict[str, Any]:
+        cuda_available = False
+        cuda_devices = 0
+        try:
+            import torch
+
+            cuda_available = bool(torch.cuda.is_available())
+            cuda_devices = int(torch.cuda.device_count()) if cuda_available else 0
+        except Exception:
+            pass
+        configured_device = str(settings.YOLO_DEVICE)
+        gpu_requested = configured_device.lower() not in {"cpu", "none", ""}
+        return {
+            "engine": "separated_detection_rendering_pipeline_v1",
+            "processing_fps": processing_fps,
+            "frames_processed": frames_processed,
+            "configured_device": configured_device,
+            "cuda_available": cuda_available,
+            "cuda_devices": cuda_devices,
+            "gpu_active": gpu_requested and cuda_available,
+            "cache_hit_frames": cache_hit_frames,
+            "yolo_inference_frames": inference_frames,
+            "yolo_skipped_frames": cache_hit_frames,
+            "detection_seconds": round(detection_elapsed_seconds, 3),
+            "rendering_seconds": round(rendering_elapsed_seconds, 3),
+            "detection_cache_reusable": True,
+            "stateful_tracking_batch_size": 1,
+            "auxiliary_inference_batch_size": int(settings.YOLO_BATCH_SIZE),
+            "batch_policy": "stateful tracking remains ordered; auxiliary and future cache precompute may batch safely",
+        }
 
     def _detect_and_track(
         self,
@@ -7249,6 +7668,7 @@ class MatchAnalysisPlusRunner:
             if str(team).isdigit() and label
         }
         palettes: dict[int, list[tuple[int, int, int]]] = {}
+        goalkeeper_palettes: dict[int, list[tuple[int, int, int]]] = {}
         summary: dict[str, Any] = {
             "source": "online_appearance_clustering",
             "teams": {},
@@ -7285,11 +7705,35 @@ class MatchAnalysisPlusRunner:
                     team_summary["error"] = str(exc)
             summary["teams"][str(team)] = team_summary
 
+            goalkeeper_object = references.get(f"team_{team}_goalkeeper")
+            goalkeeper_summary: dict[str, Any] = {
+                "object_name": goalkeeper_object,
+                "status": "missing",
+                "palette_bgr": [],
+            }
+            if goalkeeper_object:
+                try:
+                    goalkeeper_image = self._load_reference_image(goalkeeper_object)
+                    goalkeeper_palette = self._extract_reference_palette(goalkeeper_image)
+                    if goalkeeper_palette:
+                        goalkeeper_palettes[team] = goalkeeper_palette
+                        goalkeeper_summary["status"] = "ready"
+                        goalkeeper_summary["palette_bgr"] = [
+                            list(color) for color in goalkeeper_palette
+                        ]
+                    else:
+                        goalkeeper_summary["status"] = "no_reliable_colors"
+                except Exception as exc:
+                    goalkeeper_summary["status"] = "failed"
+                    goalkeeper_summary["error"] = str(exc)
+            team_summary["goalkeeper"] = goalkeeper_summary
+
         if palettes:
             summary["source"] = "stored_kit_images_with_online_adaptation"
         summary["seeded_teams"] = sorted(palettes)
         return {
             "palettes": palettes,
+            "goalkeeper_palettes": goalkeeper_palettes,
             "team_labels": labels,
             "summary": summary,
         }
@@ -7436,3 +7880,18 @@ class MatchAnalysisPlusRunner:
     def _put_json(self, bucket: str, object_name: str, payload: dict[str, Any]) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         client.put_object(bucket, object_name, io.BytesIO(data), length=len(data), content_type="application/json")
+
+    def _put_bytes(
+        self,
+        bucket: str,
+        object_name: str,
+        data: bytes,
+        content_type: str,
+    ) -> None:
+        client.put_object(
+            bucket,
+            object_name,
+            io.BytesIO(data),
+            length=len(data),
+            content_type=content_type,
+        )
