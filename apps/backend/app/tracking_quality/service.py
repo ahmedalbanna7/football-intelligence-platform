@@ -700,6 +700,241 @@ class TrackingQualityService:
             "ground_truth": payload,
         }
 
+    def suggest_critical_ranges(
+        self,
+        db: Session,
+        run: MatchAnalysisRun,
+        padding_frames: int = 20,
+        max_ranges: int = 12,
+    ) -> dict[str, Any]:
+        """Locate identity-risk windows that deserve manual annotation.
+
+        These ranges are triage hints, not ground truth. They deliberately combine
+        temporal identity signals with same-frame crowding so annotators spend time
+        around crossings, re-entry, and possible cross-team reuse.
+        """
+        assessment = (
+            db.query(TrackingQualityAssessment)
+            .filter(TrackingQualityAssessment.run_id == run.id)
+            .first()
+        )
+        if assessment is None:
+            assessment = self.sync_from_summary(db, run, run.summary_json or {})
+        if not assessment.predictions_object:
+            raise ValueError("This run does not contain tracking prediction artifacts")
+
+        predictions = self._get_predictions(BUCKET_NAME, assessment.predictions_object)
+        observations = [
+            item
+            for item in predictions.get("observations", [])
+            if isinstance(item, dict)
+            and item.get("frame") is not None
+            and item.get("track_id") is not None
+            and isinstance(item.get("bbox"), list)
+            and len(item["bbox"]) == 4
+        ]
+        if not observations:
+            raise ValueError("This run does not contain valid tracking observations")
+
+        events: list[dict[str, Any]] = []
+        previous_by_track: dict[int, dict[str, Any]] = {}
+        frames: dict[int, list[dict[str, Any]]] = {}
+        for observation in sorted(
+            observations,
+            key=lambda item: (int(item["frame"]), int(item["track_id"])),
+        ):
+            frame_index = int(observation["frame"])
+            track_id = int(observation["track_id"])
+            frames.setdefault(frame_index, []).append(observation)
+            previous = previous_by_track.get(track_id)
+            if previous is not None:
+                gap = frame_index - int(previous["frame"])
+                previous_raw = previous.get("raw_track_id")
+                current_raw = observation.get("raw_track_id")
+                if (
+                    previous_raw is not None
+                    and current_raw is not None
+                    and previous_raw != current_raw
+                ):
+                    events.append(
+                        {
+                            "frame": frame_index,
+                            "scenario": "raw_id_transition",
+                            "severity": 0.78,
+                            "track_ids": {track_id},
+                        }
+                    )
+                previous_team = self._normalise_team(previous.get("team"))
+                current_team = self._normalise_team(observation.get("team"))
+                if (
+                    previous_team in {1, 2}
+                    and current_team in {1, 2}
+                    and previous_team != current_team
+                ):
+                    events.append(
+                        {
+                            "frame": frame_index,
+                            "scenario": "cross_team_risk",
+                            "severity": 1.0,
+                            "track_ids": {track_id},
+                        }
+                    )
+                if 4 <= gap <= 240:
+                    events.append(
+                        {
+                            "frame": frame_index,
+                            "scenario": "reentry",
+                            "severity": min(0.95, 0.55 + gap / 240.0),
+                            "track_ids": {track_id},
+                        }
+                    )
+            previous_by_track[track_id] = observation
+
+        for frame_index, frame_items in frames.items():
+            participants = [
+                item
+                for item in frame_items
+                if str(item.get("role_name") or "player").lower()
+                in {"player", "goalkeeper", "referee", "assistant_referee"}
+            ]
+            for first_index, first in enumerate(participants):
+                first_bbox = [float(value) for value in first["bbox"]]
+                first_foot = ((first_bbox[0] + first_bbox[2]) / 2.0, first_bbox[3])
+                first_height = max(1.0, first_bbox[3] - first_bbox[1])
+                for second in participants[first_index + 1 :]:
+                    second_bbox = [float(value) for value in second["bbox"]]
+                    second_foot = ((second_bbox[0] + second_bbox[2]) / 2.0, second_bbox[3])
+                    second_height = max(1.0, second_bbox[3] - second_bbox[1])
+                    foot_distance = math.dist(first_foot, second_foot)
+                    proximity = foot_distance / max(1.0, (first_height + second_height) / 2.0)
+                    overlap = self._bbox_iou(first_bbox, second_bbox)
+                    if overlap < 0.05 and proximity > 0.48:
+                        continue
+                    track_ids = {int(first["track_id"]), int(second["track_id"])}
+                    events.append(
+                        {
+                            "frame": frame_index,
+                            "scenario": "crowding",
+                            "severity": min(1.0, 0.62 + overlap + max(0.0, 0.48 - proximity)),
+                            "track_ids": track_ids,
+                        }
+                    )
+
+        deduplicated_events: list[dict[str, Any]] = []
+        last_frame_by_signature: dict[tuple[str, tuple[int, ...]], int] = {}
+        minimum_event_spacing = max(8, padding_frames // 2)
+        for event in sorted(events, key=lambda item: int(item["frame"])):
+            signature = (
+                str(event["scenario"]),
+                tuple(sorted(int(track_id) for track_id in event["track_ids"])),
+            )
+            previous_frame = last_frame_by_signature.get(signature)
+            if (
+                previous_frame is not None
+                and int(event["frame"]) - previous_frame <= minimum_event_spacing
+            ):
+                continue
+            last_frame_by_signature[signature] = int(event["frame"])
+            deduplicated_events.append(event)
+
+        maximum_frame = max(frames)
+        windows = [
+            {
+                "start_frame": max(0, int(event["frame"]) - padding_frames),
+                "end_frame": min(maximum_frame, int(event["frame"]) + padding_frames),
+                "peak_frame": int(event["frame"]),
+                "scenarios": {str(event["scenario"])},
+                "track_ids": set(event["track_ids"]),
+                "severity": float(event["severity"]),
+                "event_count": 1,
+            }
+            for event in deduplicated_events
+        ]
+        ranked = sorted(
+            windows,
+            key=lambda item: (item["severity"], item["event_count"]),
+            reverse=True,
+        )
+        selected: list[dict[str, Any]] = []
+        for window in ranked:
+            overlapping = next(
+                (
+                    item
+                    for item in selected
+                    if self._range_overlap_ratio(item, window) >= 0.40
+                ),
+                None,
+            )
+            if overlapping is not None:
+                overlapping["scenarios"].update(window["scenarios"])
+                overlapping["track_ids"].update(window["track_ids"])
+                overlapping["severity"] = max(
+                    overlapping["severity"],
+                    window["severity"],
+                )
+                overlapping["event_count"] += window["event_count"]
+                continue
+            selected.append(window)
+            if len(selected) >= max_ranges:
+                break
+        ranges = [
+            {
+                **item,
+                "scenarios": sorted(item["scenarios"]),
+                "track_ids": sorted(item["track_ids"]),
+                "severity": round(float(item["severity"]), 4),
+                "frame_count": item["end_frame"] - item["start_frame"] + 1,
+            }
+            for item in sorted(selected, key=lambda item: item["start_frame"])
+        ]
+        return {
+            "run_id": run.id,
+            "predictions_object": assessment.predictions_object,
+            "engine": "tracking_critical_range_triage_v1",
+            "status": "ready" if ranges else "no_risk_windows_detected",
+            "events_detected": len(events),
+            "ranges": ranges,
+            "instructions": [
+                "Review the highest-severity windows first.",
+                "Generate a ground-truth draft for each range, then correct it manually.",
+                "Do not mark a draft verified until every visible identity and team is checked.",
+            ],
+        }
+
+    @staticmethod
+    def _bbox_iou(first: list[float], second: list[float]) -> float:
+        left = max(first[0], second[0])
+        top = max(first[1], second[1])
+        right = min(first[2], second[2])
+        bottom = min(first[3], second[3])
+        intersection = max(0.0, right - left) * max(0.0, bottom - top)
+        first_area = max(0.0, first[2] - first[0]) * max(0.0, first[3] - first[1])
+        second_area = max(0.0, second[2] - second[0]) * max(0.0, second[3] - second[1])
+        union = first_area + second_area - intersection
+        return intersection / union if union > 0 else 0.0
+
+    @staticmethod
+    def _range_overlap_ratio(first: dict[str, Any], second: dict[str, Any]) -> float:
+        intersection = max(
+            0,
+            min(int(first["end_frame"]), int(second["end_frame"]))
+            - max(int(first["start_frame"]), int(second["start_frame"]))
+            + 1,
+        )
+        smaller = min(
+            int(first["end_frame"]) - int(first["start_frame"]) + 1,
+            int(second["end_frame"]) - int(second["start_frame"]) + 1,
+        )
+        return intersection / max(smaller, 1)
+
+    @staticmethod
+    def _normalise_team(value: Any) -> int | None:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed in {1, 2} else None
+
     def _apply_layer_corrections(
         self,
         layers: dict[str, Any],

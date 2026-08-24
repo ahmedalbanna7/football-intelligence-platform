@@ -76,8 +76,8 @@
   "latest_suite": {
     "status": "passed",
     "cases_count": 5,
-    "minimum_idf1": 97.436,
-    "minimum_hota": 95.394,
+    "minimum_idf1": 99.029,
+    "minimum_hota": 98.2,
     "critical_id_switches": 0,
     "cross_team_switches": 0,
     "unresolved_ground_truth_fragments": 0

@@ -1544,7 +1544,7 @@ button {
 
 .release-plan-builder {
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) repeat(2, minmax(105px, 150px)) auto minmax(160px, auto);
+  grid-template-columns: minmax(180px, 1fr) repeat(2, minmax(105px, 150px)) repeat(2, auto) minmax(120px, auto);
   align-items: end;
   gap: 9px;
 }
@@ -1599,6 +1599,85 @@ button {
 .release-plan-clips small {
   margin-top: 2px;
   color: #617080;
+}
+
+.critical-range-review {
+  border: 1px solid #d9e2ea;
+  background: #fff;
+  padding: 14px;
+}
+
+.critical-range-heading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.critical-range-heading > div {
+  display: grid;
+  gap: 3px;
+}
+
+.critical-range-heading > span {
+  color: #617080;
+  font-size: 12px;
+}
+
+.critical-range-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 8px;
+}
+
+.critical-range-grid button {
+  min-width: 0;
+  border: 1px solid #d9e2ea;
+  background: #f8fafc;
+  color: #17212d;
+  padding: 10px;
+  text-align: left;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.critical-range-grid button:hover,
+.critical-range-grid button:focus-visible {
+  border-color: #00856f;
+  background: #f1f8f6;
+}
+
+.critical-range-grid button > span:first-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.critical-range-grid small {
+  color: #617080;
+  overflow-wrap: anywhere;
+}
+
+.critical-range-grid button > span:last-child {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 4px 7px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.critical-range-grid .high {
+  color: #a33324;
+  background: #fff0ed;
+}
+
+.critical-range-grid .medium {
+  color: #8a5b00;
+  background: #fff6db;
 }
 
 .quality-tabs {

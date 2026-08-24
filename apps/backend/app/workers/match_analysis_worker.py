@@ -271,6 +271,8 @@ async def process_event(
             calibration_points=event.calibration_points,
             team_context=team_context,
             reuse_detections_object=event.reuse_detections_object,
+            reuse_model_mode=event.reuse_model_mode,
+            reuse_ball_detection_mode=event.reuse_ball_detection_mode,
             progress_callback=lambda progress: update_run_progress(event.run_id, progress),
         )
         finish_run(db, run, "processed", summary=summary)

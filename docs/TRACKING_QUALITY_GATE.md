@@ -142,6 +142,7 @@ POST /match-analysis-plus/{match_id}/runs/{run_id}/quality/corrections
 POST /match-analysis-plus/{match_id}/runs/{run_id}/quality/corrections/{correction_id}/undo
 POST /match-analysis-plus/{match_id}/runs/{run_id}/quality/recalculate
 POST /match-analysis-plus/{match_id}/runs/{run_id}/quality/ground-truth/draft
+POST /match-analysis-plus/{match_id}/runs/{run_id}/quality/critical-ranges/suggest
 POST /match-analysis-plus/{match_id}/runs/{run_id}/quality/benchmark
 POST /match-analysis-plus/{match_id}/quality/release-gate/plan
 POST /match-analysis-plus/quality/release-gate/suite
@@ -151,6 +152,72 @@ The plan endpoint divides the source video into 500-1000 frame windows without
 starting a large batch accidentally. The suite endpoint combines verified cases
 from different matches/runs so tactical and close/moving cameras can be judged
 under one release decision.
+
+## Production Validation Workflow
+
+1. Run `FULL_ANALYSIS` on GPU with a 500-1000 frame window. If the source is
+   shorter than the requested limit, the complete source is processed.
+2. Open `Tracking Quality Gate > Quality Overview` and choose
+   `Find critical clips`. Automated triage ranks crossings, crowding, re-entry,
+   raw tracker transitions, and possible cross-team reuse. These are review
+   hints, not labels.
+3. Select a suggested window. The UI seeks to its peak frame and fills the
+   Ground Truth range and scenario.
+4. Download the draft. Review every visible identity and bounding box, add
+   misses, remove false detections, and keep one `identity_id` for the same
+   physical person throughout all clips.
+5. Set every object's `review_state` to `verified`, then set
+   `verification.status` to `verified` with the annotator and review time.
+6. Load the verified JSON in the same panel and choose `Evaluate`. IDF1, HOTA,
+   exact switches, fragmentation, and the release decision are then measured.
+7. Review Team, Participant Role, Pitch, and Ball gates separately. Tracking
+   metrics cannot prove team, role, field geometry, or ball-path correctness.
+
+Reusable detection runs retain the source detector and ball-model metadata.
+This is required so a cached run applies the same player validity rules and
+does not silently downgrade specialized ball detections while skipping YOLO.
+
+### CLI/API equivalent
+
+```powershell
+$critical = Invoke-RestMethod -Method Post `
+  -Uri "http://localhost:8000/match-analysis-plus/12/runs/68/quality/critical-ranges/suggest" `
+  -ContentType "application/json" `
+  -Body '{"padding_frames":20,"max_ranges":12}'
+
+$draft = Invoke-RestMethod -Method Post `
+  -Uri "http://localhost:8000/match-analysis-plus/12/runs/68/quality/ground-truth/draft" `
+  -ContentType "application/json" `
+  -Body '{"start_frame":106,"end_frame":146,"sample_every_frames":5,"scenario":"crowding","camera_style":"tactical","critical":true}'
+```
+
+Do not send `$draft.ground_truth` directly to the benchmark. It remains a
+draft until a human has reviewed every annotated object.
+
+## Match 12 GPU Validation
+
+Run 68 processed the complete `08fd33_4.mp4` source. The video contains 750
+frames, so a `max_frames` request of 1000 correctly stopped at the source end.
+The fresh detector run used CUDA on an NVIDIA GeForce GTX 1660 SUPER; Run 68
+then reused the saved detections to validate tracking, team identity, roles,
+pitch calibration, and ball logic without paying the YOLO cost again.
+
+| Gate | Result |
+| --- | --- |
+| Team identity | Passed; 15 Team 1, 16 Team 2, 4 officials; 17 opposite-kit flashes prevented after lock |
+| Pitch calibration | Passed; 750/750 reliable frames, zero unreliable gap |
+| Ball tracking | Passed; dedicated cached detections retained source-model metadata |
+| Participant roles | 29 players, 2 goalkeepers, 1 referee, 1 assistant referee, 2 outside staff |
+| Tracking release suite | Passed across five verified tactical and close/moving-camera cases |
+
+The release suite minimums are `IDF1 99.029` and `HOTA 98.2`, with zero exact
+ID switches, zero unresolved ground-truth fragments, and zero cross-team
+identity transfers in the verified samples. These values apply to manually
+verified selected identities and frames. They are not a 100% full-match claim.
+
+Automated triage found 12 high-value review windows from 1,094 heuristic
+signals. Three review drafts were saved for frames 106-146, 366-406, and
+665-705. They remain drafts until an analyst verifies every visible person.
 
 ## Participant Role Classifier v2
 

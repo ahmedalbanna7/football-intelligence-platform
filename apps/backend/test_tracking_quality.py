@@ -174,6 +174,36 @@ class TrackingQualityMetricTests(unittest.TestCase):
         self.assertEqual(90010, ground_truth["clips"][0]["source_end_frame"])
         self.assertEqual(90000, ground_truth["frames"][0]["objects"][0]["source_frame"])
 
+    def test_critical_range_suggestions_find_team_switch_reentry_and_crowding(self) -> None:
+        service = TrackingQualityService()
+        service._get_predictions = Mock(
+            return_value={
+                "observations": [
+                    {"frame": 0, "track_id": 7, "raw_track_id": 12, "bbox": [10, 10, 30, 70], "team": 1, "role_name": "player"},
+                    {"frame": 0, "track_id": 8, "raw_track_id": 13, "bbox": [32, 10, 52, 70], "team": 2, "role_name": "player"},
+                    {"frame": 12, "track_id": 7, "raw_track_id": 44, "bbox": [24, 10, 44, 70], "team": 2, "role_name": "player"},
+                    {"frame": 12, "track_id": 8, "raw_track_id": 13, "bbox": [28, 10, 48, 70], "team": 2, "role_name": "player"},
+                ]
+            }
+        )
+        assessment = SimpleNamespace(predictions_object="matches/12/run/quality/predictions.jsonl")
+        db = Mock()
+        db.query.return_value.filter.return_value.first.return_value = assessment
+        run = SimpleNamespace(id=65, match_id=12, summary_json={})
+
+        result = service.suggest_critical_ranges(db, run, padding_frames=5, max_ranges=5)
+
+        self.assertEqual("ready", result["status"])
+        scenarios = {
+            scenario
+            for item in result["ranges"]
+            for scenario in item["scenarios"]
+        }
+        self.assertIn("cross_team_risk", scenarios)
+        self.assertIn("raw_id_transition", scenarios)
+        self.assertIn("reentry", scenarios)
+        self.assertIn("crowding", scenarios)
+
     def test_unverified_ground_truth_is_rejected(self) -> None:
         ground_truth = _payload(self.ground_truth_rows, prediction=False)
         ground_truth["verification"]["status"] = "draft"

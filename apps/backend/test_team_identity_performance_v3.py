@@ -14,6 +14,21 @@ from app.match_analysis_plus.runner import (
 
 
 class TeamIdentityV3Tests(unittest.TestCase):
+    @staticmethod
+    def _state(track_id: int, color: tuple[int, int, int]) -> StableTrackState:
+        return StableTrackState(
+            stable_id=track_id,
+            bbox=[0, 0, 20, 60],
+            center=(10, 30),
+            foot=(10, 60),
+            velocity=(0, 0),
+            foot_velocity=(0, 0),
+            last_frame=1,
+            raw_ids_seen={track_id},
+            jersey_color=color,
+            role_name="player",
+        )
+
     def test_shadow_change_preserves_colored_kit_distance(self) -> None:
         classifier = TeamColorClassifier()
         same_hue_shadow = classifier._color_distance((30, 80, 220), (12, 36, 95))
@@ -45,6 +60,74 @@ class TeamIdentityV3Tests(unittest.TestCase):
         )
         self.assertEqual(teams[9], 1)
         self.assertEqual(classifier.assignment_sources[9], "goalkeeper_kit_reference")
+
+    def test_temporal_team_lock_rejects_single_opposite_kit_observation(self) -> None:
+        classifier = TeamColorClassifier(
+            reference_palettes_bgr={1: [(20, 30, 220)], 2: [(220, 40, 20)]},
+        )
+        state = StableTrackState(
+            stable_id=4,
+            bbox=[0, 0, 20, 60],
+            center=(10, 30),
+            foot=(10, 60),
+            velocity=(0, 0),
+            foot_velocity=(0, 0),
+            last_frame=1,
+            raw_ids_seen={4},
+            jersey_color=(20, 30, 220),
+            role_name="player",
+        )
+        teams: dict[int, int] = {}
+        player = AnalysisObject(4, "player", [0, 0, 20, 60], role_name="player")
+        for _ in range(6):
+            classifier.update([player], {4: state}, teams)
+
+        self.assertEqual(1, classifier.locked_team_by_track[4])
+        state.jersey_color = (220, 40, 20)
+        for _ in range(10):
+            classifier.update([player], {4: state}, teams)
+
+        self.assertEqual(1, teams[4])
+        self.assertGreater(classifier.prevented_team_switches, 0)
+
+    def test_quality_gate_rejects_collapsed_single_team_assignments(self) -> None:
+        classifier = TeamColorClassifier(
+            reference_palettes_bgr={1: [(20, 30, 220)], 2: [(220, 40, 20)]},
+        )
+        states = {
+            track_id: self._state(track_id, (20, 30, 220))
+            for track_id in range(1, 7)
+        }
+        players = [
+            AnalysisObject(track_id, "player", [0, 0, 20, 60])
+            for track_id in states
+        ]
+        teams: dict[int, int] = {}
+        for _ in range(6):
+            classifier.update(players, states, teams)
+
+        gate = classifier.quality_gate()
+
+        self.assertEqual("needs_review", gate["status"])
+        self.assertIn("both_teams_observed", gate["failed_conditions"])
+
+    def test_online_second_anchor_resets_premature_single_anchor_lock(self) -> None:
+        classifier = TeamColorClassifier()
+        first = self._state(1, (20, 30, 220))
+        teams: dict[int, int] = {}
+        first_player = AnalysisObject(1, "player", [0, 0, 20, 60])
+        for _ in range(12):
+            classifier.update([first_player], {1: first}, teams)
+        self.assertIn(1, classifier.locked_team_by_track)
+
+        second = self._state(2, (220, 40, 20))
+        classifier.update(
+            [first_player, AnalysisObject(2, "player", [30, 0, 50, 60])],
+            {1: first, 2: second},
+            teams,
+        )
+
+        self.assertEqual({}, classifier.locked_team_by_track)
 
 
 class PerformancePipelineTests(unittest.TestCase):

@@ -33,6 +33,8 @@ class MatchAnalysisRequestedEvent(BaseModel):
     start_frame: int = 0
     calibration_points: list[dict[str, float]] = Field(default_factory=list)
     reuse_detections_object: str | None = None
+    reuse_model_mode: str | None = None
+    reuse_ball_detection_mode: str | None = None
     match_context: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utc_now)
 

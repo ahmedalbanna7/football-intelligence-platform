@@ -321,6 +321,7 @@ class PitchOccupancyFilter:
         self.kept = 0
         self.rejected_outside_pitch = 0
         self.rejected_non_field_foot = 0
+        self.kept_official_margin = 0
         self.metric_decisions = 0
         self.visual_fallback_decisions = 0
         self.last_visual_mask: np.ndarray | None = None
@@ -343,6 +344,13 @@ class PitchOccupancyFilter:
             if metric_available:
                 self.metric_decisions += 1
                 inside = radar.contains_image_point(foot, margin_cm=90.0)
+                if (
+                    not inside
+                    and player.role_name in {"referee", "assistant_referee"}
+                    and radar.contains_image_point(foot, margin_cm=600.0)
+                ):
+                    inside = True
+                    self.kept_official_margin += 1
             else:
                 self.visual_fallback_decisions += 1
                 inside = self._mask_contains(visual_mask, foot)
@@ -374,6 +382,7 @@ class PitchOccupancyFilter:
             "rejected_non_field_foot": self.rejected_non_field_foot,
             "metric_decisions": self.metric_decisions,
             "visual_fallback_decisions": self.visual_fallback_decisions,
+            "kept_official_margin": self.kept_official_margin,
             "grace_frames": self.grace_frames,
         }
 
@@ -1943,6 +1952,9 @@ class TeamColorClassifier:
         }
         self.appearance_anchors: dict[int, np.ndarray] = {}
         self.track_votes: dict[int, dict[int, float]] = {}
+        self.track_observation_counts: dict[int, int] = {}
+        self.locked_team_by_track: dict[int, int] = {}
+        self.team_assignments: dict[int, int] = {}
         self.track_confidence: dict[int, float] = {}
         self.observations = 0
         self.anchor_initializations = 0
@@ -1951,6 +1963,7 @@ class TeamColorClassifier:
         self.goalkeeper_tracks: set[int] = set()
         self.goalkeeper_reference_matches = 0
         self.assignment_sources: dict[int, str] = {}
+        self.prevented_team_switches = 0
 
     def update(
         self,
@@ -1967,6 +1980,7 @@ class TeamColorClassifier:
             role_name = str(getattr(state, "role_name", player.role_name or "player"))
             if role_name in {"referee", "assistant_referee", "staff_outside_pitch"}:
                 team_by_track[player.track_id] = 0
+                self.team_assignments[player.track_id] = 0
                 self.track_confidence[player.track_id] = 1.0
                 self.official_tracks.add(player.track_id)
                 self.goalkeeper_tracks.discard(player.track_id)
@@ -1995,6 +2009,9 @@ class TeamColorClassifier:
         created_second_anchor = self._ensure_anchors(anchor_samples)
         if created_second_anchor:
             self.track_votes.clear()
+            self.track_observation_counts.clear()
+            if not self.reference_seeded_teams:
+                self.locked_team_by_track.clear()
 
         assignments: dict[int, int] = {}
         for track_id, (color, appearance) in samples.items():
@@ -2009,12 +2026,40 @@ class TeamColorClassifier:
             if source == "goalkeeper_kit_reference":
                 self.goalkeeper_reference_matches += 1
             votes = self.track_votes.setdefault(track_id, {1: 0.0, 2: 0.0})
+            self.track_observation_counts[track_id] = (
+                self.track_observation_counts.get(track_id, 0) + 1
+            )
             votes[1] *= 0.90
             votes[2] *= 0.90
             votes[team] += 0.50 + confidence
-            team_by_track[track_id] = max(votes, key=votes.get)
+            proposed_team = max(votes, key=votes.get)
             total_votes = max(votes[1] + votes[2], 1e-6)
             vote_confidence = abs(votes[1] - votes[2]) / total_votes
+            locked_team = self.locked_team_by_track.get(track_id)
+            if locked_team is not None:
+                if proposed_team != locked_team:
+                    self.prevented_team_switches += 1
+                team_by_track[track_id] = locked_team
+            else:
+                previous_team = team_by_track.get(track_id)
+                if previous_team in {1, 2} and proposed_team != previous_team:
+                    challenger = votes[proposed_team]
+                    incumbent = votes[previous_team]
+                    if challenger < incumbent * 1.35 + 0.75:
+                        proposed_team = previous_team
+                        self.prevented_team_switches += 1
+                team_by_track[track_id] = proposed_team
+                required_observations = (
+                    6
+                    if proposed_team in self.reference_seeded_teams
+                    else 12
+                )
+                if (
+                    self.track_observation_counts[track_id] >= required_observations
+                    and vote_confidence >= 0.68
+                ):
+                    self.locked_team_by_track[track_id] = proposed_team
+            self.team_assignments[track_id] = team_by_track[track_id]
             self.track_confidence[track_id] = round(
                 min(1.0, confidence * 0.55 + vote_confidence * 0.45),
                 4,
@@ -2068,6 +2113,19 @@ class TeamColorClassifier:
                 str(track_id): source
                 for track_id, source in sorted(self.assignment_sources.items())
             },
+            "locked_team_by_track": {
+                str(track_id): team
+                for track_id, team in sorted(self.locked_team_by_track.items())
+            },
+            "locked_team_tracks": len(self.locked_team_by_track),
+            "prevented_team_switches": self.prevented_team_switches,
+            "team_track_counts": {
+                str(team): sum(
+                    1 for assigned_team in self.team_assignments.values()
+                    if assigned_team == team
+                )
+                for team in (1, 2)
+            },
             "color_observations": self.observations,
             "ambiguous_observations": self.ambiguous_observations,
             "official_tracks": sorted(self.official_tracks),
@@ -2090,6 +2148,19 @@ class TeamColorClassifier:
         anchor_separation = None
         if 1 in self.anchors and 2 in self.anchors:
             anchor_separation = self._color_distance(self.anchors[1], self.anchors[2])
+        team_track_counts = {
+            team: sum(
+                1
+                for track_id, assigned_team in self.team_assignments.items()
+                if track_id not in self.official_tracks and assigned_team == team
+            )
+            for team in (1, 2)
+        }
+        classified_team_tracks = sum(team_track_counts.values())
+        minimum_team_support = max(
+            1,
+            min(3, int(np.ceil(classified_team_tracks * 0.10))),
+        )
         conditions = [
             {
                 "code": "two_team_anchors",
@@ -2115,6 +2186,18 @@ class TeamColorClassifier:
                 "value": round(anchor_separation, 4) if anchor_separation is not None else None,
                 "required": ">= 0.12",
             },
+            {
+                "code": "both_teams_observed",
+                "passed": all(
+                    team_track_counts[team] >= minimum_team_support
+                    for team in (1, 2)
+                ),
+                "value": {
+                    str(team): team_track_counts[team]
+                    for team in (1, 2)
+                },
+                "required": f">= {minimum_team_support} tracks per team",
+            },
         ]
         failed = [condition["code"] for condition in conditions if not condition["passed"]]
         return {
@@ -2123,6 +2206,10 @@ class TeamColorClassifier:
             "failed_conditions": failed,
             "average_track_confidence": round(average_confidence, 4),
             "ambiguous_observation_ratio": round(ambiguous_ratio, 4),
+            "team_track_counts": {
+                str(team): team_track_counts[team]
+                for team in (1, 2)
+            },
             "similar_kits_detected": anchor_separation is not None and anchor_separation < 0.18,
             "shadow_invariant_color_distance": True,
         }
@@ -3439,6 +3526,7 @@ class PitchRadar:
         self.attempts = 0
         self.successes = 0
         self.assisted_calibrations = 0
+        self.bootstrap_keypoint_calibrations = 0
         self.wide_view_calibrations = 0
         self.rejected_local_calibrations = 0
         self.rejected_geometry = 0
@@ -3579,7 +3667,13 @@ class PitchRadar:
                 and span_y >= PITCH_WIDTH_CM * 0.40
                 and source_hull_area >= frame_area * 0.045
             )
-            if not is_wide_view:
+            is_bootstrap_view = self._is_constrained_bootstrap_candidate(
+                visible_keypoints=self.last_visible_keypoints,
+                span_x=span_x,
+                span_y=span_y,
+                source_hull_ratio=source_hull_area / frame_area,
+            )
+            if not is_wide_view and not is_bootstrap_view:
                 self.rejected_local_calibrations += 1
                 return
 
@@ -3613,29 +3707,63 @@ class PitchRadar:
                 end=None,
             )
             line_score = self._metric_line_alignment_score(frame, homography)
-            if (
+            normal_geometry_rejected = (
                 not np.isfinite(error)
                 or error > 260.0
                 or p90_error > 480.0
                 or not player_ok
                 or line_score < 0.30
-            ):
+            )
+            bootstrap_geometry_rejected = is_bootstrap_view and (
+                not np.isfinite(error)
+                or error > 140.0
+                or p90_error > 280.0
+                or not player_ok
+                or player_ratio < 0.72
+                or line_score < 0.45
+            )
+            if normal_geometry_rejected or bootstrap_geometry_rejected:
                 self.rejected_geometry += 1
                 return
+            calibration_mode = (
+                "constrained_bootstrap_keypoints"
+                if is_bootstrap_view and not is_wide_view
+                else "wide_view_keypoints"
+            )
             self._accept_homography(
                 homography,
                 frame_index,
                 error,
                 int(np.count_nonzero(inliers)),
-                "wide_view_keypoints",
+                calibration_mode,
                 player_ratio,
                 line_score=line_score,
             )
             self.last_line_alignment_score = round(line_score, 4)
-            self.wide_view_calibrations += 1
+            if calibration_mode == "wide_view_keypoints":
+                self.wide_view_calibrations += 1
+            else:
+                self.assisted_calibrations += 1
+                self.bootstrap_keypoint_calibrations += 1
             self.model_refreshes += 1
         except (AttributeError, IndexError, RuntimeError, TypeError, ValueError, cv2.error):
             self.errors += 1
+
+    def _is_constrained_bootstrap_candidate(
+        self,
+        *,
+        visible_keypoints: int,
+        span_x: float,
+        span_y: float,
+        source_hull_ratio: float,
+    ) -> bool:
+        return (
+            self.homography is None
+            and visible_keypoints >= 6
+            and span_x >= PITCH_LENGTH_CM * 0.40
+            and span_y >= PITCH_WIDTH_CM * 0.55
+            and source_hull_ratio >= 0.08
+        )
 
     def _visual_pitch_players(
         self,
@@ -5362,6 +5490,7 @@ class PitchRadar:
             "model_refreshes": self.model_refreshes,
             "temporal_blends": self.temporal_blends,
             "assisted_calibrations": self.assisted_calibrations,
+            "bootstrap_keypoint_calibrations": self.bootstrap_keypoint_calibrations,
             "wide_view_calibrations": self.wide_view_calibrations,
             "rejected_local_calibrations": self.rejected_local_calibrations,
             "rejected_geometry": self.rejected_geometry,
@@ -5649,6 +5778,8 @@ class MatchAnalysisPlusRunner:
         calibration_points: list[dict[str, float]] | None = None,
         team_context: dict[str, Any] | None = None,
         reuse_detections_object: str | None = None,
+        reuse_model_mode: str | None = None,
+        reuse_ball_detection_mode: str | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         requested_mode = (mode or "FULL_ANALYSIS").upper()
@@ -5715,6 +5846,8 @@ class MatchAnalysisPlusRunner:
                 reuse_detection_cache_path=(
                     reuse_detection_cache_path if reuse_detections_object else None
                 ),
+                reuse_model_mode=reuse_model_mode,
+                reuse_ball_detection_mode=reuse_ball_detection_mode,
                 progress_callback=progress_callback,
             )
 
@@ -5899,6 +6032,8 @@ class MatchAnalysisPlusRunner:
         team_context: dict[str, Any],
         detection_cache_path: Path,
         reuse_detection_cache_path: Path | None,
+        reuse_model_mode: str | None,
+        reuse_ball_detection_mode: str | None,
         progress_callback: Callable[[dict[str, Any]], None] | None,
     ) -> dict[str, Any]:
         start = perf_counter()
@@ -5920,10 +6055,25 @@ class MatchAnalysisPlusRunner:
             reuse_detection_cache_path,
             expected_start_frame=actual_start_frame,
         )
+        cached_specialized_ball_active = bool(
+            cached_objects_by_frame
+            and reuse_ball_detection_mode
+            in {
+                "dedicated_football_model_every_2_frames",
+                "cached_dedicated_ball_detections",
+            }
+        )
+        cached_specialized_player_active = bool(
+            cached_objects_by_frame and reuse_model_mode == "football-specialized-yolo"
+        )
         model = None
         if cached_objects_by_frame:
             self.model_mode = "cached-football-detections"
-            self.ball_detection_mode = "cached_ball_detections"
+            self.ball_detection_mode = (
+                "cached_dedicated_ball_detections"
+                if cached_specialized_ball_active
+                else "cached_shared_ball_detections"
+            )
             self.model_selection = {
                 "strategy": "reusable_detection_cache_v1",
                 "selected": "cached_detections",
@@ -5950,7 +6100,7 @@ class MatchAnalysisPlusRunner:
         ):
             dedicated_ball_model = self._load_model(self.ball_model_path)
             self.ball_detection_mode = "dedicated_football_model_every_2_frames"
-        else:
+        elif not cached_objects_by_frame:
             self.ball_detection_mode = "shared_football_detector"
         writer = cv2.VideoWriter(
             str(raw_output_path),
@@ -6070,7 +6220,10 @@ class MatchAnalysisPlusRunner:
             shape_valid_players = player_filter.filter(
                 [item for item in raw_objects if item.class_name == "player"],
                 frame,
-                specialized_detector=self.model_mode == "football-specialized-yolo",
+                specialized_detector=(
+                    self.model_mode == "football-specialized-yolo"
+                    or cached_specialized_player_active
+                ),
             )
             raw_balls = [item for item in raw_objects if item.class_name == "ball"]
             radar.update(
@@ -6377,7 +6530,9 @@ class MatchAnalysisPlusRunner:
             frames_processed=frames_processed,
             tracker_summary=ball_tracker_summary,
             filter_summary=ball_filter_summary,
-            dedicated_model_active=dedicated_ball_model is not None,
+            dedicated_model_active=(
+                dedicated_ball_model is not None or cached_specialized_ball_active
+            ),
         )
         team_identity_summary = team_classifier.summary()
         possession_summary = possession_tracker.summary()

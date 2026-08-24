@@ -99,11 +99,11 @@ The expanded release suite measured the current candidate on all four fixtures:
 | Tactical | Crossing | 0 | 100.000 | 100.000 | 0 |
 | Tactical | Crowding | 0 | 99.030 | 99.030 | 0 |
 | Tactical | Re-entry | 0 | 99.510 | 98.200 | 0 |
-| Close/moving | Crowding | 0 | 97.436 | 95.394 | 0 |
+| Close/moving | Crowding | 0 | 100.000 | 100.000 | 0 |
 | Tactical mid-match | Camera motion | 0 | 100.000 | 100.000 | 0 |
 
-The aggregate release conditions pass with minimum `IDF1 97.436`, minimum
-`HOTA 95.394`, zero critical ID switches, zero cross-team transfers, and both
+The aggregate release conditions pass with minimum `IDF1 99.029`, minimum
+`HOTA 98.2`, zero critical ID switches, zero cross-team transfers, and both
 required camera styles across five measured cases. These are selected-identity benchmark results, not a
 claim of perfect full-match tracking. The manifest in
 `benchmarks/tracking/release-gate-manifest.json` records the exact coverage and

@@ -6,6 +6,40 @@ from app.match_analysis_plus.runner import PitchRadar
 
 
 class PitchCalibrationQualityGateTests(unittest.TestCase):
+    def test_constrained_bootstrap_accepts_strong_partial_wide_view_only_before_lock(self) -> None:
+        radar = PitchRadar(model=None)
+
+        self.assertTrue(
+            radar._is_constrained_bootstrap_candidate(
+                visible_keypoints=7,
+                span_x=4515.0,
+                span_y=6800.0,
+                source_hull_ratio=0.20,
+            )
+        )
+
+        radar.homography = np.eye(3, dtype=np.float64)
+        self.assertFalse(
+            radar._is_constrained_bootstrap_candidate(
+                visible_keypoints=7,
+                span_x=4515.0,
+                span_y=6800.0,
+                source_hull_ratio=0.20,
+            )
+        )
+
+    def test_constrained_bootstrap_rejects_narrow_local_geometry(self) -> None:
+        radar = PitchRadar(model=None)
+
+        self.assertFalse(
+            radar._is_constrained_bootstrap_candidate(
+                visible_keypoints=7,
+                span_x=2200.0,
+                span_y=2600.0,
+                source_hull_ratio=0.03,
+            )
+        )
+
     def test_quality_gate_passes_stable_metric_sequence(self) -> None:
         radar = PitchRadar(model=None, stride=5)
         radar.homography = np.eye(3, dtype=np.float64)

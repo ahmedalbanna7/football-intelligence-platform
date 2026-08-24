@@ -648,6 +648,27 @@ class VisualLayerArtifactTests(unittest.TestCase):
 
 
 class PitchCalibrationV2Tests(unittest.TestCase):
+    def test_touchline_official_uses_bounded_metric_margin(self) -> None:
+        class MarginRadar:
+            def is_reliable(self, threshold: float = 0.58) -> bool:
+                return True
+
+            def contains_image_point(self, point, margin_cm: float = 0.0) -> bool:
+                return margin_cm >= 600.0
+
+            def playing_surface_mask(self, frame):
+                return np.zeros(frame.shape[:2], dtype=np.uint8)
+
+        frame = np.full((FRAME_HEIGHT, FRAME_WIDTH, 3), (45, 112, 45), dtype=np.uint8)
+        official = _player(220, 100, 1)
+        official.role_name = "referee"
+        pitch_filter = PitchOccupancyFilter()
+
+        output = pitch_filter.filter(0, [official], frame, MarginRadar())
+
+        self.assertEqual([1], [item.raw_track_id for item in output])
+        self.assertEqual(1, pitch_filter.summary()["kept_official_margin"])
+
     def test_outside_pitch_person_is_rejected_before_stable_tracking(self) -> None:
         radar = PitchRadar(None)
         radar.homography = np.array(

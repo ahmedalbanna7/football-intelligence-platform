@@ -60,6 +60,11 @@ class TrackingGroundTruthDraftRequest(BaseModel):
     critical: bool = False
 
 
+class TrackingCriticalRangeSuggestionRequest(BaseModel):
+    padding_frames: int = Field(default=20, ge=5, le=150)
+    max_ranges: int = Field(default=12, ge=1, le=50)
+
+
 class TrackingCriticalRange(BaseModel):
     start_frame: int = Field(ge=0)
     end_frame: int = Field(ge=0)
@@ -252,6 +257,8 @@ async def run_match_analysis_plus(
         raise HTTPException(status_code=404, detail="No uploaded video found for this match")
 
     reuse_detections_object: str | None = None
+    reuse_model_mode: str | None = None
+    reuse_ball_detection_mode: str | None = None
     if payload.reuse_run_id is not None:
         source_run = get_run_or_404(db, match_id, payload.reuse_run_id)
         if source_run.video_id != video.id:
@@ -261,6 +268,10 @@ async def run_match_analysis_plus(
         ).get("object_name")
         if not reuse_detections_object:
             raise HTTPException(status_code=400, detail="Selected run has no reusable detection cache")
+        reuse_ball_detection_mode = (source_run.summary_json or {}).get(
+            "ball_detection_mode"
+        )
+        reuse_model_mode = (source_run.summary_json or {}).get("model_mode")
 
     run = MatchAnalysisRun(
         match_id=match_id,
@@ -274,6 +285,8 @@ async def run_match_analysis_plus(
             "calibration_points": payload.calibration_points,
             "reuse_run_id": payload.reuse_run_id,
             "reuse_detections_object": reuse_detections_object,
+            "reuse_model_mode": reuse_model_mode,
+            "reuse_ball_detection_mode": reuse_ball_detection_mode,
             "runtime_progress": {
                 "stage": "queued",
                 "processed_frames": 0,
@@ -301,6 +314,8 @@ async def run_match_analysis_plus(
                 start_frame=max(payload.start_frame, 0),
                 calibration_points=payload.calibration_points,
                 reuse_detections_object=reuse_detections_object,
+                reuse_model_mode=reuse_model_mode,
+                reuse_ball_detection_mode=reuse_ball_detection_mode,
             )
         )
     except Exception as exc:
@@ -634,6 +649,25 @@ def build_tracking_ground_truth_draft(
             scenario=payload.scenario,
             camera_style=payload.camera_style,
             critical=payload.critical,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/{match_id}/runs/{run_id}/quality/critical-ranges/suggest")
+def suggest_tracking_critical_ranges(
+    match_id: int,
+    run_id: int,
+    payload: TrackingCriticalRangeSuggestionRequest,
+    db: Session = Depends(get_db),
+):
+    run = get_run_or_404(db, match_id, run_id)
+    try:
+        return quality_service.suggest_critical_ranges(
+            db=db,
+            run=run,
+            padding_frames=payload.padding_frames,
+            max_ranges=payload.max_ranges,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

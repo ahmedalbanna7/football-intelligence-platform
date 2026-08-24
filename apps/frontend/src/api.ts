@@ -235,6 +235,37 @@ export const api = {
     });
   },
 
+  suggestTrackingCriticalRanges(
+    matchId: number,
+    runId: number,
+    payload: { padding_frames?: number; max_ranges?: number } = {}
+  ) {
+    return request<{
+      run_id: number;
+      predictions_object: string;
+      engine: string;
+      status: string;
+      events_detected: number;
+      ranges: Array<{
+        start_frame: number;
+        end_frame: number;
+        peak_frame: number;
+        frame_count: number;
+        scenarios: string[];
+        track_ids: number[];
+        severity: number;
+        event_count: number;
+      }>;
+      instructions: string[];
+    }>(`/match-analysis-plus/${matchId}/runs/${runId}/quality/critical-ranges/suggest`, {
+      method: "POST",
+      json: {
+        padding_frames: payload.padding_frames ?? 20,
+        max_ranges: payload.max_ranges ?? 12
+      }
+    });
+  },
+
   buildTrackingReleasePlan(
     matchId: number,
     payload: {

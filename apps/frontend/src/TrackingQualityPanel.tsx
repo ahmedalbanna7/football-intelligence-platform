@@ -95,6 +95,7 @@ export function TrackingQualityPanel({
   const [releaseClipSize, setReleaseClipSize] = useState(750);
   const [releaseOverlap, setReleaseOverlap] = useState(0);
   const [releasePlan, setReleasePlan] = useState<Awaited<ReturnType<typeof api.buildTrackingReleasePlan>> | null>(null);
+  const [criticalRanges, setCriticalRanges] = useState<Awaited<ReturnType<typeof api.suggestTrackingCriticalRanges>> | null>(null);
   const [releaseRunningIndex, setReleaseRunningIndex] = useState<number | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
@@ -290,7 +291,12 @@ export function TrackingQualityPanel({
       const response = await api.buildTrackingReleasePlan(matchId, {
         clip_size: releaseClipSize,
         overlap_frames: releaseOverlap,
-        camera_style: groundTruthCamera
+        camera_style: groundTruthCamera,
+        critical_ranges: criticalRanges?.ranges.map((range) => ({
+          start_frame: range.start_frame,
+          end_frame: range.end_frame,
+          scenario: range.scenarios[0] || "critical"
+        }))
       });
       setReleasePlan(response);
       setMessage(`${response.clips_count} release clips planned across ${response.source_frames} source frames.`);
@@ -299,6 +305,29 @@ export function TrackingQualityPanel({
     } finally {
       setBusy(false);
     }
+  }
+
+  async function suggestCriticalRanges() {
+    setBusy(true);
+    setMessage("Finding crossings, crowding, re-entry, and identity-risk windows...");
+    try {
+      const response = await api.suggestTrackingCriticalRanges(matchId, runId);
+      setCriticalRanges(response);
+      setMessage(`${response.ranges.length} critical windows found from ${response.events_detected} review signals.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not suggest critical clips.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function selectCriticalRange(range: NonNullable<typeof criticalRanges>["ranges"][number]) {
+    setGroundTruthStart(range.start_frame);
+    setGroundTruthEnd(range.end_frame);
+    setGroundTruthScenario(range.scenarios[0] || "crossing");
+    setGroundTruthCritical(true);
+    seekToFrame(range.peak_frame);
+    setMessage(`Ground-truth window selected: F${range.start_frame}-F${range.end_frame}.`);
   }
 
   async function queueReleaseClip(clip: NonNullable<typeof releasePlan>["clips"][number]) {
@@ -416,6 +445,7 @@ export function TrackingQualityPanel({
             <div><span className="eyebrow">Full-video coverage</span><strong>500-1000 frame clip plan</strong></div>
             <label><span>Clip size</span><input className="input" max="1000" min="500" onChange={(event) => setReleaseClipSize(Number(event.target.value))} step="50" type="number" value={releaseClipSize} /></label>
             <label><span>Overlap</span><input className="input" max="250" min="0" onChange={(event) => setReleaseOverlap(Number(event.target.value))} step="25" type="number" value={releaseOverlap} /></label>
+            <button className="button" disabled={busy} onClick={() => void suggestCriticalRanges()} type="button"><AlertTriangle size={16} /> Find critical clips</button>
             <button className="button" disabled={busy || releaseOverlap >= releaseClipSize} onClick={() => void buildReleasePlan()} type="button"><FileCheck2 size={16} /> Build plan</button>
             {releasePlan ? <span className="release-plan-result"><strong>{releasePlan.clips_count}</strong> clips · {releasePlan.source_frames} frames · {releasePlan.fps} FPS</span> : null}
             {releasePlan ? (
@@ -431,6 +461,23 @@ export function TrackingQualityPanel({
               </div>
             ) : null}
           </div>
+
+          {criticalRanges?.ranges.length ? (
+            <div className="critical-range-review">
+              <div className="critical-range-heading">
+                <div><span className="eyebrow">Automated triage</span><strong>Critical identity windows</strong></div>
+                <span>{criticalRanges.ranges.length} windows · {criticalRanges.events_detected} signals</span>
+              </div>
+              <div className="critical-range-grid">
+                {criticalRanges.ranges.map((range) => (
+                  <button key={`${range.start_frame}-${range.end_frame}`} onClick={() => selectCriticalRange(range)} type="button">
+                    <span><strong>F{range.start_frame}-F{range.end_frame}</strong><small>Peak F{range.peak_frame} · Tracks {range.track_ids.join(", ")}</small></span>
+                    <span className={range.severity >= 0.9 ? "high" : "medium"}>{range.scenarios.map(titleCase).join(", ")}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
 
           <div className="quality-ground-truth-builder">
             <label><span>Clip start</span><input className="input" min="0" onChange={(event) => setGroundTruthStart(Number(event.target.value))} type="number" value={groundTruthStart} /></label>
