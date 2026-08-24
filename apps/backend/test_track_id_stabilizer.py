@@ -454,8 +454,8 @@ class BallStaticFilterTests(unittest.TestCase):
                 )
             )
 
-        self.assertEqual([], outputs[0])
-        self.assertTrue(all(len(output) == 1 for output in outputs[1:]))
+        self.assertTrue(all(len(output) == 1 for output in outputs))
+        self.assertEqual(1, ball_filter.summary()["forwarded_tentative_observations"])
         self.assertEqual(0, ball_filter.summary()["filtered_static_candidates"])
 
     def test_ball_near_player_is_kept_immediately(self) -> None:
@@ -736,6 +736,26 @@ class BallTrackingV2Tests(unittest.TestCase):
         self.assertFalse(observed[0].is_predicted)
         self.assertTrue(predicted[0].is_predicted)
 
+    def test_optical_flow_follows_ball_during_short_detector_gap(self) -> None:
+        tracker = BallTrackerV2(max_interpolation_frames=3)
+        first_frame = np.zeros((240, FRAME_WIDTH, 3), dtype=np.uint8)
+        second_frame = np.zeros_like(first_frame)
+        third_frame = np.zeros_like(first_frame)
+        cv2.circle(first_frame, (107, 107), 5, (255, 255, 255), -1)
+        cv2.circle(second_frame, (115, 107), 5, (255, 255, 255), -1)
+        cv2.circle(third_frame, (123, 107), 5, (255, 255, 255), -1)
+        first = AnalysisObject(4, "ball", [100, 100, 114, 114], 0.9, raw_track_id=4)
+        second = AnalysisObject(4, "ball", [108, 100, 122, 114], 0.9, raw_track_id=4)
+
+        tracker.update(0, [first], [], FRAME_WIDTH, frame=first_frame)
+        tracker.update(1, [second], [], FRAME_WIDTH, frame=second_frame)
+        predicted = tracker.update(2, [], [], FRAME_WIDTH, frame=third_frame)
+
+        predicted_x = (predicted[0].bbox[0] + predicted[0].bbox[2]) / 2
+        self.assertTrue(predicted[0].is_predicted)
+        self.assertGreater(predicted_x, 119.0)
+        self.assertGreaterEqual(tracker.summary()["optical_flow_successes"], 1)
+
     def test_ball_track_reacquires_after_a_long_detector_gap(self) -> None:
         tracker = BallTrackerV2(max_interpolation_frames=3)
         first = AnalysisObject(1, "ball", [100, 100, 114, 114], 0.9)
@@ -753,6 +773,44 @@ class BallTrackingV2Tests(unittest.TestCase):
         self.assertEqual(1, tracker.summary()["expired_track_resets"])
         self.assertEqual(2, tracker.summary()["reinitializations"])
 
+    def test_ball_tracker_rejects_player_body_false_positive(self) -> None:
+        tracker = BallTrackerV2(max_interpolation_frames=3)
+        player = _player(180, 100, 7)
+        torso_false = AnalysisObject(1, "ball", [196, 128, 212, 144], 0.96)
+        real_ball = AnalysisObject(2, "ball", [225, 212, 237, 224], 0.72)
+        next_real_ball = AnalysisObject(3, "ball", [229, 212, 241, 224], 0.74)
+
+        self.assertEqual(
+            [],
+            tracker.update(0, [torso_false, real_ball], [player], FRAME_WIDTH),
+        )
+        observed = tracker.update(
+            1,
+            [torso_false, next_real_ball],
+            [player],
+            FRAME_WIDTH,
+        )
+
+        self.assertEqual(1, len(observed))
+        self.assertGreater((observed[0].bbox[0] + observed[0].bbox[2]) / 2, 220)
+        self.assertGreaterEqual(tracker.summary()["player_body_rejections"], 2)
+
+    def test_ball_tracker_refuses_cross_pitch_false_jump(self) -> None:
+        tracker = BallTrackerV2(max_interpolation_frames=3)
+        first = AnalysisObject(1, "ball", [100, 100, 114, 114], 0.9)
+        second = AnalysisObject(2, "ball", [108, 100, 122, 114], 0.9)
+        false_jump = AnalysisObject(3, "ball", [500, 100, 514, 114], 0.99)
+        pitch_transform = lambda point: (point[0] * 10.0, point[1] * 10.0)
+
+        tracker.update(0, [first], [], FRAME_WIDTH, pitch_transform)
+        tracker.update(1, [second], [], FRAME_WIDTH, pitch_transform)
+        output = tracker.update(2, [false_jump], [], FRAME_WIDTH, pitch_transform)
+
+        self.assertEqual(1, len(output))
+        self.assertTrue(output[0].is_predicted)
+        self.assertLess((output[0].bbox[0] + output[0].bbox[2]) / 2, 200)
+        self.assertGreaterEqual(tracker.summary()["metric_jump_rejections"], 1)
+
     def test_possession_is_confirmed_for_nearest_player(self) -> None:
         tracker = PossessionTracker(confirmation_frames=1)
         player = _player(180, 100, 7)
@@ -763,6 +821,60 @@ class BallTrackingV2Tests(unittest.TestCase):
 
         self.assertEqual(7, owner)
         self.assertEqual(2, team)
+
+    def test_goalkeeper_receives_possession_when_closest_to_ball(self) -> None:
+        tracker = PossessionTracker(confirmation_frames=1)
+        midfielder = _player(100, 100, 7)
+        goalkeeper = _player(400, 100, 40)
+        goalkeeper.role_name = "goalkeeper"
+        ball = AnalysisObject(1, "ball", [414, 212, 428, 226], 0.9)
+        pitch_transform = lambda point: (point[0] * 10.0, point[1] * 10.0)
+
+        owner, team = tracker.update(
+            0,
+            [midfielder, goalkeeper],
+            [ball],
+            {7: 1, 40: 2},
+            pitch_transform,
+        )
+
+        self.assertEqual(40, owner)
+        self.assertEqual(2, team)
+
+    def test_far_observed_ball_does_not_keep_stale_owner(self) -> None:
+        tracker = PossessionTracker(confirmation_frames=1)
+        player = _player(100, 100, 7)
+        controlled_ball = AnalysisObject(1, "ball", [114, 212, 128, 226], 0.95)
+        free_ball = AnalysisObject(1, "ball", [500, 212, 514, 226], 0.95)
+        pitch_transform = lambda point: (point[0] * 10.0, point[1] * 10.0)
+
+        self.assertEqual(
+            (7, 1),
+            tracker.update(0, [player], [controlled_ball], {7: 1}, pitch_transform),
+        )
+        self.assertEqual(
+            (None, None),
+            tracker.update(1, [player], [free_ball], {7: 1}, pitch_transform),
+        )
+        self.assertEqual(
+            (None, None),
+            tracker.update(2, [player], [], {7: 1}, pitch_transform),
+        )
+        self.assertEqual(1, tracker.summary()["far_ball_releases"])
+
+    def test_possession_summary_marks_sparse_assignment_for_review(self) -> None:
+        tracker = PossessionTracker(confirmation_frames=1, hold_frames=0)
+        player = _player(100, 100, 7)
+        ball = AnalysisObject(1, "ball", [114, 212, 128, 226], 0.95)
+        pitch_transform = lambda point: (point[0] * 10.0, point[1] * 10.0)
+
+        tracker.update(0, [player], [ball], {7: 1}, pitch_transform)
+        for frame_index in range(1, 10):
+            tracker.update(frame_index, [player], [], {7: 1}, pitch_transform)
+
+        summary = tracker.summary()
+        self.assertLess(summary["assigned_coverage"], 0.15)
+        self.assertEqual("needs_review", summary["quality_status"])
 
     def test_officials_and_outside_staff_cannot_receive_possession(self) -> None:
         tracker = PossessionTracker(confirmation_frames=1)
@@ -795,8 +907,8 @@ class BallTrackingV2Tests(unittest.TestCase):
         receiver_ball = AnalysisObject(1, "ball", [414, 212, 428, 226], 0.95)
 
         tracker.update(0, [passer, receiver], [passer_ball], {7: 1, 8: 1}, pitch_transform)
-        tracker.update(1, [passer, receiver], [released_ball], {7: 1, 8: 1}, pitch_transform)
-        tracker.update(2, [passer, receiver], [receiver_ball], {7: 1, 8: 1}, pitch_transform)
+        tracker.update(15, [passer, receiver], [released_ball], {7: 1, 8: 1}, pitch_transform)
+        tracker.update(30, [passer, receiver], [receiver_ball], {7: 1, 8: 1}, pitch_transform)
 
         summary = tracker.summary()
         self.assertEqual(1, summary["completed_passes"])
@@ -813,19 +925,73 @@ class BallTrackingV2Tests(unittest.TestCase):
         second_ball = AnalysisObject(1, "ball", [414, 212, 428, 226], 0.95)
 
         tracker.update(0, [first, second], [first_ball], {7: 1, 8: 2}, pitch_transform)
-        tracker.update(1, [first, second], [second_ball], {7: 1, 8: 2}, pitch_transform)
+        tracker.update(30, [first, second], [second_ball], {7: 1, 8: 2}, pitch_transform)
 
         summary = tracker.summary()
         self.assertEqual(1, summary["turnovers"])
         self.assertEqual("turnover", summary["events"][0]["type"])
 
+    def test_implausible_ball_speed_is_not_reported_as_a_pass(self) -> None:
+        tracker = PossessionTracker(confirmation_frames=1, fps=25.0)
+        passer = _player(100, 100, 7)
+        receiver = _player(400, 100, 8)
+        pitch_transform = lambda point: (point[0] * 10.0, point[1] * 10.0)
+        first_ball = AnalysisObject(1, "ball", [114, 212, 128, 226], 0.95)
+        second_ball = AnalysisObject(1, "ball", [414, 212, 428, 226], 0.95)
+
+        tracker.update(0, [passer, receiver], [first_ball], {7: 1, 8: 1}, pitch_transform)
+        tracker.update(1, [passer, receiver], [second_ball], {7: 1, 8: 1}, pitch_transform)
+
+        summary = tracker.summary()
+        self.assertEqual(0, summary["completed_passes"])
+        self.assertEqual(0, summary["transitions"])
+        self.assertEqual("unverified_reacquisition", summary["events"][0]["type"])
+        self.assertFalse(summary["events"][0]["verified"])
+
+    def test_long_ball_gap_starts_new_possession_without_false_transition(self) -> None:
+        tracker = PossessionTracker(
+            confirmation_frames=1,
+            hold_frames=0,
+            fps=10.0,
+            maximum_link_gap_seconds=1.0,
+        )
+        first = _player(100, 100, 7)
+        second = _player(400, 100, 8)
+        pitch_transform = lambda point: (point[0] * 10.0, point[1] * 10.0)
+        first_ball = AnalysisObject(1, "ball", [114, 212, 128, 226], 0.95)
+        far_ball = AnalysisObject(1, "ball", [270, 212, 284, 226], 0.90)
+        second_ball = AnalysisObject(1, "ball", [414, 212, 428, 226], 0.95)
+
+        tracker.update(0, [first, second], [first_ball], {7: 1, 8: 2}, pitch_transform)
+        tracker.update(1, [first, second], [far_ball], {7: 1, 8: 2}, pitch_transform)
+        for frame_index in range(2, 13):
+            tracker.update(frame_index, [first, second], [], {7: 1, 8: 2}, pitch_transform)
+        owner, team = tracker.update(
+            13,
+            [first, second],
+            [second_ball],
+            {7: 1, 8: 2},
+            pitch_transform,
+        )
+
+        summary = tracker.summary()
+        self.assertEqual((8, 2), (owner, team))
+        self.assertEqual([], summary["events"])
+        self.assertEqual(1, summary["stale_possession_resets"])
+
     def test_ball_quality_gate_requires_specialized_model_and_metric_path(self) -> None:
         runner = MatchAnalysisPlusRunner()
         tracker_summary = {
-            "observed_frames": 10,
-            "pitch_samples": 10,
+            "observed_frames": 20,
+            "interpolated_frames": 10,
+            "pitch_samples": 30,
             "maximum_interpolation_streak": 2,
-            "max_interpolation_frames": 10,
+            "max_interpolation_frames": 6,
+            "player_body_rejections": 4,
+            "metric_jump_rejections": 2,
+            "optical_flow_attempts": 12,
+            "optical_flow_successes": 8,
+            "optical_flow_rejections": 4,
         }
         filter_summary = {
             "penalty_spot_rejections": 3,
@@ -833,11 +999,29 @@ class BallTrackingV2Tests(unittest.TestCase):
         }
 
         passed = runner._ball_quality_gate(100, tracker_summary, filter_summary, True)
+        possession_ready = runner._ball_quality_gate(
+            100,
+            tracker_summary,
+            filter_summary,
+            True,
+            {"assigned_coverage": 0.35},
+        )
         blocked = runner._ball_quality_gate(100, tracker_summary, filter_summary, False)
 
         self.assertEqual("passed", passed["status"])
+        self.assertTrue(possession_ready["possession_ready"])
         self.assertEqual("needs_review", blocked["status"])
         self.assertIn("specialized_ball_model", blocked["failed_conditions"])
+
+        low_coverage = runner._ball_quality_gate(
+            100,
+            {**tracker_summary, "observed_frames": 2, "interpolated_frames": 2},
+            filter_summary,
+            True,
+        )
+        self.assertEqual("needs_review", low_coverage["status"])
+        self.assertIn("observed_ball_coverage", low_coverage["failed_conditions"])
+        self.assertIn("tracked_ball_coverage", low_coverage["failed_conditions"])
 
 
 class ModelBundleSelectionTests(unittest.TestCase):

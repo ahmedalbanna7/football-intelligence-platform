@@ -59,6 +59,9 @@ class Settings(BaseSettings):
     MATCH_ANALYSIS_BALL_MODEL_FALLBACK_PATH: str = (
         "models/football-player-detection.pt"
     )
+    MATCH_ANALYSIS_BALL_IMAGE_SIZE: int = 1280
+    MATCH_ANALYSIS_BALL_CONFIDENCE: float = 0.08
+    MATCH_ANALYSIS_BALL_DETECTION_STRIDE: int = 1
     MATCH_ANALYSIS_IMAGE_SIZE: int = 960
     MATCH_ANALYSIS_CONFIDENCE: float = 0.20
     MATCH_ANALYSIS_PITCH_MODEL_PATH: str = "models/football-pitch-v2.pt"

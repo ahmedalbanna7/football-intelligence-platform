@@ -19,6 +19,8 @@ The project is built as a practical foundation for football clubs, academies, an
 - Per-clip Tracking Release Gate with cross-team identity checks and multi-camera suite coverage.
 - Participant Role Classifier v2 for players, goalkeepers, referees, assistant referees, and outside staff.
 - Static-field-marker ball filtering to reduce false ball detections.
+- Ball Tracking v4 with dedicated per-frame detection, metric/image continuity,
+  optical flow, body-overlap rejection, and possession quality gates.
 - Team profile and opponent team management.
 - Player roster, shirt number, tactical zone, and assignment data models.
 - Match analysis run history with saved artifacts.
@@ -93,6 +95,8 @@ flowchart TD
     FrameRead --> Detector["YOLO Detector"]
     Detector --> RawObjects["Frame Observations"]
     RawObjects --> BallFilter["Ball Static Marker Filter"]
+    BallFilter --> BallTracker["Ball Tracker v4"]
+    BallTracker --> PossessionGate["Possession Quality Gate"]
     RawObjects --> Tracker["BoT-SORT + Re-ID"]
     Tracker --> Stabilizer["Stable Track ID Layer"]
     Stabilizer --> QualityGate["Tracking Quality Gate"]
