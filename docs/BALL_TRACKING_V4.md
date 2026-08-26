@@ -1,4 +1,4 @@
-# Ball Tracking v4
+# Ball Tracking v4.1
 
 Ball Tracking v4 is the guarded single-ball pipeline used by `Match Analysis +`.
 Its priority is identity correctness: when the ball cannot be located reliably,
@@ -11,13 +11,21 @@ distant player or a static pitch feature.
 2. Static field markers, penalty spots, and out-of-pitch candidates are filtered.
 3. Candidate size, shape, player-body overlap, and player-foot proximity are checked.
 4. Image-space Kalman motion and metric pitch-space motion score each candidate.
-5. Forward/backward Lucas-Kanade optical flow bridges short detector gaps.
-6. Cross-pitch jumps and ambiguous reacquisitions are rejected.
-7. Predictions are limited to six frames and cannot create a new possession owner.
+5. Ground and airborne motion are tracked as separate states. An airborne ball
+   follows image continuity even when its ground-plane projection is misleading.
+6. Forward/backward Lucas-Kanade optical flow bridges detector gaps. Ground
+   predictions remain limited to six frames; verified airborne flow may bridge
+   up to 36 frames.
+7. A ballistic trajectory gate rejects candidates that drift away from the
+   last verified flight path, including white boots and kit fragments.
+8. A dormant track keeps its identity for up to 90 frames. A distant candidate
+   can replace it only after two strong observations with real displacement;
+   a stationary high-confidence candidate cannot take over the track.
+9. Cross-pitch jumps and ambiguous reacquisitions are rejected.
 
-Measured observations use a filled yellow triangle. Short predictions use an
-outlined yellow triangle. No triangle means that the pipeline did not have a
-safe ball location for that frame.
+Measured observations use a filled yellow triangle. Optical-flow or Kalman
+predictions use an outlined yellow triangle. No triangle means that the
+pipeline did not have a safe ball location for that frame.
 
 ## Possession safeguards
 
@@ -49,6 +57,28 @@ The same 750-frame `08fd33_4.mp4` segment was processed before and after v4.
 Run 74 passed the ball gate. Two geometrically impossible transitions were kept
 only as low-confidence `unverified_reacquisition` diagnostics and excluded from
 the pass and turnover totals.
+
+### Airborne regression validation
+
+Run 82 processed all 750 frames of `08fd33_4.mp4` with the v4.1 tracker and the
+cached dedicated-ball detections. The critical pass in frames 564-749 was
+checked against the rendered video and image-space path:
+
+| Metric | Run 82 |
+| --- | ---: |
+| Observed ball frames | 307 |
+| Tracked ball frames | 584 |
+| Interpolated frames | 277 |
+| Airborne observed frames | 41 |
+| Maximum airborne prediction streak | 35 / 36 |
+| Airborne body pass-throughs | 13 |
+| Ballistic trajectory rejections | 7 |
+| Dormant-track challenger promotions | 4 |
+
+The marker reacquired the real ball at frame 580, crossed in front of the
+player without attaching to the player body, and remained on the airborne path
+toward the goalkeeper through frame 749. The prior false path around image
+coordinates `x=925..1050` was not present in the final run.
 
 ## Remaining limitation
 

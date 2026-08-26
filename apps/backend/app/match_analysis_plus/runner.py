@@ -3018,11 +3018,28 @@ class BallStaticFilter:
 
 
 class BallTrackerV4:
-    """Single-ball tracker combining image Kalman and metric-pitch continuity."""
+    """Single-ball tracker with guarded ground and airborne motion states."""
 
-    def __init__(self, max_interpolation_frames: int = 6) -> None:
+    def __init__(
+        self,
+        max_interpolation_frames: int = 6,
+        max_airborne_interpolation_frames: int = 36,
+        max_reacquisition_frames: int = 90,
+    ) -> None:
         self.max_interpolation_frames = max_interpolation_frames
+        self.max_airborne_interpolation_frames = max(
+            max_interpolation_frames,
+            max_airborne_interpolation_frames,
+        )
+        self.max_reacquisition_frames = max(
+            max_interpolation_frames + 1,
+            max_reacquisition_frames,
+        )
         self.position: np.ndarray | None = None
+        self.flow_position: np.ndarray | None = None
+        self.observed_position: np.ndarray | None = None
+        self.observed_velocity = np.zeros(2, dtype=np.float64)
+        self.observed_position_frame = -1
         self.velocity = np.zeros(2, dtype=np.float64)
         self.kalman_state: np.ndarray | None = None
         self.kalman_covariance = np.diag([120.0, 120.0, 36.0, 36.0]).astype(np.float64)
@@ -3054,6 +3071,29 @@ class BallTrackerV4:
         self.optical_flow_successes = 0
         self.optical_flow_rejections = 0
         self.predicted_body_suppressions = 0
+        self.dormant_reacquisitions = 0
+        self.airborne_entries = 0
+        self.airborne_observed_frames = 0
+        self.metric_conflict_acceptances = 0
+        self.ground_reacquisitions = 0
+        self.airborne_body_pass_throughs = 0
+        self.airborne_trajectory_rejections = 0
+        self.airborne_flow_drift_rejections = 0
+        self.ground_contact_confirmations = 0
+        self.challenger_position: np.ndarray | None = None
+        self.challenger_origin: np.ndarray | None = None
+        self.challenger_first_frame = -1
+        self.challenger_last_frame = -1
+        self.challenger_hits = 0
+        self.challenger_strong_hits = 0
+        self.challenger_max_displacement = 0.0
+        self.challengers_started = 0
+        self.challenger_promotions = 0
+        self.challenger_static_rejections = 0
+        self.challenger_reinitialization_ready = False
+        self.flight_mode = False
+        self.flight_clear_hits = 0
+        self.selected_measurement_details: dict[str, Any] = {}
         self.previous_gray: np.ndarray | None = None
         self.track_id = 1
         self.pitch_path: list[dict[str, float | int | bool]] = []
@@ -3070,34 +3110,68 @@ class BallTrackerV4:
     ) -> list[AnalysisObject]:
         self._expire_lost_track(frame_index)
         predicted = self._predict(frame_index)
+        trajectory_prediction = self._trajectory_prediction(frame_index)
         current_gray = (
             cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             if frame is not None
             else None
         )
         flow_prediction = self._optical_flow_prediction(current_gray, frame_width)
+        if (
+            flow_prediction is not None
+            and self.flight_mode
+            and trajectory_prediction is not None
+            and float(np.linalg.norm(flow_prediction - trajectory_prediction))
+            > self._trajectory_gate(frame_index, frame_width)
+        ):
+            flow_prediction = None
+            self.optical_flow_rejections += 1
+            self.airborne_flow_drift_rejections += 1
+        flow_prediction_valid = flow_prediction is not None
         if flow_prediction is not None:
-            predicted = (
-                flow_prediction
-                if predicted is None
-                else flow_prediction * 0.72 + predicted * 0.28
-            )
+            self.optical_flow_successes += 1
+            self.flow_position = flow_prediction.copy()
+            if self.flight_mode and trajectory_prediction is not None:
+                predicted = flow_prediction * 0.72 + trajectory_prediction * 0.28
+            else:
+                predicted = (
+                    flow_prediction
+                    if predicted is None
+                    else flow_prediction * 0.72 + predicted * 0.28
+                )
             if self.predicted_state is not None:
                 self.predicted_state[:2] = predicted
-        measurement = self._select_measurement(
+        challenger = self._consider_global_challenger(
             frame_index,
             detections,
-            predicted,
-            players,
             frame_width,
-            pitch_transform,
         )
+        if challenger is not None:
+            self._prepare_challenger_reinitialization()
+            predicted = None
+            measurement = challenger
+        else:
+            measurement = self._select_measurement(
+                frame_index,
+                detections,
+                predicted,
+                players,
+                frame_width,
+                pitch_transform,
+            )
         if measurement is not None:
             center = self._center(measurement.bbox)
             measured = np.array(center, dtype=np.float64)
             measured_pitch = self._pitch_measurement(measured, pitch_transform)
+            previous_gap = (
+                frame_index - self.last_observed_frame
+                if self.last_observed_frame >= 0
+                else 0
+            )
             if self.position is None:
-                if not self._confirm_initial_measurement(
+                challenger_confirmed = self.challenger_reinitialization_ready
+                self.challenger_reinitialization_ready = False
+                if not challenger_confirmed and not self._confirm_initial_measurement(
                     frame_index,
                     measured,
                     measured_pitch,
@@ -3120,7 +3194,13 @@ class BallTrackerV4:
                     measured,
                     float(measurement.confidence or 0.5),
                 )
-            self._update_pitch_state(frame_index, measured_pitch)
+            if previous_gap > self.max_interpolation_frames:
+                self.dormant_reacquisitions += 1
+            self._update_flight_state(frame_index, measured_pitch)
+            self._update_observed_trajectory(frame_index, measured, frame_width)
+            if not self.flight_mode:
+                self._update_pitch_state(frame_index, measured_pitch)
+            self.flow_position = measured.copy()
             self.size = self.size * 0.80 + np.array(
                 [
                     max(2.0, measurement.bbox[2] - measurement.bbox[0]),
@@ -3131,6 +3211,8 @@ class BallTrackerV4:
             self.last_frame = frame_index
             self.last_observed_frame = frame_index
             self.confidence = min(0.99, self.confidence * 0.72 + float(measurement.confidence or 0.5) * 0.28 + 0.18)
+            if self.flight_mode:
+                self.confidence = max(self.confidence, 0.42)
             self.observed_frames += 1
             self.current_interpolation_streak = 0
             output = self._object(measurement.raw_track_id, predicted=False)
@@ -3143,7 +3225,12 @@ class BallTrackerV4:
             self._remember_gray(current_gray)
             return []
         gap = frame_index - self.last_observed_frame
-        if gap > self.max_interpolation_frames:
+        interpolation_limit = (
+            self.max_airborne_interpolation_frames
+            if self.flight_mode and flow_prediction_valid
+            else self.max_interpolation_frames
+        )
+        if gap > interpolation_limit:
             self.confidence *= 0.75
             self._remember_gray(current_gray)
             return []
@@ -3155,14 +3242,16 @@ class BallTrackerV4:
         self.kalman_covariance = self.predicted_covariance.copy()
         self.position = self.kalman_state[:2].copy()
         self.velocity = self.kalman_state[2:].copy()
-        self._predict_pitch_state(frame_index)
+        if not self.flight_mode:
+            self._predict_pitch_state(frame_index)
         self.last_frame = frame_index
-        self.confidence *= 0.82
-        if self.confidence < 0.22:
+        self.confidence *= 0.97 if self.flight_mode and flow_prediction_valid else 0.82
+        confidence_floor = 0.14 if self.flight_mode and flow_prediction_valid else 0.22
+        if self.confidence < confidence_floor:
             self._remember_gray(current_gray)
             return []
         _, overlaps_body = self._player_relation(self.position, players, frame_width)
-        if overlaps_body:
+        if overlaps_body and not (self.flight_mode and flow_prediction_valid):
             self.predicted_body_suppressions += 1
             self.confidence *= 0.72
             self._remember_gray(current_gray)
@@ -3190,6 +3279,8 @@ class BallTrackerV4:
             "expired_track_resets": self.expired_track_resets,
             "current_confidence": round(self.confidence, 4),
             "max_interpolation_frames": self.max_interpolation_frames,
+            "max_airborne_interpolation_frames": self.max_airborne_interpolation_frames,
+            "max_reacquisition_frames": self.max_reacquisition_frames,
             "maximum_interpolation_streak": self.maximum_interpolation_streak,
             "mahalanobis_rejections": self.mahalanobis_rejections,
             "metric_jump_rejections": self.metric_jump_rejections,
@@ -3200,6 +3291,19 @@ class BallTrackerV4:
             "optical_flow_successes": self.optical_flow_successes,
             "optical_flow_rejections": self.optical_flow_rejections,
             "predicted_body_suppressions": self.predicted_body_suppressions,
+            "dormant_reacquisitions": self.dormant_reacquisitions,
+            "airborne_entries": self.airborne_entries,
+            "airborne_observed_frames": self.airborne_observed_frames,
+            "metric_conflict_acceptances": self.metric_conflict_acceptances,
+            "ground_reacquisitions": self.ground_reacquisitions,
+            "airborne_body_pass_throughs": self.airborne_body_pass_throughs,
+            "airborne_trajectory_rejections": self.airborne_trajectory_rejections,
+            "airborne_flow_drift_rejections": self.airborne_flow_drift_rejections,
+            "ground_contact_confirmations": self.ground_contact_confirmations,
+            "challengers_started": self.challengers_started,
+            "challenger_promotions": self.challenger_promotions,
+            "challenger_static_rejections": self.challenger_static_rejections,
+            "flight_mode_active": self.flight_mode,
             "state_covariance_trace": round(float(np.trace(self.kalman_covariance)), 3),
             "metric_state_active": self.pitch_position is not None,
             "pitch_samples": len(self.pitch_path),
@@ -3237,13 +3341,13 @@ class BallTrackerV4:
         if (
             current_gray is None
             or self.previous_gray is None
-            or self.position is None
+            or self.flow_position is None
             or self.previous_gray.shape != current_gray.shape
         ):
             return None
         self.optical_flow_attempts += 1
         previous_point = np.array(
-            [[[float(self.position[0]), float(self.position[1])]]],
+            [[[float(self.flow_position[0]), float(self.flow_position[1])]]],
             dtype=np.float32,
         )
         criteria = (
@@ -3290,7 +3394,7 @@ class BallTrackerV4:
         forward_backward_error = float(
             np.linalg.norm(backward - previous_point.reshape(-1, 2)[0])
         )
-        displacement = float(np.linalg.norm(forward - self.position))
+        displacement = float(np.linalg.norm(forward - self.flow_position))
         if (
             forward_backward_error > 2.5
             or displacement > max(45.0, frame_width * 0.07)
@@ -3298,12 +3402,188 @@ class BallTrackerV4:
         ):
             self.optical_flow_rejections += 1
             return None
-        self.optical_flow_successes += 1
         return forward
 
     def _remember_gray(self, current_gray: np.ndarray | None) -> None:
         if current_gray is not None:
             self.previous_gray = current_gray
+
+    def _consider_global_challenger(
+        self,
+        frame_index: int,
+        detections: list[AnalysisObject],
+        frame_width: int,
+    ) -> AnalysisObject | None:
+        dormant = (
+            self.position is not None
+            and self.last_observed_frame >= 0
+            and frame_index - self.last_observed_frame > self.max_interpolation_frames
+        )
+        if not dormant or self.flight_mode:
+            self._clear_challenger()
+            return None
+
+        if (
+            self.challenger_position is not None
+            and frame_index - self.challenger_last_frame > 24
+        ):
+            if self.challenger_hits >= 2 and self.challenger_max_displacement < 30.0:
+                self.challenger_static_rejections += 1
+            self._clear_challenger()
+
+        eligible = []
+        for detection in detections:
+            confidence = float(detection.confidence or 0.0)
+            width = max(1.0, detection.bbox[2] - detection.bbox[0])
+            height = max(1.0, detection.bbox[3] - detection.bbox[1])
+            aspect = width / height
+            if (
+                confidence < 0.32
+                or not 0.45 <= aspect <= 1.75
+                or max(width, height) > max(28.0, frame_width * 0.045)
+            ):
+                continue
+            eligible.append(detection)
+        if not eligible:
+            return None
+
+        candidate = None
+        if self.challenger_position is not None:
+            elapsed = max(1, frame_index - self.challenger_last_frame)
+            link_gate = max(96.0, frame_width * 0.05) + elapsed * max(
+                8.0,
+                frame_width * 0.006,
+            )
+            linked = [
+                (
+                    float(
+                        np.linalg.norm(
+                            np.array(self._center(item.bbox), dtype=np.float64)
+                            - self.challenger_position
+                        )
+                    ),
+                    item,
+                )
+                for item in eligible
+            ]
+            linked = [item for item in linked if item[0] <= link_gate]
+            if linked:
+                candidate = min(linked, key=lambda item: item[0])[1]
+            else:
+                return None
+        else:
+            candidate = max(
+                eligible,
+                key=lambda item: float(item.confidence or 0.0),
+            )
+            center = np.array(self._center(candidate.bbox), dtype=np.float64)
+            self.challenger_position = center
+            self.challenger_origin = center.copy()
+            self.challenger_first_frame = frame_index
+            self.challenger_last_frame = frame_index
+            self.challenger_hits = 1
+            self.challenger_strong_hits = 1
+            self.challenger_max_displacement = 0.0
+            self.challengers_started += 1
+            return None
+
+        center = np.array(self._center(candidate.bbox), dtype=np.float64)
+        self.challenger_position = center
+        self.challenger_last_frame = frame_index
+        self.challenger_hits += 1
+        self.challenger_strong_hits += 1
+        if self.challenger_origin is not None:
+            self.challenger_max_displacement = max(
+                self.challenger_max_displacement,
+                float(np.linalg.norm(center - self.challenger_origin)),
+            )
+        span = frame_index - self.challenger_first_frame
+        if (
+            self.challenger_hits >= 2
+            and self.challenger_strong_hits >= 2
+            and span >= 4
+            and self.challenger_max_displacement >= max(30.0, frame_width * 0.015)
+        ):
+            self.challenger_promotions += 1
+            return candidate
+        return None
+
+    def _prepare_challenger_reinitialization(self) -> None:
+        origin = (
+            self.challenger_origin.copy()
+            if self.challenger_origin is not None
+            else None
+        )
+        origin_frame = self.challenger_first_frame
+        self.position = None
+        self.flow_position = None
+        self.observed_position = None
+        self.observed_velocity[:] = 0.0
+        self.observed_position_frame = -1
+        self.kalman_state = None
+        self.predicted_state = None
+        self.predicted_covariance = None
+        self.velocity[:] = 0.0
+        self.last_frame = -1
+        self.last_observed_frame = -1
+        self.pitch_position = None
+        self.pitch_velocity[:] = 0.0
+        self.last_pitch_frame = -1
+        self.confidence = 0.0
+        self.current_interpolation_streak = 0
+        self.flight_mode = False
+        self.flight_clear_hits = 0
+        self.selected_measurement_details = {}
+        self.pending_position = origin
+        self.pending_pitch_position = None
+        self.pending_frame = origin_frame
+        self.challenger_reinitialization_ready = True
+        self._clear_challenger()
+
+    def _clear_challenger(self) -> None:
+        self.challenger_position = None
+        self.challenger_origin = None
+        self.challenger_first_frame = -1
+        self.challenger_last_frame = -1
+        self.challenger_hits = 0
+        self.challenger_strong_hits = 0
+        self.challenger_max_displacement = 0.0
+
+    def _trajectory_prediction(self, frame_index: int) -> np.ndarray | None:
+        if self.observed_position is None or self.observed_position_frame < 0:
+            return None
+        elapsed = max(0, frame_index - self.observed_position_frame)
+        return self.observed_position + self.observed_velocity * elapsed
+
+    def _trajectory_gate(self, frame_index: int, frame_width: int) -> float:
+        elapsed = max(1, frame_index - max(self.observed_position_frame, 0))
+        return max(72.0, frame_width * 0.045) + elapsed * max(
+            1.5,
+            frame_width * 0.0018,
+        )
+
+    def _update_observed_trajectory(
+        self,
+        frame_index: int,
+        measurement: np.ndarray,
+        frame_width: int,
+    ) -> None:
+        if self.observed_position is not None and self.observed_position_frame >= 0:
+            elapsed = max(1, frame_index - self.observed_position_frame)
+            observed_velocity = (measurement - self.observed_position) / elapsed
+            speed = float(np.linalg.norm(observed_velocity))
+            maximum_speed = max(32.0, frame_width * 0.08)
+            if speed > maximum_speed:
+                observed_velocity *= maximum_speed / speed
+            blend = 0.52 if elapsed <= self.max_interpolation_frames else 0.36
+            self.observed_velocity = (
+                self.observed_velocity * (1.0 - blend)
+                + observed_velocity * blend
+            )
+        else:
+            self.observed_velocity[:] = 0.0
+        self.observed_position = measurement.copy()
+        self.observed_position_frame = frame_index
 
     def _correct_kalman(
         self,
@@ -3339,9 +3619,13 @@ class BallTrackerV4:
     def _expire_lost_track(self, frame_index: int) -> None:
         if self.position is None or self.last_observed_frame < 0:
             return
-        if frame_index - self.last_observed_frame <= self.max_interpolation_frames:
+        if frame_index - self.last_observed_frame <= self.max_reacquisition_frames:
             return
         self.position = None
+        self.flow_position = None
+        self.observed_position = None
+        self.observed_velocity[:] = 0.0
+        self.observed_position_frame = -1
         self.kalman_state = None
         self.predicted_state = None
         self.predicted_covariance = None
@@ -3351,8 +3635,16 @@ class BallTrackerV4:
         self.pending_position = None
         self.pending_pitch_position = None
         self.pending_frame = -1
+        self.pitch_position = None
+        self.pitch_velocity[:] = 0.0
+        self.last_pitch_frame = -1
         self.confidence = 0.0
         self.current_interpolation_streak = 0
+        self.flight_mode = False
+        self.flight_clear_hits = 0
+        self.selected_measurement_details = {}
+        self.challenger_reinitialization_ready = False
+        self._clear_challenger()
         self.expired_track_resets += 1
 
     def _select_measurement(
@@ -3364,9 +3656,20 @@ class BallTrackerV4:
         frame_width: int,
         pitch_transform: Any | None,
     ) -> AnalysisObject | None:
-        plausible: list[tuple[float, AnalysisObject]] = []
+        plausible: list[tuple[float, AnalysisObject, dict[str, Any]]] = []
         frame_gap = max(1, frame_index - max(self.last_frame, 0))
+        observation_gap = max(
+            1,
+            frame_index - max(self.last_observed_frame, 0),
+        )
+        dormant = (
+            self.last_observed_frame >= 0
+            and observation_gap > self.max_interpolation_frames
+        )
+        self.selected_measurement_details = {}
         predicted_pitch = None
+        trajectory_prediction = self._trajectory_prediction(frame_index)
+        trajectory_gate = self._trajectory_gate(frame_index, frame_width)
         if self.pitch_position is not None:
             pitch_gap = max(1, frame_index - max(self.last_pitch_frame, 0))
             predicted_pitch = self.pitch_position + self.pitch_velocity * pitch_gap
@@ -3381,13 +3684,21 @@ class BallTrackerV4:
                 self.implausible_size_rejections += 1
                 continue
             near_foot, overlaps_body = self._player_relation(center, players, frame_width)
-            if overlaps_body:
-                self.player_body_rejections += 1
-                continue
+            ground_contact = self._ground_contact(center, players, frame_width)
+            body_pass_through = False
             measured_pitch = self._pitch_measurement(center, pitch_transform)
             proximity_bonus = 0.12 if near_foot else 0.0
+            trajectory_distance = None
             if predicted is None:
+                if overlaps_body:
+                    self.player_body_rejections += 1
+                    continue
                 score = float(detection.confidence or 0.0) + proximity_bonus
+                distance = None
+                gate = None
+                metric_distance = None
+                metric_gate = None
+                metric_rejected = False
                 if measured_pitch is not None and self.pitch_position is not None:
                     elapsed = max(1, frame_index - self.last_pitch_frame)
                     reachable = 550.0 + elapsed * 260.0
@@ -3402,6 +3713,16 @@ class BallTrackerV4:
                     frame_width * 0.04,
                     float(np.linalg.norm(self.velocity)) * frame_gap * 2.8 + 24.0,
                 )
+                if dormant:
+                    gate = max(
+                        gate,
+                        min(
+                            frame_width * 0.28,
+                            48.0
+                            + observation_gap
+                            * max(6.0, frame_width * 0.009),
+                        ),
+                    )
                 distance = float(np.linalg.norm(center - predicted))
                 metric_distance = None
                 metric_gate = None
@@ -3417,11 +3738,36 @@ class BallTrackerV4:
                     and metric_gate is not None
                     and metric_distance > metric_gate
                 )
-                if image_rejected and (metric_distance is None or metric_rejected):
+                # A ground-plane projection cannot validate a teleport in the
+                # camera image. This guard prevents a false foot candidate from
+                # stealing the track while the real ball is airborne.
+                if image_rejected:
                     self.rejected_gate += 1
                     if metric_rejected:
                         self.metric_jump_rejections += 1
                     continue
+                trajectory_distance = (
+                    float(np.linalg.norm(center - trajectory_prediction))
+                    if trajectory_prediction is not None
+                    else None
+                )
+                if (
+                    self.flight_mode
+                    and trajectory_distance is not None
+                    and trajectory_distance > trajectory_gate
+                ):
+                    self.airborne_trajectory_rejections += 1
+                    continue
+                image_consistent = distance <= gate * 0.68
+                if overlaps_body:
+                    body_pass_through = (
+                        self.flight_mode
+                        and image_consistent
+                        and distance <= max(24.0, gate * 0.45)
+                    )
+                    if not body_pass_through:
+                        self.player_body_rejections += 1
+                        continue
                 mahalanobis = 0.0
                 if self.predicted_covariance is not None and not image_rejected:
                     covariance = self.predicted_covariance[:2, :2] + np.eye(2) * 12.0
@@ -3439,8 +3785,41 @@ class BallTrackerV4:
                     + proximity_bonus
                 )
                 if metric_distance is not None and metric_gate is not None:
-                    score += max(-0.35, 1.0 - metric_distance / metric_gate) * 0.65
-            plausible.append((score, detection))
+                    if (
+                        (self.flight_mode or metric_rejected)
+                        and image_consistent
+                        and not near_foot
+                    ):
+                        score += 0.18
+                    else:
+                        score += max(
+                            -0.35,
+                            1.0 - metric_distance / metric_gate,
+                        ) * 0.65
+                if trajectory_distance is not None and self.flight_mode:
+                    score += max(
+                        -0.25,
+                        1.0 - trajectory_distance / trajectory_gate,
+                    ) * 0.55
+            details = {
+                "near_foot": near_foot,
+                "ground_contact": ground_contact,
+                "dormant": dormant,
+                "image_distance": distance,
+                "image_gate": gate,
+                "metric_distance": metric_distance,
+                "metric_gate": metric_gate,
+                "metric_conflict": bool(metric_rejected),
+                "image_consistent": bool(
+                    distance is None
+                    or gate is None
+                    or distance <= gate * 0.68
+                ),
+                "body_pass_through": body_pass_through,
+                "trajectory_distance": trajectory_distance,
+                "trajectory_gate": trajectory_gate,
+            }
+            plausible.append((score, detection, details))
         if not plausible:
             return None
         plausible.sort(key=lambda item: item[0], reverse=True)
@@ -3448,7 +3827,51 @@ class BallTrackerV4:
             self.ambiguous_reacquisitions += 1
             if predicted is None:
                 return None
+        self.selected_measurement_details = plausible[0][2]
+        if bool(self.selected_measurement_details.get("body_pass_through", False)):
+            self.airborne_body_pass_throughs += 1
         return plausible[0][1]
+
+    def _update_flight_state(
+        self,
+        frame_index: int,
+        measured_pitch: np.ndarray | None,
+    ) -> None:
+        details = self.selected_measurement_details
+        near_foot = bool(details.get("near_foot", False))
+        ground_contact = bool(details.get("ground_contact", False))
+        metric_conflict = bool(details.get("metric_conflict", False))
+        image_consistent = bool(details.get("image_consistent", False))
+        dormant = bool(details.get("dormant", False))
+        should_enter_flight = (
+            image_consistent
+            and not near_foot
+            and (metric_conflict or dormant)
+        )
+        if should_enter_flight and not self.flight_mode:
+            self.flight_mode = True
+            self.flight_clear_hits = 0
+            self.airborne_entries += 1
+        if self.flight_mode:
+            self.airborne_observed_frames += 1
+            if metric_conflict and image_consistent:
+                self.metric_conflict_acceptances += 1
+            if ground_contact and image_consistent:
+                self.flight_clear_hits += 1
+                if self.flight_clear_hits >= 3:
+                    self.flight_mode = False
+                    self.flight_clear_hits = 0
+                    self.pitch_position = (
+                        measured_pitch.copy() if measured_pitch is not None else None
+                    )
+                    self.pitch_velocity[:] = 0.0
+                    self.last_pitch_frame = (
+                        frame_index if measured_pitch is not None else -1
+                    )
+                    self.ground_reacquisitions += 1
+                    self.ground_contact_confirmations += 1
+            else:
+                self.flight_clear_hits = 0
 
     def _confirm_initial_measurement(
         self,
@@ -3502,7 +3925,7 @@ class BallTrackerV4:
         pitch_transform: Any | None,
         predicted: bool,
     ) -> None:
-        if pitch_transform is None:
+        if pitch_transform is None or self.flight_mode:
             return
         point = pitch_transform(self._center(ball.bbox))
         if point is None:
@@ -3531,6 +3954,7 @@ class BallTrackerV4:
                 "y": round(float(center[1]), 2),
                 "predicted": predicted,
                 "confidence": round(self.confidence, 4),
+                "airborne": self.flight_mode,
             }
         )
 
@@ -3558,6 +3982,27 @@ class BallTrackerV4:
             if torso_left <= center[0] <= torso_right and y1 <= center[1] <= torso_bottom:
                 return near_foot, True
         return near_foot, False
+
+    def _ground_contact(
+        self,
+        center: np.ndarray,
+        players: list[AnalysisObject],
+        frame_width: int,
+    ) -> bool:
+        horizontal_floor = max(12.0, frame_width * 0.008)
+        vertical_floor = max(10.0, frame_width * 0.006)
+        for player in players:
+            x1, y1, x2, y2 = player.bbox
+            player_height = max(1.0, y2 - y1)
+            foot_x = (x1 + x2) / 2.0
+            if (
+                abs(float(center[0]) - foot_x)
+                <= max(horizontal_floor, player_height * 0.14)
+                and abs(float(center[1]) - y2)
+                <= max(vertical_floor, player_height * 0.16)
+            ):
+                return True
+        return False
 
     def _pitch_measurement(
         self,
@@ -7506,6 +7951,14 @@ class MatchAnalysisPlusRunner:
         maximum_interpolation = int(
             tracker_summary.get("maximum_interpolation_streak", 0)
         )
+        interpolation_limit = int(
+            tracker_summary.get(
+                "max_airborne_interpolation_frames"
+                if tracker_summary.get("airborne_entries", 0)
+                else "max_interpolation_frames",
+                10,
+            )
+        )
         conditions = [
             {
                 "code": "specialized_ball_model",
@@ -7521,11 +7974,9 @@ class MatchAnalysisPlusRunner:
             },
             {
                 "code": "bounded_interpolation",
-                "passed": maximum_interpolation <= int(
-                    tracker_summary.get("max_interpolation_frames", 10)
-                ),
+                "passed": maximum_interpolation <= interpolation_limit,
                 "value": maximum_interpolation,
-                "required": tracker_summary.get("max_interpolation_frames", 10),
+                "required": interpolation_limit,
             },
             {
                 "code": "tracked_ball_coverage",
