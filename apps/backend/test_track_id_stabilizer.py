@@ -912,25 +912,32 @@ class BallTrackingV2Tests(unittest.TestCase):
         stale_second = AnalysisObject(4, "ball", [112, 100, 126, 114], 0.1)
         challenger_first = AnalysisObject(5, "ball", [410, 220, 424, 234], 0.41)
         challenger_second = AnalysisObject(6, "ball", [330, 220, 344, 234], 0.45)
+        challenger_third = AnalysisObject(7, "ball", [250, 220, 264, 234], 0.44)
         stale_owner = _player(90, -13, 9)
 
         tracker.update(0, [first], [], FRAME_WIDTH)
         tracker.update(1, [second], [], FRAME_WIDTH)
         tracker.update(
             10,
-            [stale_first, challenger_first],
+            [challenger_first],
+            [stale_owner],
+            FRAME_WIDTH,
+        )
+        tracker.update(
+            20,
+            [challenger_second],
             [stale_owner],
             FRAME_WIDTH,
         )
         output = tracker.update(
-            20,
-            [stale_second, challenger_second],
+            24,
+            [challenger_third],
             [stale_owner],
             FRAME_WIDTH,
         )
 
         self.assertEqual(1, len(output))
-        self.assertGreater((output[0].bbox[0] + output[0].bbox[2]) / 2, 300)
+        self.assertGreater((output[0].bbox[0] + output[0].bbox[2]) / 2, 240)
         self.assertEqual(1, tracker.summary()["challenger_promotions"])
 
     def test_stationary_strong_challenger_does_not_replace_track(self) -> None:
@@ -941,26 +948,342 @@ class BallTrackingV2Tests(unittest.TestCase):
         stale_second = AnalysisObject(4, "ball", [112, 100, 126, 114], 0.1)
         challenger_first = AnalysisObject(5, "ball", [410, 220, 424, 234], 0.75)
         challenger_second = AnalysisObject(6, "ball", [412, 220, 426, 234], 0.72)
+        challenger_third = AnalysisObject(7, "ball", [414, 220, 428, 234], 0.74)
         stale_owner = _player(90, -13, 9)
 
         tracker.update(0, [first], [], FRAME_WIDTH)
         tracker.update(1, [second], [], FRAME_WIDTH)
         tracker.update(
             10,
-            [stale_first, challenger_first],
+            [challenger_first],
+            [stale_owner],
+            FRAME_WIDTH,
+        )
+        tracker.update(
+            20,
+            [challenger_second],
             [stale_owner],
             FRAME_WIDTH,
         )
         output = tracker.update(
-            20,
-            [stale_second, challenger_second],
+            24,
+            [challenger_third],
             [stale_owner],
             FRAME_WIDTH,
         )
 
-        self.assertEqual(1, len(output))
-        self.assertLess((output[0].bbox[0] + output[0].bbox[2]) / 2, 200)
+        self.assertEqual([], output)
         self.assertEqual(0, tracker.summary()["challenger_promotions"])
+
+    def test_stale_airborne_prediction_yields_to_moving_ground_candidate(self) -> None:
+        tracker = BallTrackerV2(
+            max_interpolation_frames=3,
+            max_airborne_interpolation_frames=8,
+        )
+        first = AnalysisObject(1, "ball", [100, 100, 114, 114], 0.8)
+        second = AnalysisObject(2, "ball", [108, 98, 122, 112], 0.8)
+        takeoff = AnalysisObject(3, "ball", [116, 92, 130, 106], 0.24)
+
+        def conflicting_pitch(point):
+            if point[0] < 120:
+                return (point[0] * 10.0, point[1] * 10.0)
+            return (10000.0, 6500.0)
+
+        tracker.update(0, [first], [], FRAME_WIDTH, conflicting_pitch)
+        tracker.update(1, [second], [], FRAME_WIDTH, conflicting_pitch)
+        tracker.update(2, [takeoff], [], FRAME_WIDTH, conflicting_pitch)
+        for frame_index in range(3, 10):
+            tracker.update(frame_index, [], [], FRAME_WIDTH, conflicting_pitch)
+
+        first_player = _player(400, 100, 71)
+        first_challenger = AnalysisObject(
+            4,
+            "ball",
+            [416, 210, 428, 222],
+            0.20,
+        )
+        second_player = _player(340, 100, 72)
+        second_challenger = AnalysisObject(
+            5,
+            "ball",
+            [356, 210, 368, 222],
+            0.18,
+        )
+        third_player = _player(280, 100, 73)
+        third_challenger = AnalysisObject(
+            6,
+            "ball",
+            [296, 210, 308, 222],
+            0.19,
+        )
+
+        self.assertEqual(
+            [],
+            tracker.update(
+                10,
+                [first_challenger],
+                [first_player],
+                FRAME_WIDTH,
+                conflicting_pitch,
+            ),
+        )
+        self.assertEqual([], tracker.update(
+            14,
+            [second_challenger],
+            [second_player],
+            FRAME_WIDTH,
+            conflicting_pitch,
+        ))
+        recovered = tracker.update(
+            18,
+            [third_challenger],
+            [third_player],
+            FRAME_WIDTH,
+            conflicting_pitch,
+        )
+
+        self.assertEqual(1, len(recovered))
+        self.assertAlmostEqual(
+            302.0,
+            (recovered[0].bbox[0] + recovered[0].bbox[2]) / 2,
+            delta=8.0,
+        )
+        self.assertEqual(
+            1,
+            tracker.summary()["airborne_challenger_promotions"],
+        )
+        self.assertGreaterEqual(
+            tracker.summary()["challenger_prediction_suppressions"],
+            1,
+        )
+
+    def test_reacquisition_keeps_competing_candidate_paths_separate(self) -> None:
+        tracker = BallTrackerV2(
+            max_interpolation_frames=2,
+            max_airborne_interpolation_frames=5,
+        )
+        tracker.update(0, [AnalysisObject(1, "ball", [100, 100, 114, 114], 0.8)], [], FRAME_WIDTH)
+        tracker.update(1, [AnalysisObject(2, "ball", [108, 96, 122, 110], 0.8)], [], FRAME_WIDTH)
+        tracker.flight_mode = True
+        for frame_index in range(2, 7):
+            tracker.update(frame_index, [], [], FRAME_WIDTH)
+
+        false_path = [410.0, 414.0, 418.0]
+        real_path = [330.0, 255.0, 180.0]
+        recovered = []
+        for frame_index, false_x, real_x in zip((7, 10, 13), false_path, real_path):
+            recovered = tracker.update(
+                frame_index,
+                [
+                    AnalysisObject(10, "ball", [false_x, 220, false_x + 12, 232], 0.82),
+                    AnalysisObject(11, "ball", [real_x, 180, real_x + 14, 194], 0.24),
+                ],
+                [],
+                FRAME_WIDTH,
+            )
+
+        self.assertEqual(1, len(recovered))
+        recovered_x = (recovered[0].bbox[0] + recovered[0].bbox[2]) / 2
+        self.assertLess(recovered_x, 230.0)
+        self.assertGreaterEqual(
+            tracker.summary()["peak_reacquisition_hypotheses"],
+            2,
+        )
+
+    def test_remote_candidates_cannot_replace_live_foot_track(self) -> None:
+        tracker = BallTrackerV2(
+            max_interpolation_frames=3,
+            max_airborne_interpolation_frames=8,
+        )
+        player = _player(390, 100, 14)
+        tracker.update(
+            0,
+            [AnalysisObject(1, "ball", [400, 208, 414, 222], 0.82)],
+            [player],
+            FRAME_WIDTH,
+        )
+        tracker.update(
+            1,
+            [AnalysisObject(2, "ball", [403, 208, 417, 222], 0.84)],
+            [player],
+            FRAME_WIDTH,
+        )
+        tracker.observed_velocity = np.array([80.0, 0.0], dtype=np.float64)
+
+        recovered = []
+        for frame_index, remote_x in ((2, 330.0), (4, 255.0), (7, 180.0)):
+            recovered = tracker.update(
+                frame_index,
+                [
+                    AnalysisObject(
+                        10,
+                        "ball",
+                        [405, 208, 419, 222],
+                        0.86,
+                    ),
+                    AnalysisObject(
+                        11,
+                        "ball",
+                        [remote_x, 150, remote_x + 14, 164],
+                        0.22,
+                    ),
+                ],
+                [player],
+                FRAME_WIDTH,
+            )
+
+        self.assertEqual(1, len(recovered))
+        recovered_x = (recovered[0].bbox[0] + recovered[0].bbox[2]) / 2
+        self.assertGreater(recovered_x, 380.0)
+        summary = tracker.summary()
+        self.assertEqual(0, summary["challenger_promotions"])
+
+    def test_body_candidate_switching_players_cannot_replace_visible_ball(self) -> None:
+        frame_width = 1920
+        tracker = BallTrackerV2(
+            max_interpolation_frames=3,
+            max_airborne_interpolation_frames=12,
+        )
+        first_player = _player(878, 420, 14)
+        tracker.update(
+            0,
+            [AnalysisObject(1, "ball", [895, 527, 905, 541], 0.80)],
+            [first_player],
+            frame_width,
+        )
+        tracker.update(
+            1,
+            [AnalysisObject(2, "ball", [897, 527, 907, 541], 0.82)],
+            [first_player],
+            frame_width,
+        )
+        tracker.flight_mode = True
+
+        tracker.update(
+            2,
+            [
+                AnalysisObject(3, "ball", [899, 529, 907, 543], 0.72),
+                AnalysisObject(4, "ball", [792, 537, 814, 566], 0.22),
+                AnalysisObject(5, "ball", [609, 486, 620, 506], 0.21),
+            ],
+            [
+                _player(881, 420, 14),
+                _player(790, 520, 8, height=60),
+                _player(595, 450, 26, height=75),
+            ],
+            frame_width,
+        )
+        hidden = tracker.update(
+            4,
+            [
+                AnalysisObject(6, "ball", [904, 530, 912, 544], 0.76),
+                AnalysisObject(7, "ball", [794, 534, 812, 562], 0.18),
+            ],
+            [
+                _player(886, 420, 14),
+                _player(790, 520, 8, height=60),
+            ],
+            frame_width,
+        )
+        recovered = tracker.update(
+            9,
+            [
+                AnalysisObject(8, "ball", [914, 533, 921, 545], 0.64),
+                AnalysisObject(9, "ball", [619, 480, 630, 500], 0.22),
+            ],
+            [
+                _player(896, 420, 14),
+                _player(603, 450, 26, height=75),
+            ],
+            frame_width,
+        )
+
+        self.assertEqual(1, len(hidden))
+        self.assertEqual(1, len(recovered))
+        recovered_x = (recovered[0].bbox[0] + recovered[0].bbox[2]) / 2
+        self.assertGreater(recovered_x, 880.0)
+        self.assertEqual(0, tracker.summary()["challenger_promotions"])
+
+    def test_far_alternative_cannot_replace_live_foot_track(self) -> None:
+        tracker = BallTrackerV2(max_interpolation_frames=3)
+        player = _player(390, 100, 14)
+        tracker.update(
+            0,
+            [AnalysisObject(1, "ball", [400, 208, 414, 222], 0.80)],
+            [player],
+            FRAME_WIDTH,
+        )
+        tracker.update(
+            1,
+            [AnalysisObject(2, "ball", [403, 208, 417, 222], 0.82)],
+            [player],
+            FRAME_WIDTH,
+        )
+
+        output = []
+        for frame_index, far_x in ((2, 100.0), (4, 55.0), (7, 10.0)):
+            output = tracker.update(
+                frame_index,
+                [
+                    AnalysisObject(3, "ball", [405, 208, 419, 222], 0.78),
+                    AnalysisObject(
+                        4,
+                        "ball",
+                        [far_x, 150, far_x + 14, 164],
+                        0.42,
+                    ),
+                ],
+                [player],
+                FRAME_WIDTH,
+            )
+
+        self.assertEqual(1, len(output))
+        output_x = (output[0].bbox[0] + output[0].bbox[2]) / 2
+        self.assertGreater(output_x, 380.0)
+        summary = tracker.summary()
+        self.assertEqual(0, summary["challenger_promotions"])
+
+    def test_low_confidence_3d_cannot_move_visible_marker(self) -> None:
+        class ImplausibleProjectionCamera:
+            def is_reliable(self, _threshold=0.0):
+                return True
+
+            def camera_projection_matrix(self, _frame_shape):
+                return np.array(
+                    [
+                        [1.0, 0.0, 100.0, 0.0],
+                        [0.0, 1.0, 0.0, 0.0],
+                        [0.0, 0.0, 0.0, 1.0],
+                    ],
+                    dtype=np.float64,
+                )
+
+        tracker = BallTrackerV2(max_interpolation_frames=4)
+        first = AnalysisObject(1, "ball", [100, 100, 114, 114], 0.8)
+        second = AnalysisObject(2, "ball", [108, 96, 122, 110], 0.8)
+        tracker.update(0, [first], [], FRAME_WIDTH)
+        tracker.update(1, [second], [], FRAME_WIDTH)
+        tracker.flight_mode = True
+        tracker.position_3d = np.array([115.0, 103.0, 100.0], dtype=np.float64)
+        tracker.velocity_3d = np.array([8.0, -4.0, 20.0], dtype=np.float64)
+        tracker.last_3d_frame = 1
+        tracker.trajectory_3d_confidence = 0.20
+
+        output = tracker.update(
+            2,
+            [],
+            [],
+            FRAME_WIDTH,
+            pitch_camera=ImplausibleProjectionCamera(),
+        )
+
+        self.assertEqual(1, len(output))
+        visible_x = (output[0].bbox[0] + output[0].bbox[2]) / 2
+        self.assertLess(visible_x, 180.0)
+        self.assertGreaterEqual(
+            tracker.summary()["trajectory_3d"]["low_confidence_image_fallbacks"],
+            1,
+        )
 
     def test_ball_tracker_rejects_player_body_false_positive(self) -> None:
         tracker = BallTrackerV2(max_interpolation_frames=3)
@@ -1085,6 +1408,51 @@ class BallTrackingV2Tests(unittest.TestCase):
 
         self.assertEqual(7, owner)
         self.assertEqual(2, team)
+
+    def test_airborne_ball_cannot_assign_possession_at_low_3d_confidence(self) -> None:
+        tracker = PossessionTracker(confirmation_frames=1)
+        player = _player(100, 100, 7)
+        ball = AnalysisObject(
+            1,
+            "ball",
+            [116, 212, 130, 226],
+            0.9,
+            pitch_position=(122.0, 220.0),
+            height_cm=120.0,
+            trajectory_3d_confidence=0.12,
+        )
+
+        owner, team = tracker.update(
+            0,
+            [player],
+            [ball],
+            {7: 1},
+            lambda point: point,
+        )
+
+        self.assertEqual((None, None), (owner, team))
+
+    def test_fast_ball_moving_away_does_not_jump_possession(self) -> None:
+        tracker = PossessionTracker(confirmation_frames=1, fps=25.0)
+        player = _player(100, 100, 7)
+        ball = AnalysisObject(
+            1,
+            "ball",
+            [193, 213, 207, 227],
+            0.9,
+            pitch_position=(200.0, 220.0),
+            pitch_velocity=(40.0, 0.0),
+        )
+
+        owner, team = tracker.update(
+            0,
+            [player],
+            [ball],
+            {7: 1},
+            lambda point: point,
+        )
+
+        self.assertEqual((None, None), (owner, team))
 
     def test_confirmed_same_team_transition_creates_completed_pass(self) -> None:
         tracker = PossessionTracker(confirmation_frames=1)

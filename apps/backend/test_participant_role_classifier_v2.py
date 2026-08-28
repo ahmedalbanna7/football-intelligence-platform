@@ -98,6 +98,55 @@ class ParticipantRoleClassifierV2Tests(unittest.TestCase):
         self.assertEqual("goalkeeper", player.role_name)
         self.assertTrue(state.locked)
 
+    def test_geometry_and_kit_outlier_find_goalkeeper_without_detector_label(self) -> None:
+        resolver = ParticipantRoleClassifierV2()
+        player = _player("player")
+        stable = _stable("player")
+        classifier = SimpleNamespace(
+            track_confidence={1: 0.82},
+            kit_outlier_score=lambda _team, _state: 0.78,
+        )
+        radar = _Radar(pitch_point=(520.0, 3400.0))
+
+        for _ in range(32):
+            resolver.update(
+                [player],
+                {1: stable},
+                {1: 1},
+                classifier,
+                radar,
+                self.frame,
+            )
+
+        state = resolver.get(1)
+        self.assertEqual("goalkeeper", player.role_name)
+        self.assertTrue(state.locked)
+        self.assertIn("persistent_goalkeeper_zone", state.evidence)
+        self.assertIn("outfield_kit_outlier", state.evidence)
+
+    def test_matching_outfield_kit_does_not_turn_defender_into_goalkeeper(self) -> None:
+        resolver = ParticipantRoleClassifierV2()
+        player = _player("player")
+        stable = _stable("player")
+        classifier = SimpleNamespace(
+            track_confidence={1: 0.95},
+            kit_outlier_score=lambda _team, _state: 0.04,
+        )
+        radar = _Radar(pitch_point=(620.0, 3400.0))
+
+        for _ in range(48):
+            resolver.update(
+                [player],
+                {1: stable},
+                {1: 1},
+                classifier,
+                radar,
+                self.frame,
+            )
+
+        self.assertEqual("player", player.role_name)
+        self.assertTrue(resolver.get(1).locked)
+
     def test_outside_person_becomes_staff_and_locks(self) -> None:
         resolver, player, _ = self._run("player", _Radar(inside=False), None, 0.0)
 

@@ -106,6 +106,10 @@ class AnalysisObject:
     raw_track_id: int | None = None
     is_predicted: bool = False
     role_name: str = "player"
+    pitch_position: tuple[float, float] | None = None
+    pitch_velocity: tuple[float, float] | None = None
+    height_cm: float = 0.0
+    trajectory_3d_confidence: float = 0.0
 
 
 @dataclass
@@ -164,6 +168,10 @@ class ParticipantRoleState:
     inside_pitch_observations: int = 0
     outside_pitch_observations: int = 0
     near_goal_observations: int = 0
+    goalkeeper_zone_observations: int = 0
+    penalty_area_observations: int = 0
+    kit_outlier_observations: int = 0
+    kit_outlier_score_sum: float = 0.0
     touchline_observations: int = 0
     team_affinity_observations: int = 0
     detector_role_observations: dict[str, int] = field(default_factory=dict)
@@ -193,7 +201,7 @@ class PlayerValidityFilter:
             width = max(1.0, player.bbox[2] - player.bbox[0])
             height = max(1.0, player.bbox[3] - player.bbox[1])
             aspect_ratio = width / height
-            if aspect_ratio < 0.105 or aspect_ratio > 1.18:
+            if not self._has_plausible_person_geometry(player):
                 self.rejected_implausible_shape += 1
                 continue
             if specialized_detector:
@@ -204,6 +212,25 @@ class PlayerValidityFilter:
             kept.append(player)
             self.kept += 1
         return kept
+
+    @staticmethod
+    def geometry_candidates(
+        players: list[AnalysisObject],
+    ) -> list[AnalysisObject]:
+        """Broad physical-body guard that never creates canonical tracks."""
+
+        return [
+            player
+            for player in players
+            if PlayerValidityFilter._has_plausible_person_geometry(player)
+        ]
+
+    @staticmethod
+    def _has_plausible_person_geometry(player: AnalysisObject) -> bool:
+        width = max(1.0, player.bbox[2] - player.bbox[0])
+        height = max(1.0, player.bbox[3] - player.bbox[1])
+        aspect_ratio = width / height
+        return height >= 18.0 and 0.105 <= aspect_ratio <= 1.18
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -445,6 +472,7 @@ class TrackIdStabilizer:
         self.rejected_long_gap_reentries = 0
         self.rejected_role_conflicts = 0
         self.frozen_identity_visual_updates = 0
+        self.native_continuity_rescues = 0
 
     def update(self, frame_index: int, players: list[AnalysisObject], frame: np.ndarray | None = None) -> list[AnalysisObject]:
         self._expire_tentative_tracks(frame_index)
@@ -458,6 +486,15 @@ class TrackIdStabilizer:
             prediction_ambiguity = self._is_prediction_ambiguous(player, players, frame_index)
             matching_visual_reliable = appearance_hist is not None
             visual_quality = 0.45 if severe_overlap else (0.65 if current_crowding else 1.0)
+            native_continuity_safe = self._native_continuity_is_safe(
+                raw_id=raw_id,
+                player=player,
+                frame_index=frame_index,
+                appearance_hist=appearance_hist,
+                jersey_color=jersey_color,
+            )
+            if prediction_ambiguity and native_continuity_safe:
+                self.native_continuity_rescues += 1
             update_visual_reliable = (
                 matching_visual_reliable
                 and not current_crowding
@@ -477,7 +514,10 @@ class TrackIdStabilizer:
                     "matching_visual_reliable": matching_visual_reliable,
                     "visual_quality": visual_quality,
                     "update_visual_reliable": update_visual_reliable,
-                    "identity_ambiguous": prediction_ambiguity,
+                    "identity_ambiguous": (
+                        prediction_ambiguity and not native_continuity_safe
+                    ),
+                    "native_continuity_safe": native_continuity_safe,
                     "crowded": current_crowding,
                     "severe_overlap": severe_overlap,
                 }
@@ -521,6 +561,9 @@ class TrackIdStabilizer:
                 pair_scores=pair_scores,
                 crowded=bool(candidates[candidate_index]["crowded"]),
                 severe_overlap=bool(candidates[candidate_index]["severe_overlap"]),
+                native_continuity_safe=bool(
+                    candidates[candidate_index]["native_continuity_safe"]
+                ),
                 frame_index=frame_index,
             ):
                 uncertain_candidates.add(candidate_index)
@@ -638,6 +681,7 @@ class TrackIdStabilizer:
             "rejected_long_gap_reentries": self.rejected_long_gap_reentries,
             "rejected_role_conflicts": self.rejected_role_conflicts,
             "frozen_identity_visual_updates": self.frozen_identity_visual_updates,
+            "native_continuity_rescues": self.native_continuity_rescues,
             "tracks_with_multiple_raw_ids": sum(1 for count in raw_ids_per_stable.values() if count > 1),
             "max_raw_ids_per_stable_track": max(raw_ids_per_stable.values(), default=0),
             "avg_raw_ids_per_stable_track": round(raw_count / stable_count, 3),
@@ -713,6 +757,7 @@ class TrackIdStabilizer:
         pair_scores: list[tuple[float, int, int]],
         crowded: bool,
         severe_overlap: bool,
+        native_continuity_safe: bool,
         frame_index: int,
     ) -> bool:
         competing_scores = [
@@ -729,6 +774,11 @@ class TrackIdStabilizer:
         ]
         if not competing_scores:
             return False
+        if native_continuity_safe:
+            # The native tracker remains useful through a short overlap when
+            # its candidate also agrees with this stable identity's motion and
+            # appearance history. Motion-conflict checks still veto swapped IDs.
+            return assigned_score + 0.18 < max(competing_scores)
         gap = max(frame_index - self.tracks[stable_id].last_frame, 1)
         required_margin = (
             0.90
@@ -1920,6 +1970,64 @@ class TrackIdStabilizer:
         )
         return nearby_predictions > nearby_detections
 
+    def _native_continuity_is_safe(
+        self,
+        raw_id: int,
+        player: AnalysisObject,
+        frame_index: int,
+        appearance_hist: np.ndarray | None,
+        jersey_color: tuple[int, int, int] | None,
+    ) -> bool:
+        stable_id = self.raw_to_stable.get(raw_id)
+        state = self.tracks.get(stable_id) if stable_id is not None else None
+        if state is None or not state.confirmed:
+            return False
+        gap = frame_index - state.last_frame
+        if gap < 0 or gap > self.hidden_hold_frames:
+            return False
+        if self._raw_id_motion_conflict(state, player, frame_index):
+            return False
+        appearance = self._state_appearance_similarity(appearance_hist, state)
+        color_similarity = self._color_similarity(jersey_color, state.jersey_color)
+        if self._is_locked_jersey_mismatch(
+            state,
+            jersey_color,
+            appearance,
+            color_similarity,
+        ):
+            return False
+
+        candidate_foot = self._foot(player.bbox)
+        own_prediction = self._predicted_foot(state, max(gap, 1))
+        own_distance = self._center_distance(candidate_foot, own_prediction)
+        motion_gate = self._hard_motion_gate(state, player.bbox, max(gap, 1))
+        if own_distance > motion_gate * 0.72:
+            return False
+
+        best_other_distance = float("inf")
+        for other in self.tracks.values():
+            if other.stable_id == state.stable_id or not other.confirmed:
+                continue
+            other_gap = frame_index - other.last_frame
+            if other_gap < 0 or other_gap > self.hidden_hold_frames:
+                continue
+            best_other_distance = min(
+                best_other_distance,
+                self._center_distance(
+                    candidate_foot,
+                    self._predicted_foot(other, max(other_gap, 1)),
+                ),
+            )
+        motion_margin = max(8.0, self._bbox_height(player.bbox) * 0.12)
+        motion_owner = own_distance + motion_margin <= best_other_distance
+        visual_owner = appearance >= 0.70 and color_similarity >= 0.62
+        locked_native_owner = (
+            state.identity_locked
+            and own_distance <= motion_gate * 0.34
+            and (appearance >= 0.48 or color_similarity >= 0.66)
+        )
+        return motion_owner or visual_owner or locked_native_owner
+
 
 class TeamColorClassifier:
     """Resolve stable team identity from kit references and temporal appearance."""
@@ -2389,6 +2497,29 @@ class TeamColorClassifier:
         appearance_distance = 1.0 - appearance_similarity
         return color_distance * 0.72 + appearance_distance * 0.28
 
+    def kit_outlier_score(
+        self,
+        team: int | None,
+        state: StableTrackState,
+    ) -> float:
+        """Return how unlike an outfield kit this participant appears."""
+        if team not in {1, 2} or state.jersey_color is None:
+            return 0.0
+        reference_colors = self.reference_palettes_bgr.get(team)
+        if not reference_colors:
+            anchor = self.anchors.get(team)
+            reference_colors = [anchor] if anchor is not None else []
+        if not reference_colors:
+            return 0.0
+        distance = min(
+            self._sample_distance(
+                (reference_color, self.appearance_anchors.get(team)),
+                (state.jersey_color, state.appearance_hist),
+            )
+            for reference_color in reference_colors
+        )
+        return float(np.clip((distance - 0.14) / 0.52, 0.0, 1.0))
+
     def _color_distance(
         self,
         first: tuple[int, int, int],
@@ -2464,12 +2595,28 @@ class ParticipantRoleClassifierV2:
 
             near_goal = False
             near_touchline = False
+            goalkeeper_zone = False
+            penalty_area = False
             if pitch_point is not None:
                 x_cm, y_cm = pitch_point
-                near_goal = min(x_cm, PITCH_LENGTH_CM - x_cm) <= 1850.0
+                goal_line_distance = min(x_cm, PITCH_LENGTH_CM - x_cm)
+                goal_center_distance = abs(y_cm - PITCH_WIDTH_CM / 2.0)
+                near_goal = goal_line_distance <= 1850.0
+                penalty_area = (
+                    goal_line_distance <= PENALTY_AREA_LENGTH_CM + 180.0
+                    and goal_center_distance <= PENALTY_AREA_WIDTH_CM / 2.0 + 180.0
+                )
+                goalkeeper_zone = (
+                    goal_line_distance <= PENALTY_AREA_LENGTH_CM + 500.0
+                    and goal_center_distance <= PENALTY_AREA_WIDTH_CM / 2.0 + 550.0
+                )
                 near_touchline = min(y_cm, PITCH_WIDTH_CM - y_cm) <= 260.0
                 if near_goal:
                     role_state.near_goal_observations += 1
+                if goalkeeper_zone:
+                    role_state.goalkeeper_zone_observations += 1
+                if penalty_area:
+                    role_state.penalty_area_observations += 1
                 if near_touchline:
                     role_state.touchline_observations += 1
 
@@ -2480,6 +2627,19 @@ class ParticipantRoleClassifierV2:
             team_affinity = team_number in {1, 2} and team_confidence >= 0.62
             if team_affinity:
                 role_state.team_affinity_observations += 1
+            kit_outlier_resolver = getattr(
+                team_classifier,
+                "kit_outlier_score",
+                None,
+            )
+            kit_outlier_score = (
+                float(kit_outlier_resolver(team_number, stable_state))
+                if callable(kit_outlier_resolver)
+                else 0.0
+            )
+            role_state.kit_outlier_score_sum += kit_outlier_score
+            if kit_outlier_score >= 0.30:
+                role_state.kit_outlier_observations += 1
 
             detector_ratios = self._detector_role_ratios(stable_state)
             for role, ratio in detector_ratios.items():
@@ -2501,6 +2661,27 @@ class ParticipantRoleClassifierV2:
                     scores["goalkeeper"] += 0.85
             if near_goal and detector_ratios["goalkeeper"] >= 0.22:
                 scores["goalkeeper"] += 0.70
+            goalkeeper_zone_ratio = (
+                role_state.goalkeeper_zone_observations
+                / max(role_state.observations, 1)
+            )
+            penalty_area_ratio = (
+                role_state.penalty_area_observations
+                / max(role_state.observations, 1)
+            )
+            average_kit_outlier = (
+                role_state.kit_outlier_score_sum
+                / max(role_state.observations, 1)
+            )
+            if goalkeeper_zone and team_affinity:
+                scores["goalkeeper"] += 0.14 + kit_outlier_score * 1.75
+            if (
+                role_state.observations >= 10
+                and goalkeeper_zone_ratio >= 0.68
+                and penalty_area_ratio >= 0.48
+                and average_kit_outlier >= 0.24
+            ):
+                scores["goalkeeper"] += 2.80
             if near_touchline and (
                 detector_ratios["referee"] + detector_ratios["assistant_referee"]
             ) >= 0.45:
@@ -2535,6 +2716,15 @@ class ParticipantRoleClassifierV2:
                 )
                 if detector_support >= 0.78 or touchline_assistant_support:
                     confidence = max(confidence, 0.86)
+                geometric_goalkeeper_support = (
+                    candidate == "goalkeeper"
+                    and goalkeeper_zone_ratio >= 0.68
+                    and penalty_area_ratio >= 0.48
+                    and average_kit_outlier >= 0.24
+                    and team_affinity
+                )
+                if geometric_goalkeeper_support:
+                    confidence = max(confidence, 0.86)
             if candidate == "staff_outside_pitch":
                 outside_ratio = role_state.outside_pitch_observations / max(
                     role_state.observations,
@@ -2554,7 +2744,18 @@ class ParticipantRoleClassifierV2:
             else:
                 role_state.role_name = candidate
                 role_state.confidence = confidence
-                required_observations = 20 if candidate == "player" else 14
+                protected_goalkeeper_candidate = (
+                    candidate == "player"
+                    and goalkeeper_zone_ratio >= 0.58
+                    and average_kit_outlier >= 0.22
+                )
+                required_observations = (
+                    42
+                    if protected_goalkeeper_candidate
+                    else 20
+                    if candidate == "player"
+                    else 14
+                )
                 required_streak = 10 if candidate == "player" else 8
                 required_confidence = 0.84 if candidate == "player" else 0.78
                 if (
@@ -2609,6 +2810,18 @@ class ParticipantRoleClassifierV2:
                         state.outside_pitch_observations / max(state.observations, 1),
                         4,
                     ),
+                    "goalkeeper_zone_ratio": round(
+                        state.goalkeeper_zone_observations / max(state.observations, 1),
+                        4,
+                    ),
+                    "penalty_area_ratio": round(
+                        state.penalty_area_observations / max(state.observations, 1),
+                        4,
+                    ),
+                    "kit_outlier_score": round(
+                        state.kit_outlier_score_sum / max(state.observations, 1),
+                        4,
+                    ),
                 }
                 for track_id, state in sorted(self.states.items())
             },
@@ -2623,6 +2836,9 @@ class ParticipantRoleClassifierV2:
         observations = max(state.observations, 1)
         outside_ratio = state.outside_pitch_observations / observations
         near_goal_ratio = state.near_goal_observations / observations
+        goalkeeper_zone_ratio = state.goalkeeper_zone_observations / observations
+        penalty_area_ratio = state.penalty_area_observations / observations
+        average_kit_outlier = state.kit_outlier_score_sum / observations
         touchline_ratio = state.touchline_observations / observations
         team_affinity_ratio = state.team_affinity_observations / observations
         if candidate == "staff_outside_pitch":
@@ -2637,7 +2853,12 @@ class ParticipantRoleClassifierV2:
                 return "player"
         elif candidate == "goalkeeper":
             detector_support = detector_ratios["goalkeeper"] >= 0.46
-            geometric_support = near_goal_ratio >= 0.72 and team_affinity_ratio >= 0.35
+            geometric_support = (
+                goalkeeper_zone_ratio >= 0.68
+                and penalty_area_ratio >= 0.48
+                and average_kit_outlier >= 0.24
+                and team_affinity_ratio >= 0.35
+            )
             if state.observations < 10 or not (detector_support or geometric_support):
                 return "player"
         return candidate
@@ -2692,6 +2913,10 @@ class ParticipantRoleClassifierV2:
             evidence.append("outside_pitch_history")
         if state.near_goal_observations / observations >= 0.50:
             evidence.append("goal_area_history")
+        if state.goalkeeper_zone_observations / observations >= 0.68:
+            evidence.append("persistent_goalkeeper_zone")
+        if state.kit_outlier_score_sum / observations >= 0.24:
+            evidence.append("outfield_kit_outlier")
         if state.touchline_observations / observations >= 0.45:
             evidence.append("touchline_history")
         strongest_detector = max(detector_ratios, key=detector_ratios.get)
@@ -2720,6 +2945,33 @@ class BallStaticCandidate:
     @property
     def average_aspect(self) -> float:
         return self.aspect_sum / max(1, self.hits)
+
+
+@dataclass
+class BallReacquisitionHypothesis:
+    """One temporally consistent ball candidate during a lost-track search."""
+
+    hypothesis_id: int
+    position: np.ndarray
+    origin: np.ndarray
+    first_frame: int
+    last_frame: int
+    previous_position: np.ndarray
+    previous_frame: int
+    velocity: np.ndarray = field(
+        default_factory=lambda: np.zeros(2, dtype=np.float64)
+    )
+    acceleration: np.ndarray = field(
+        default_factory=lambda: np.zeros(2, dtype=np.float64)
+    )
+    hits: int = 1
+    strong_hits: int = 0
+    ground_hits: int = 0
+    max_displacement: float = 0.0
+    confidence_sum: float = 0.0
+    size_sum: float = 0.0
+    last_detection: AnalysisObject | None = None
+    body_owner_id: int | None = None
 
 
 class BallStaticFilter:
@@ -3025,7 +3277,10 @@ class BallTrackerV4:
         max_interpolation_frames: int = 6,
         max_airborne_interpolation_frames: int = 36,
         max_reacquisition_frames: int = 90,
+        fps: float = 25.0,
     ) -> None:
+        self.fps = max(1.0, float(fps))
+        self.gravity_cm_per_frame2 = 981.0 / (self.fps * self.fps)
         self.max_interpolation_frames = max_interpolation_frames
         self.max_airborne_interpolation_frames = max(
             max_interpolation_frames,
@@ -3054,6 +3309,17 @@ class BallTrackerV4:
         self.pitch_position: np.ndarray | None = None
         self.pitch_velocity = np.zeros(2, dtype=np.float64)
         self.last_pitch_frame = -1
+        self.position_3d: np.ndarray | None = None
+        self.velocity_3d = np.zeros(3, dtype=np.float64)
+        self.last_3d_frame = -1
+        self.trajectory_3d_confidence = 0.0
+        self.flight_start_frame = -1
+        self.maximum_height_cm = 0.0
+        self.three_d_observed_frames = 0
+        self.three_d_predicted_frames = 0
+        self.three_d_projection_failures = 0
+        self.three_d_low_confidence_fallbacks = 0
+        self.three_d_observation_projection_rejections = 0
         self.confidence = 0.0
         self.observed_frames = 0
         self.interpolated_frames = 0
@@ -3087,10 +3353,21 @@ class BallTrackerV4:
         self.challenger_hits = 0
         self.challenger_strong_hits = 0
         self.challenger_max_displacement = 0.0
+        self.challenger_previous_position: np.ndarray | None = None
+        self.challenger_previous_frame = -1
+        self.challenger_velocity = np.zeros(2, dtype=np.float64)
+        self.challenger_ground_hits = 0
+        self.reinitialization_velocity = np.zeros(2, dtype=np.float64)
+        self.challenger_prediction_suppressions = 0
+        self.airborne_challenger_promotions = 0
         self.challengers_started = 0
         self.challenger_promotions = 0
         self.challenger_static_rejections = 0
         self.challenger_reinitialization_ready = False
+        self.reacquisition_hypotheses: list[BallReacquisitionHypothesis] = []
+        self.next_reacquisition_hypothesis_id = 1
+        self.peak_reacquisition_hypotheses = 0
+        self.reacquisition_competing_rejections = 0
         self.flight_mode = False
         self.flight_clear_hits = 0
         self.selected_measurement_details: dict[str, Any] = {}
@@ -3107,9 +3384,28 @@ class BallTrackerV4:
         frame_width: int,
         pitch_transform: Any | None = None,
         frame: np.ndarray | None = None,
+        pitch_camera: "PitchRadar | None" = None,
     ) -> list[AnalysisObject]:
         self._expire_lost_track(frame_index)
         predicted = self._predict(frame_index)
+        predicted_3d = self._predict_3d(frame_index)
+        frame_shape = (
+            frame.shape
+            if frame is not None
+            else (int(round(frame_width * 9 / 16)), frame_width)
+        )
+        camera_projection = (
+            pitch_camera.camera_projection_matrix(frame_shape)
+            if pitch_camera is not None and pitch_camera.is_reliable(0.52)
+            else None
+        )
+        projected_3d = self._project_3d(predicted_3d, camera_projection)
+        trusted_3d_projection = (
+            projected_3d is not None
+            and self.trajectory_3d_confidence >= 0.48
+        )
+        if self.flight_mode and trusted_3d_projection:
+            predicted = projected_3d
         trajectory_prediction = self._trajectory_prediction(frame_index)
         current_gray = (
             cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -3120,8 +3416,17 @@ class BallTrackerV4:
         if (
             flow_prediction is not None
             and self.flight_mode
-            and trajectory_prediction is not None
-            and float(np.linalg.norm(flow_prediction - trajectory_prediction))
+            and (trusted_3d_projection or trajectory_prediction is not None)
+            and float(
+                np.linalg.norm(
+                    flow_prediction
+                    - (
+                        projected_3d
+                        if trusted_3d_projection
+                        else trajectory_prediction
+                    )
+                )
+            )
             > self._trajectory_gate(frame_index, frame_width)
         ):
             flow_prediction = None
@@ -3131,7 +3436,9 @@ class BallTrackerV4:
         if flow_prediction is not None:
             self.optical_flow_successes += 1
             self.flow_position = flow_prediction.copy()
-            if self.flight_mode and trajectory_prediction is not None:
+            if self.flight_mode and trusted_3d_projection:
+                predicted = projected_3d * 0.68 + flow_prediction * 0.32
+            elif self.flight_mode and trajectory_prediction is not None:
                 predicted = flow_prediction * 0.72 + trajectory_prediction * 0.28
             else:
                 predicted = (
@@ -3144,12 +3451,28 @@ class BallTrackerV4:
         challenger = self._consider_global_challenger(
             frame_index,
             detections,
+            players,
             frame_width,
+            predicted,
         )
         if challenger is not None:
             self._prepare_challenger_reinitialization()
             predicted = None
             measurement = challenger
+            center = np.array(self._center(challenger.bbox), dtype=np.float64)
+            near_foot, _ = self._player_relation(center, players, frame_width)
+            self.selected_measurement_details = {
+                "near_foot": near_foot,
+                "ground_contact": self._ground_contact(
+                    center,
+                    players,
+                    frame_width,
+                ),
+                "dormant": True,
+                "metric_conflict": False,
+                "image_consistent": True,
+                "body_pass_through": False,
+            }
         else:
             measurement = self._select_measurement(
                 frame_index,
@@ -3180,9 +3503,15 @@ class BallTrackerV4:
                     self._remember_gray(current_gray)
                     return []
                 self.position = measured
-                self.velocity[:] = 0.0
+                self.velocity = self.reinitialization_velocity.copy()
+                self.reinitialization_velocity[:] = 0.0
                 self.kalman_state = np.array(
-                    [measured[0], measured[1], 0.0, 0.0],
+                    [
+                        measured[0],
+                        measured[1],
+                        self.velocity[0],
+                        self.velocity[1],
+                    ],
                     dtype=np.float64,
                 )
                 self.kalman_covariance = np.diag(
@@ -3198,8 +3527,13 @@ class BallTrackerV4:
                 self.dormant_reacquisitions += 1
             self._update_flight_state(frame_index, measured_pitch)
             self._update_observed_trajectory(frame_index, measured, frame_width)
-            if not self.flight_mode:
-                self._update_pitch_state(frame_index, measured_pitch)
+            self._update_3d_state(
+                frame_index=frame_index,
+                measurement=measured,
+                measured_pitch=measured_pitch,
+                predicted_3d=predicted_3d,
+                camera_projection=camera_projection,
+            )
             self.flow_position = measured.copy()
             self.size = self.size * 0.80 + np.array(
                 [
@@ -3224,6 +3558,10 @@ class BallTrackerV4:
         if self.position is None or self.last_observed_frame < 0:
             self._remember_gray(current_gray)
             return []
+        if self._challenger_suppresses_prediction(frame_index):
+            self.challenger_prediction_suppressions += 1
+            self._remember_gray(current_gray)
+            return []
         gap = frame_index - self.last_observed_frame
         interpolation_limit = (
             self.max_airborne_interpolation_frames
@@ -3242,7 +3580,22 @@ class BallTrackerV4:
         self.kalman_covariance = self.predicted_covariance.copy()
         self.position = self.kalman_state[:2].copy()
         self.velocity = self.kalman_state[2:].copy()
-        if not self.flight_mode:
+        if self.flight_mode and predicted_3d is not None:
+            self._commit_3d_prediction(frame_index, predicted_3d)
+            projected = self._project_3d(self.position_3d, camera_projection)
+            if projected is not None and self.trajectory_3d_confidence >= 0.48:
+                self.position = projected
+                self.kalman_state[:2] = projected
+            elif predicted is not None:
+                # Monocular height is under-constrained. A low-confidence 3D
+                # estimate may enrich analytics, but it must never drag the
+                # visible marker away from the image/flow trajectory.
+                self.position = predicted.copy()
+                self.kalman_state[:2] = self.position
+                self.three_d_low_confidence_fallbacks += 1
+            else:
+                self.three_d_projection_failures += 1
+        elif not self.flight_mode:
             self._predict_pitch_state(frame_index)
         self.last_frame = frame_index
         self.confidence *= 0.97 if self.flight_mode and flow_prediction_valid else 0.82
@@ -3270,7 +3623,7 @@ class BallTrackerV4:
 
     def summary(self) -> dict[str, Any]:
         return {
-            "engine": "metric_image_fusion_ball_tracker_v4",
+            "engine": "metric_image_fusion_ball_tracker_v6_multihypothesis_3d",
             "track_id": self.track_id,
             "observed_frames": self.observed_frames,
             "interpolated_frames": self.interpolated_frames,
@@ -3303,7 +3656,31 @@ class BallTrackerV4:
             "challengers_started": self.challengers_started,
             "challenger_promotions": self.challenger_promotions,
             "challenger_static_rejections": self.challenger_static_rejections,
+            "challenger_prediction_suppressions": self.challenger_prediction_suppressions,
+            "airborne_challenger_promotions": self.airborne_challenger_promotions,
+            "active_reacquisition_hypotheses": len(
+                self.reacquisition_hypotheses
+            ),
+            "peak_reacquisition_hypotheses": self.peak_reacquisition_hypotheses,
+            "reacquisition_competing_rejections": (
+                self.reacquisition_competing_rejections
+            ),
             "flight_mode_active": self.flight_mode,
+            "trajectory_3d": {
+                "active": self.position_3d is not None,
+                "confidence": round(self.trajectory_3d_confidence, 4),
+                "observed_frames": self.three_d_observed_frames,
+                "predicted_frames": self.three_d_predicted_frames,
+                "maximum_height_cm": round(self.maximum_height_cm, 2),
+                "projection_failures": self.three_d_projection_failures,
+                "low_confidence_image_fallbacks": (
+                    self.three_d_low_confidence_fallbacks
+                ),
+                "observation_projection_rejections": (
+                    self.three_d_observation_projection_rejections
+                ),
+                "gravity_cm_per_frame2": round(self.gravity_cm_per_frame2, 5),
+            },
             "state_covariance_trace": round(float(np.trace(self.kalman_covariance)), 3),
             "metric_state_active": self.pitch_position is not None,
             "pitch_samples": len(self.pitch_path),
@@ -3412,101 +3789,304 @@ class BallTrackerV4:
         self,
         frame_index: int,
         detections: list[AnalysisObject],
+        players: list[AnalysisObject],
         frame_width: int,
+        predicted: np.ndarray | None,
     ) -> AnalysisObject | None:
+        observation_gap = (
+            frame_index - self.last_observed_frame
+            if self.last_observed_frame >= 0
+            else 0
+        )
         dormant = (
             self.position is not None
             and self.last_observed_frame >= 0
-            and frame_index - self.last_observed_frame > self.max_interpolation_frames
+            and observation_gap > self.max_interpolation_frames
         )
-        if not dormant or self.flight_mode:
+        stale_flight = dormant and self.flight_mode
+        if not dormant:
             self._clear_challenger()
             return None
 
-        if (
-            self.challenger_position is not None
-            and frame_index - self.challenger_last_frame > 24
-        ):
-            if self.challenger_hits >= 2 and self.challenger_max_displacement < 30.0:
+        hypothesis_ttl = 14 if stale_flight else 24
+        retained_hypotheses: list[BallReacquisitionHypothesis] = []
+        for hypothesis in self.reacquisition_hypotheses:
+            hypothesis_age = frame_index - hypothesis.last_frame
+            if hypothesis_age <= hypothesis_ttl:
+                retained_hypotheses.append(hypothesis)
+            elif hypothesis.hits >= 2 and hypothesis.max_displacement < 30.0:
                 self.challenger_static_rejections += 1
-            self._clear_challenger()
+        self.reacquisition_hypotheses = retained_hypotheses
 
-        eligible = []
+        eligible: list[
+            tuple[float, AnalysisObject, bool, float, int | None]
+        ] = []
         for detection in detections:
             confidence = float(detection.confidence or 0.0)
             width = max(1.0, detection.bbox[2] - detection.bbox[0])
             height = max(1.0, detection.bbox[3] - detection.bbox[1])
             aspect = width / height
             if (
-                confidence < 0.32
-                or not 0.45 <= aspect <= 1.75
-                or max(width, height) > max(28.0, frame_width * 0.045)
+                confidence < (0.14 if stale_flight else 0.32)
+                or not 0.42 <= aspect <= 1.80
+                or max(width, height) > max(32.0, frame_width * 0.024)
             ):
                 continue
-            eligible.append(detection)
-        if not eligible:
-            return None
-
-        candidate = None
-        if self.challenger_position is not None:
-            elapsed = max(1, frame_index - self.challenger_last_frame)
-            link_gate = max(96.0, frame_width * 0.05) + elapsed * max(
-                8.0,
-                frame_width * 0.006,
+            center = np.array(self._center(detection.bbox), dtype=np.float64)
+            near_foot, overlaps_body = self._player_relation(
+                center,
+                players,
+                frame_width,
             )
-            linked = [
-                (
-                    float(
-                        np.linalg.norm(
-                            np.array(self._center(item.bbox), dtype=np.float64)
-                            - self.challenger_position
-                        )
-                    ),
-                    item,
+            body_owner_id = self._player_body_owner_id(center, players)
+            if overlaps_body and not stale_flight:
+                continue
+            ground_contact = self._ground_contact(center, players, frame_width)
+            distance_from_stale = (
+                float(np.linalg.norm(center - predicted))
+                if predicted is not None
+                else frame_width
+            )
+            score = (
+                confidence
+                + (0.28 if ground_contact else 0.14 if near_foot else 0.0)
+                + min(0.16, distance_from_stale / max(frame_width, 1) * 0.22)
+                - abs(np.log(max(width / height, 1e-6))) * 0.04
+                - (0.16 if overlaps_body else 0.0)
+            )
+            size = (width + height) / 2.0
+            eligible.append(
+                (score, detection, ground_contact, size, body_owner_id)
+            )
+
+        # Duplicate model boxes at the same location must not create several
+        # independent votes for the same physical object.
+        deduplicated: list[
+            tuple[float, AnalysisObject, bool, float, int | None]
+        ] = []
+        for item in sorted(eligible, key=lambda value: value[0], reverse=True):
+            center = np.array(self._center(item[1].bbox), dtype=np.float64)
+            if any(
+                float(
+                    np.linalg.norm(
+                        center
+                        - np.array(self._center(existing[1].bbox), dtype=np.float64)
+                    )
                 )
-                for item in eligible
-            ]
-            linked = [item for item in linked if item[0] <= link_gate]
-            if linked:
-                candidate = min(linked, key=lambda item: item[0])[1]
-            else:
-                return None
-        else:
-            candidate = max(
-                eligible,
-                key=lambda item: float(item.confidence or 0.0),
-            )
-            center = np.array(self._center(candidate.bbox), dtype=np.float64)
-            self.challenger_position = center
-            self.challenger_origin = center.copy()
-            self.challenger_first_frame = frame_index
-            self.challenger_last_frame = frame_index
-            self.challenger_hits = 1
-            self.challenger_strong_hits = 1
-            self.challenger_max_displacement = 0.0
-            self.challengers_started += 1
-            return None
+                <= max(7.0, frame_width * 0.004)
+                for existing in deduplicated
+            ):
+                continue
+            deduplicated.append(item)
+        eligible = deduplicated
 
-        center = np.array(self._center(candidate.bbox), dtype=np.float64)
-        self.challenger_position = center
-        self.challenger_last_frame = frame_index
-        self.challenger_hits += 1
-        self.challenger_strong_hits += 1
-        if self.challenger_origin is not None:
-            self.challenger_max_displacement = max(
-                self.challenger_max_displacement,
-                float(np.linalg.norm(center - self.challenger_origin)),
-            )
-        span = frame_index - self.challenger_first_frame
-        if (
-            self.challenger_hits >= 2
-            and self.challenger_strong_hits >= 2
-            and span >= 4
-            and self.challenger_max_displacement >= max(30.0, frame_width * 0.015)
+        matched_hypotheses: set[int] = set()
+        matched_detections: set[int] = set()
+        association_candidates: list[tuple[float, int, int]] = []
+        for hypothesis_index, hypothesis in enumerate(
+            self.reacquisition_hypotheses
         ):
-            self.challenger_promotions += 1
-            return candidate
-        return None
+            elapsed = max(1, frame_index - hypothesis.last_frame)
+            predicted_position = (
+                hypothesis.position + hypothesis.velocity * elapsed
+            )
+            link_gate = max(42.0, frame_width * 0.022) + max(
+                0,
+                elapsed - 1,
+            ) * max(38.0, frame_width * 0.020)
+            average_size = hypothesis.size_sum / max(hypothesis.hits, 1)
+            for detection_index, (
+                score,
+                detection,
+                _,
+                size,
+                body_owner_id,
+            ) in enumerate(eligible):
+                center = np.array(
+                    self._center(detection.bbox),
+                    dtype=np.float64,
+                )
+                distance = float(np.linalg.norm(center - predicted_position))
+                if distance > link_gate:
+                    continue
+                size_delta = abs(
+                    np.log(max(size, 1e-6) / max(average_size, 1e-6))
+                )
+                if size_delta > 1.15:
+                    continue
+                if (
+                    hypothesis.body_owner_id is not None
+                    and body_owner_id is not None
+                    and hypothesis.body_owner_id != body_owner_id
+                ):
+                    continue
+                association_cost = (
+                    distance / max(link_gate, 1.0)
+                    + size_delta * 0.18
+                    - score * 0.08
+                )
+                association_candidates.append(
+                    (association_cost, hypothesis_index, detection_index)
+                )
+
+        for _, hypothesis_index, detection_index in sorted(
+            association_candidates,
+            key=lambda item: item[0],
+        ):
+            if (
+                hypothesis_index in matched_hypotheses
+                or detection_index in matched_detections
+            ):
+                continue
+            hypothesis = self.reacquisition_hypotheses[hypothesis_index]
+            (
+                _,
+                detection,
+                ground_contact,
+                size,
+                body_owner_id,
+            ) = eligible[detection_index]
+            center = np.array(self._center(detection.bbox), dtype=np.float64)
+            elapsed = max(1, frame_index - hypothesis.previous_frame)
+            instant_velocity = (center - hypothesis.previous_position) / elapsed
+            instant_acceleration = instant_velocity - hypothesis.velocity
+            hypothesis.acceleration = (
+                hypothesis.acceleration * 0.55 + instant_acceleration * 0.45
+            )
+            hypothesis.velocity = (
+                hypothesis.velocity * 0.38 + instant_velocity * 0.62
+            )
+            hypothesis.previous_position = center.copy()
+            hypothesis.previous_frame = frame_index
+            hypothesis.position = center
+            hypothesis.last_frame = frame_index
+            hypothesis.hits += 1
+            hypothesis.strong_hits += int(
+                float(detection.confidence or 0.0) >= 0.28
+            )
+            hypothesis.ground_hits += int(ground_contact)
+            hypothesis.confidence_sum += float(detection.confidence or 0.0)
+            hypothesis.size_sum += size
+            hypothesis.last_detection = detection
+            if hypothesis.body_owner_id is None and body_owner_id is not None:
+                hypothesis.body_owner_id = body_owner_id
+            hypothesis.max_displacement = max(
+                hypothesis.max_displacement,
+                float(np.linalg.norm(center - hypothesis.origin)),
+            )
+            matched_hypotheses.add(hypothesis_index)
+            matched_detections.add(detection_index)
+
+        for detection_index, (
+            _,
+            detection,
+            ground_contact,
+            size,
+            body_owner_id,
+        ) in enumerate(eligible):
+            if detection_index in matched_detections:
+                continue
+            center = np.array(self._center(detection.bbox), dtype=np.float64)
+            confidence = float(detection.confidence or 0.0)
+            self.reacquisition_hypotheses.append(
+                BallReacquisitionHypothesis(
+                    hypothesis_id=self.next_reacquisition_hypothesis_id,
+                    position=center.copy(),
+                    origin=center.copy(),
+                    first_frame=frame_index,
+                    last_frame=frame_index,
+                    previous_position=center.copy(),
+                    previous_frame=frame_index,
+                    strong_hits=int(confidence >= 0.28),
+                    ground_hits=int(ground_contact),
+                    confidence_sum=confidence,
+                    size_sum=size,
+                    last_detection=detection,
+                    body_owner_id=body_owner_id,
+                )
+            )
+            self.next_reacquisition_hypothesis_id += 1
+            self.challengers_started += 1
+
+        def hypothesis_rank(hypothesis: BallReacquisitionHypothesis) -> float:
+            average_confidence = hypothesis.confidence_sum / max(hypothesis.hits, 1)
+            span = max(1, hypothesis.last_frame - hypothesis.first_frame)
+            movement_rate = hypothesis.max_displacement / span
+            acceleration = float(np.linalg.norm(hypothesis.acceleration))
+            return (
+                hypothesis.hits * 0.52
+                + average_confidence * 2.2
+                + min(2.0, movement_rate / max(frame_width * 0.006, 1.0))
+                - min(1.5, acceleration / max(frame_width * 0.055, 1.0))
+            )
+
+        if len(self.reacquisition_hypotheses) > 8:
+            self.reacquisition_hypotheses = sorted(
+                self.reacquisition_hypotheses,
+                key=hypothesis_rank,
+                reverse=True,
+            )[:8]
+        self.peak_reacquisition_hypotheses = max(
+            self.peak_reacquisition_hypotheses,
+            len(self.reacquisition_hypotheses),
+        )
+        promotable: list[BallReacquisitionHypothesis] = []
+        for hypothesis in self.reacquisition_hypotheses:
+            span = hypothesis.last_frame - hypothesis.first_frame
+            average_confidence = (
+                hypothesis.confidence_sum / max(hypothesis.hits, 1)
+            )
+            acceleration = float(np.linalg.norm(hypothesis.acceleration))
+            motion_confirmed = (
+                hypothesis.max_displacement >= max(30.0, frame_width * 0.014)
+                and acceleration <= max(150.0, frame_width * 0.080)
+            )
+            airborne_confirmed = (
+                stale_flight
+                and hypothesis.hits >= 3
+                and span >= 4
+                and average_confidence >= 0.15
+                and motion_confirmed
+                and (
+                    hypothesis.ground_hits >= 1
+                    or hypothesis.strong_hits >= 1
+                    or hypothesis.max_displacement
+                    >= max(90.0, frame_width * 0.055)
+                )
+            )
+            dormant_confirmed = (
+                not stale_flight
+                and hypothesis.hits >= 3
+                and hypothesis.strong_hits >= 2
+                and span >= 4
+                and motion_confirmed
+            )
+            if (
+                (airborne_confirmed or dormant_confirmed)
+                and hypothesis.last_detection is not None
+                and hypothesis.last_frame == frame_index
+            ):
+                promotable.append(hypothesis)
+
+        if not promotable:
+            return None
+        winner = max(promotable, key=hypothesis_rank)
+        self.reacquisition_competing_rejections += max(0, len(promotable) - 1)
+        self.challenger_position = winner.position.copy()
+        self.challenger_origin = winner.origin.copy()
+        self.challenger_first_frame = winner.first_frame
+        self.challenger_last_frame = winner.last_frame
+        self.challenger_hits = winner.hits
+        self.challenger_strong_hits = winner.strong_hits
+        self.challenger_max_displacement = winner.max_displacement
+        self.challenger_previous_position = winner.previous_position.copy()
+        self.challenger_previous_frame = winner.previous_frame
+        self.challenger_velocity = winner.velocity.copy()
+        self.challenger_ground_hits = winner.ground_hits
+        self.challenger_promotions += 1
+        if stale_flight:
+            self.airborne_challenger_promotions += 1
+        return winner.last_detection
 
     def _prepare_challenger_reinitialization(self) -> None:
         origin = (
@@ -3515,6 +4095,7 @@ class BallTrackerV4:
             else None
         )
         origin_frame = self.challenger_first_frame
+        reinitialization_velocity = self.challenger_velocity.copy()
         self.position = None
         self.flow_position = None
         self.observed_position = None
@@ -3529,6 +4110,11 @@ class BallTrackerV4:
         self.pitch_position = None
         self.pitch_velocity[:] = 0.0
         self.last_pitch_frame = -1
+        self.position_3d = None
+        self.velocity_3d[:] = 0.0
+        self.last_3d_frame = -1
+        self.trajectory_3d_confidence = 0.0
+        self.flight_start_frame = -1
         self.confidence = 0.0
         self.current_interpolation_streak = 0
         self.flight_mode = False
@@ -3537,10 +4123,12 @@ class BallTrackerV4:
         self.pending_position = origin
         self.pending_pitch_position = None
         self.pending_frame = origin_frame
+        self.reinitialization_velocity = reinitialization_velocity
         self.challenger_reinitialization_ready = True
         self._clear_challenger()
 
     def _clear_challenger(self) -> None:
+        self.reacquisition_hypotheses.clear()
         self.challenger_position = None
         self.challenger_origin = None
         self.challenger_first_frame = -1
@@ -3548,6 +4136,18 @@ class BallTrackerV4:
         self.challenger_hits = 0
         self.challenger_strong_hits = 0
         self.challenger_max_displacement = 0.0
+        self.challenger_previous_position = None
+        self.challenger_previous_frame = -1
+        self.challenger_velocity[:] = 0.0
+        self.challenger_ground_hits = 0
+
+    def _challenger_suppresses_prediction(self, frame_index: int) -> bool:
+        return (
+            bool(self.reacquisition_hypotheses)
+            and self.last_observed_frame >= 0
+            and frame_index - self.last_observed_frame
+            > self.max_interpolation_frames
+        )
 
     def _trajectory_prediction(self, frame_index: int) -> np.ndarray | None:
         if self.observed_position is None or self.observed_position_frame < 0:
@@ -3584,6 +4184,233 @@ class BallTrackerV4:
             self.observed_velocity[:] = 0.0
         self.observed_position = measurement.copy()
         self.observed_position_frame = frame_index
+
+    def _predict_3d(self, frame_index: int) -> np.ndarray | None:
+        if self.position_3d is None or self.last_3d_frame < 0:
+            return None
+        elapsed = max(0, frame_index - self.last_3d_frame)
+        predicted = self.position_3d + self.velocity_3d * elapsed
+        if self.flight_mode and elapsed > 0:
+            predicted[2] -= (
+                0.5 * self.gravity_cm_per_frame2 * elapsed * elapsed
+            )
+        predicted[0] = float(np.clip(predicted[0], 0.0, PITCH_LENGTH_CM))
+        predicted[1] = float(np.clip(predicted[1], 0.0, PITCH_WIDTH_CM))
+        predicted[2] = max(0.0, float(predicted[2]))
+        return predicted
+
+    def _project_3d(
+        self,
+        point_3d: np.ndarray | None,
+        projection: np.ndarray | None,
+    ) -> np.ndarray | None:
+        if point_3d is None or projection is None:
+            return None
+        homogeneous = projection @ np.array(
+            [point_3d[0], point_3d[1], point_3d[2], 1.0],
+            dtype=np.float64,
+        )
+        if (
+            not np.all(np.isfinite(homogeneous))
+            or abs(float(homogeneous[2])) <= 1e-9
+        ):
+            return None
+        return (homogeneous[:2] / homogeneous[2]).astype(np.float64)
+
+    def _backproject_3d(
+        self,
+        image_point: np.ndarray,
+        height_cm: float,
+        projection: np.ndarray,
+    ) -> np.ndarray | None:
+        u, v = float(image_point[0]), float(image_point[1])
+        first = projection[0] - u * projection[2]
+        second = projection[1] - v * projection[2]
+        system = np.array(
+            [[first[0], first[1]], [second[0], second[1]]],
+            dtype=np.float64,
+        )
+        target = -np.array(
+            [
+                first[2] * height_cm + first[3],
+                second[2] * height_cm + second[3],
+            ],
+            dtype=np.float64,
+        )
+        if abs(float(np.linalg.det(system))) <= 1e-9:
+            return None
+        xy = np.linalg.solve(system, target)
+        if not np.all(np.isfinite(xy)):
+            return None
+        if not (
+            -1200.0 <= xy[0] <= PITCH_LENGTH_CM + 1200.0
+            and -1200.0 <= xy[1] <= PITCH_WIDTH_CM + 1200.0
+        ):
+            return None
+        return np.array([xy[0], xy[1], height_cm], dtype=np.float64)
+
+    def _update_3d_state(
+        self,
+        frame_index: int,
+        measurement: np.ndarray,
+        measured_pitch: np.ndarray | None,
+        predicted_3d: np.ndarray | None,
+        camera_projection: np.ndarray | None,
+    ) -> None:
+        if not self.flight_mode:
+            self._update_pitch_state(frame_index, measured_pitch)
+            if self.pitch_position is not None:
+                self.position_3d = np.array(
+                    [self.pitch_position[0], self.pitch_position[1], 0.0],
+                    dtype=np.float64,
+                )
+                self.velocity_3d = np.array(
+                    [self.pitch_velocity[0], self.pitch_velocity[1], 0.0],
+                    dtype=np.float64,
+                )
+                self.last_3d_frame = frame_index
+                self.trajectory_3d_confidence = max(
+                    self.trajectory_3d_confidence * 0.75,
+                    0.78,
+                )
+                self.three_d_observed_frames += 1
+            return
+
+        expected = predicted_3d
+        if expected is None and self.pitch_position is not None:
+            expected = np.array(
+                [
+                    self.pitch_position[0],
+                    self.pitch_position[1],
+                    max(35.0, float(self.velocity_3d[2])),
+                ],
+                dtype=np.float64,
+            )
+        measurement_3d = None
+        residual_cm = float("inf")
+        if camera_projection is not None and expected is not None:
+            expected_height = max(0.0, float(expected[2]))
+            best: tuple[float, np.ndarray] | None = None
+            for height_cm in np.linspace(0.0, 3200.0, 65):
+                candidate = self._backproject_3d(
+                    measurement,
+                    float(height_cm),
+                    camera_projection,
+                )
+                if candidate is None:
+                    continue
+                horizontal_residual = float(
+                    np.linalg.norm(candidate[:2] - expected[:2])
+                )
+                vertical_weight = 0.04 if expected_height < 80.0 else 0.18
+                score = horizontal_residual + abs(
+                    float(candidate[2]) - expected_height
+                ) * vertical_weight
+                if best is None or score < best[0]:
+                    best = (score, candidate)
+            if best is not None:
+                residual_cm = best[0]
+                measurement_3d = best[1]
+                if not bool(self.selected_measurement_details.get("ground_contact")):
+                    measurement_3d[2] = max(35.0, measurement_3d[2])
+
+        if measurement_3d is None:
+            measurement_3d = (
+                expected.copy()
+                if expected is not None
+                else np.array(
+                    [
+                        measured_pitch[0] if measured_pitch is not None else 0.0,
+                        measured_pitch[1] if measured_pitch is not None else 0.0,
+                        35.0,
+                    ],
+                    dtype=np.float64,
+                )
+            )
+            residual_cm = 1800.0
+
+        projected_measurement = self._project_3d(
+            measurement_3d,
+            camera_projection,
+        )
+        projection_residual_px = (
+            float(np.linalg.norm(projected_measurement - measurement))
+            if projected_measurement is not None
+            else float("inf")
+        )
+        if projection_residual_px > 8.0:
+            # Never publish a 3D state that cannot reproduce the observation
+            # which created it. Keep it as low-confidence analytics metadata;
+            # the image tracker remains authoritative for rendering.
+            self.three_d_observation_projection_rejections += 1
+            residual_cm = max(residual_cm, 2200.0)
+
+        previous = self.position_3d.copy() if self.position_3d is not None else None
+        previous_frame = self.last_3d_frame
+        if previous is not None and previous_frame >= 0:
+            elapsed = max(1, frame_index - previous_frame)
+            observed_velocity = (measurement_3d - previous) / elapsed
+            horizontal_speed = float(np.linalg.norm(observed_velocity[:2]))
+            if horizontal_speed > 320.0:
+                observed_velocity[:2] *= 320.0 / horizontal_speed
+            observed_velocity[2] = float(
+                np.clip(observed_velocity[2], -120.0, 120.0)
+            )
+            blend = 0.58 if residual_cm <= 900.0 else 0.34
+            self.velocity_3d = (
+                self.velocity_3d * (1.0 - blend)
+                + observed_velocity * blend
+            )
+        elif self.velocity_3d[2] <= 0.0:
+            self.velocity_3d[2] = 48.0
+
+        # The selected point lies on the current image ray. Blending XYZ with
+        # a previous ray creates a point that projects to neither observation,
+        # which was the source of the marker jump near distant players.
+        self.position_3d = measurement_3d.copy()
+        self.position_3d[0] = float(
+            np.clip(self.position_3d[0], 0.0, PITCH_LENGTH_CM)
+        )
+        self.position_3d[1] = float(
+            np.clip(self.position_3d[1], 0.0, PITCH_WIDTH_CM)
+        )
+        self.position_3d[2] = max(0.0, float(self.position_3d[2]))
+        self.pitch_position = self.position_3d[:2].copy()
+        self.pitch_velocity = self.velocity_3d[:2].copy()
+        self.last_pitch_frame = frame_index
+        self.last_3d_frame = frame_index
+        self.maximum_height_cm = max(
+            self.maximum_height_cm,
+            float(self.position_3d[2]),
+        )
+        self.trajectory_3d_confidence = float(
+            np.clip(
+                np.exp(-residual_cm / 1400.0)
+                * np.exp(-projection_residual_px / 10.0),
+                0.08,
+                0.96,
+            )
+        )
+        self.three_d_observed_frames += 1
+
+    def _commit_3d_prediction(
+        self,
+        frame_index: int,
+        predicted_3d: np.ndarray,
+    ) -> None:
+        elapsed = max(1, frame_index - max(self.last_3d_frame, 0))
+        self.position_3d = predicted_3d.copy()
+        self.velocity_3d[2] -= self.gravity_cm_per_frame2 * elapsed
+        self.pitch_position = self.position_3d[:2].copy()
+        self.pitch_velocity = self.velocity_3d[:2].copy()
+        self.last_pitch_frame = frame_index
+        self.last_3d_frame = frame_index
+        self.maximum_height_cm = max(
+            self.maximum_height_cm,
+            float(self.position_3d[2]),
+        )
+        self.trajectory_3d_confidence *= 0.985
+        self.three_d_predicted_frames += 1
 
     def _correct_kalman(
         self,
@@ -3638,6 +4465,12 @@ class BallTrackerV4:
         self.pitch_position = None
         self.pitch_velocity[:] = 0.0
         self.last_pitch_frame = -1
+        self.position_3d = None
+        self.velocity_3d[:] = 0.0
+        self.last_3d_frame = -1
+        self.trajectory_3d_confidence = 0.0
+        self.flight_start_frame = -1
+        self.reinitialization_velocity[:] = 0.0
         self.confidence = 0.0
         self.current_interpolation_streak = 0
         self.flight_mode = False
@@ -3851,6 +4684,9 @@ class BallTrackerV4:
         if should_enter_flight and not self.flight_mode:
             self.flight_mode = True
             self.flight_clear_hits = 0
+            self.flight_start_frame = frame_index
+            if self.position_3d is not None:
+                self.velocity_3d[2] = max(self.velocity_3d[2], 48.0)
             self.airborne_entries += 1
         if self.flight_mode:
             self.airborne_observed_frames += 1
@@ -3870,6 +4706,10 @@ class BallTrackerV4:
                     )
                     self.ground_reacquisitions += 1
                     self.ground_contact_confirmations += 1
+                    self.flight_start_frame = -1
+                    if self.position_3d is not None:
+                        self.position_3d[2] = 0.0
+                    self.velocity_3d[2] = 0.0
             else:
                 self.flight_clear_hits = 0
 
@@ -3916,6 +4756,25 @@ class BallTrackerV4:
             confidence=round(self.confidence, 4),
             is_predicted=predicted,
             role_name="ball",
+            pitch_position=(
+                (
+                    float(self.position_3d[0]),
+                    float(self.position_3d[1]),
+                )
+                if self.position_3d is not None
+                else None
+            ),
+            pitch_velocity=(
+                (float(self.pitch_velocity[0]), float(self.pitch_velocity[1]))
+                if self.pitch_position is not None
+                else None
+            ),
+            height_cm=(
+                float(self.position_3d[2])
+                if self.position_3d is not None
+                else 0.0
+            ),
+            trajectory_3d_confidence=self.trajectory_3d_confidence,
         )
 
     def _record_pitch(
@@ -3925,9 +4784,9 @@ class BallTrackerV4:
         pitch_transform: Any | None,
         predicted: bool,
     ) -> None:
-        if pitch_transform is None or self.flight_mode:
-            return
-        point = pitch_transform(self._center(ball.bbox))
+        point = ball.pitch_position
+        if point is None and pitch_transform is not None and not self.flight_mode:
+            point = pitch_transform(self._center(ball.bbox))
         if point is None:
             return
         self.pitch_path.append(
@@ -3937,6 +4796,11 @@ class BallTrackerV4:
                 "y": round(float(point[1]), 2),
                 "predicted": predicted,
                 "confidence": round(self.confidence, 4),
+                "height_cm": round(float(ball.height_cm), 2),
+                "trajectory_3d_confidence": round(
+                    float(ball.trajectory_3d_confidence),
+                    4,
+                ),
             }
         )
 
@@ -3955,6 +4819,11 @@ class BallTrackerV4:
                 "predicted": predicted,
                 "confidence": round(self.confidence, 4),
                 "airborne": self.flight_mode,
+                "height_cm": round(float(ball.height_cm), 2),
+                "trajectory_3d_confidence": round(
+                    float(ball.trajectory_3d_confidence),
+                    4,
+                ),
             }
         )
 
@@ -3982,6 +4851,31 @@ class BallTrackerV4:
             if torso_left <= center[0] <= torso_right and y1 <= center[1] <= torso_bottom:
                 return near_foot, True
         return near_foot, False
+
+    def _player_body_owner_id(
+        self,
+        center: np.ndarray,
+        players: list[AnalysisObject],
+    ) -> int | None:
+        for player in players:
+            x1, y1, x2, y2 = player.bbox
+            player_height = max(1.0, y2 - y1)
+            player_width = max(1.0, x2 - x1)
+            if (
+                x1 + player_width * 0.12
+                <= center[0]
+                <= x2 - player_width * 0.12
+                and y1
+                <= center[1]
+                <= y1 + player_height * 0.72
+            ):
+                owner_id = (
+                    player.raw_track_id
+                    if player.raw_track_id is not None
+                    else player.track_id
+                )
+                return int(owner_id) if owner_id is not None else None
+        return None
 
     def _ground_contact(
         self,
@@ -4109,7 +5003,28 @@ class PossessionTracker:
             (ball.bbox[0] + ball.bbox[2]) / 2,
             (ball.bbox[1] + ball.bbox[3]) / 2,
         )
-        ball_pitch = pitch_transform(ball_center)
+        ball_pitch = (
+            ball.pitch_position
+            if ball.pitch_position is not None
+            else pitch_transform(ball_center)
+        )
+        if (
+            ball.height_cm >= 100.0
+            or (
+                ball.height_cm >= 65.0
+                and ball.trajectory_3d_confidence >= 0.10
+            )
+        ):
+            if self.current_player is not None and self.release_frame is None:
+                self.release_frame = frame_index
+                self.release_pitch = ball_pitch or self.last_control_pitch
+                self.far_ball_releases += 1
+            self.candidate_player = None
+            self.candidate_hits = 0
+            if not ball.is_predicted:
+                self.last_observed_frame = frame_index
+            self.unassigned_frames += 1
+            return None, None
         if ball.is_predicted:
             if (
                 self.current_team is not None
@@ -4122,7 +5037,8 @@ class PossessionTracker:
             self.unassigned_frames += 1
             return None, None
         nearest = self._nearest_player(ball, players, pitch_transform)
-        if nearest is None or nearest[0] > 180.0:
+        control_radius_cm = self._control_radius_cm(ball)
+        if nearest is None or nearest[0] > control_radius_cm:
             if self.current_player is not None and self.release_frame is None:
                 self.release_frame = frame_index
                 self.release_pitch = ball_pitch or self.last_control_pitch
@@ -4179,7 +5095,7 @@ class PossessionTracker:
         percentage_denominator = max(1, assigned_frames)
         assigned_coverage = assigned_frames / max(1, total_frames)
         return {
-            "engine": "metric_ball_possession_and_pass_detection_v3",
+            "engine": "metric_ball_possession_and_pass_detection_v4",
             "team_1_percent": round(
                 self.team_frames[1] * 100 / percentage_denominator,
                 2,
@@ -4206,11 +5122,14 @@ class PossessionTracker:
             "confirmation_frames": self.confirmation_frames,
             "maximum_link_gap_frames": self.maximum_link_gap_frames,
             "maximum_control_distance_cm": 180.0,
+            "fast_ball_control_distance_cm": 90.0,
+            "airborne_release_height_cm": 65.0,
             "pass_detection": {
                 "minimum_travel_m": 1.2,
                 "same_team_required": True,
                 "uses_canonical_track_ids": True,
                 "predicted_ball_frames_can_hold_but_not_change_possession": True,
+                "requires_ball_approach_direction_when_fast": True,
             },
         }
 
@@ -4296,7 +5215,11 @@ class PossessionTracker:
         pitch_transform: Any,
     ) -> tuple[float, AnalysisObject] | None:
         ball_center = ((ball.bbox[0] + ball.bbox[2]) / 2, (ball.bbox[1] + ball.bbox[3]) / 2)
-        ball_pitch = pitch_transform(ball_center)
+        ball_pitch = (
+            ball.pitch_position
+            if ball.pitch_position is not None
+            else pitch_transform(ball_center)
+        )
         nearest: tuple[float, AnalysisObject] | None = None
         for player in players:
             if player.is_predicted or player.role_name not in ANALYTICS_ROLES:
@@ -4305,12 +5228,45 @@ class PossessionTracker:
             player_pitch = pitch_transform(foot)
             if ball_pitch is not None and player_pitch is not None:
                 distance = float(np.hypot(player_pitch[0] - ball_pitch[0], player_pitch[1] - ball_pitch[1]))
+                if ball.pitch_velocity is not None:
+                    velocity = np.array(ball.pitch_velocity, dtype=np.float64)
+                    speed_cm_per_frame = float(np.linalg.norm(velocity))
+                    to_player = np.array(
+                        [
+                            player_pitch[0] - ball_pitch[0],
+                            player_pitch[1] - ball_pitch[1],
+                        ],
+                        dtype=np.float64,
+                    )
+                    to_player_norm = float(np.linalg.norm(to_player))
+                    if speed_cm_per_frame > 1e-6 and to_player_norm > 1e-6:
+                        approach_alignment = float(
+                            np.dot(velocity, to_player)
+                            / (speed_cm_per_frame * to_player_norm)
+                        )
+                        speed_mps = speed_cm_per_frame * self.fps / 100.0
+                        if (
+                            speed_mps >= 5.0
+                            and approach_alignment < -0.20
+                            and distance > 70.0
+                        ):
+                            continue
             else:
                 player_height = max(1.0, player.bbox[3] - player.bbox[1])
                 distance = float(np.hypot(foot[0] - ball_center[0], foot[1] - ball_center[1]) * 180.0 / player_height)
             if nearest is None or distance < nearest[0]:
                 nearest = (distance, player)
         return nearest
+
+    def _control_radius_cm(self, ball: AnalysisObject) -> float:
+        if ball.pitch_velocity is None:
+            return 180.0
+        speed_mps = float(np.linalg.norm(ball.pitch_velocity)) * self.fps / 100.0
+        if speed_mps >= 12.0:
+            return 90.0
+        if speed_mps >= 7.0:
+            return 125.0
+        return 180.0
 
 
 class PitchRadar:
@@ -4367,6 +5323,10 @@ class PitchRadar:
         self.last_reprojection_error_cm: float | None = None
         self.last_target_span_cm: tuple[float, float] = (0.0, 0.0)
         self.last_player_valid_ratio: float | None = None
+        self.ball_3d_projection_attempts = 0
+        self.ball_3d_projection_successes = 0
+        self.ball_3d_backprojection_attempts = 0
+        self.ball_3d_backprojection_successes = 0
         self.errors = 0
 
     def update(
@@ -6167,8 +7127,11 @@ class PitchRadar:
             )
 
         for ball in balls[:1]:
-            pitch_xy = self.transform_point(
-                ((ball.bbox[0] + ball.bbox[2]) / 2, (ball.bbox[1] + ball.bbox[3]) / 2)
+            pitch_xy = ball.pitch_position or self.transform_point(
+                (
+                    (ball.bbox[0] + ball.bbox[2]) / 2,
+                    (ball.bbox[1] + ball.bbox[3]) / 2,
+                )
             )
             if pitch_xy is not None:
                 cv2.circle(radar, pitch_point(*pitch_xy), max(5, radar_width // 120), (0, 230, 255), cv2.FILLED)
@@ -6344,8 +7307,15 @@ class PitchRadar:
                 "penalty_arc_radius_cm": CENTER_CIRCLE_RADIUS_CM,
                 "center_circle_radius_cm": CENTER_CIRCLE_RADIUS_CM,
             },
-            "projection_model": "planar_homography_with_camera_motion_compensation",
+            "projection_model": "metric_pinhole_3d_from_dynamic_pitch_homography",
             "ground_plane_3d": {"z_cm": 0.0},
+            "ball_3d_projection": {
+                "intrinsics": "frame_scaled_pinhole_estimate",
+                "projection_attempts": self.ball_3d_projection_attempts,
+                "projection_successes": self.ball_3d_projection_successes,
+                "backprojection_attempts": self.ball_3d_backprojection_attempts,
+                "backprojection_successes": self.ball_3d_backprojection_successes,
+            },
             "errors": self.errors,
         }
 
@@ -6469,6 +7439,164 @@ class PitchRadar:
         if abs(scale) < 1e-9:
             return None
         return inverse / scale
+
+    def camera_projection_matrix(
+        self,
+        frame_shape: tuple[int, int] | tuple[int, int, int],
+        require_reliable: bool = True,
+    ) -> np.ndarray | None:
+        """Lift the pitch homography into a metric pinhole camera model.
+
+        The pitch supplies the known Z=0 plane. Intrinsics are estimated from
+        the tactical frame size, then the two planar rotation axes and camera
+        translation are recovered from the homography. The returned matrix
+        preserves the accepted ground-plane projection exactly while adding a
+        physically oriented vertical axis for airborne objects.
+        """
+        ground_projection = self.pitch_to_video_matrix(require_reliable)
+        if ground_projection is None:
+            return None
+        frame_height, frame_width = int(frame_shape[0]), int(frame_shape[1])
+        focal_base = float(max(frame_width, frame_height))
+        best: tuple[float, np.ndarray, bool] | None = None
+        for focal_multiplier in (1.20, 1.55, 1.90, 2.30, 2.80, 0.95):
+            focal = focal_base * focal_multiplier
+            intrinsics = np.array(
+                [
+                    [focal, 0.0, frame_width / 2.0],
+                    [0.0, focal, frame_height / 2.0],
+                    [0.0, 0.0, 1.0],
+                ],
+                dtype=np.float64,
+            )
+            inverse_intrinsics = np.linalg.inv(intrinsics)
+            for sign in (1.0, -1.0):
+                signed_ground = ground_projection * sign
+                first_axis = inverse_intrinsics @ signed_ground[:, 0]
+                second_axis = inverse_intrinsics @ signed_ground[:, 1]
+                first_norm = float(np.linalg.norm(first_axis))
+                second_norm = float(np.linalg.norm(second_axis))
+                metric_scale = (first_norm + second_norm) / 2.0
+                if metric_scale <= 1e-9:
+                    continue
+                axis_orthogonality = abs(
+                    float(np.dot(first_axis, second_axis))
+                    / max(first_norm * second_norm, 1e-9)
+                )
+                scale_mismatch = abs(first_norm - second_norm) / metric_scale
+                first_rotation = first_axis / metric_scale
+                second_rotation = second_axis / metric_scale
+                vertical_rotation = np.cross(first_rotation, second_rotation)
+                vertical_norm = float(np.linalg.norm(vertical_rotation))
+                if vertical_norm <= 1e-9:
+                    continue
+                vertical_rotation /= vertical_norm
+                approximate_rotation = np.column_stack(
+                    (first_rotation, second_rotation, vertical_rotation)
+                )
+                left, _, right = np.linalg.svd(approximate_rotation)
+                rotation = left @ right
+                if np.linalg.det(rotation) < 0:
+                    rotation[:, 2] *= -1.0
+                translation = (
+                    inverse_intrinsics @ signed_ground[:, 2]
+                ) / metric_scale
+                camera_center = -rotation.T @ translation
+                camera_height = float(camera_center[2])
+                physically_plausible = 700.0 <= camera_height <= 7500.0
+                if camera_height <= 0.0:
+                    height_penalty = 20.0
+                else:
+                    height_penalty = abs(np.log(camera_height / 2800.0))
+                physical_penalty = 0.0 if physically_plausible else 8.0
+                score = -(
+                    axis_orthogonality * 5.0
+                    + scale_mismatch * 5.0
+                    + height_penalty * 0.18
+                    + physical_penalty
+                )
+                vertical_column = intrinsics @ (
+                    rotation[:, 2] * metric_scale
+                )
+                projection = np.column_stack(
+                    (
+                        signed_ground[:, 0],
+                        signed_ground[:, 1],
+                        vertical_column,
+                        signed_ground[:, 2],
+                    )
+                )
+                if best is None or score > best[0]:
+                    best = (score, projection, physically_plausible)
+        if best is None or not best[2]:
+            return None
+        return best[1]
+
+    def project_pitch_3d(
+        self,
+        point_xyz: tuple[float, float, float] | np.ndarray,
+        frame_shape: tuple[int, int] | tuple[int, int, int],
+        require_reliable: bool = True,
+    ) -> tuple[float, float] | None:
+        self.ball_3d_projection_attempts += 1
+        projection = self.camera_projection_matrix(frame_shape, require_reliable)
+        if projection is None:
+            return None
+        point = np.array(
+            [float(point_xyz[0]), float(point_xyz[1]), float(point_xyz[2]), 1.0],
+            dtype=np.float64,
+        )
+        image = projection @ point
+        if not np.all(np.isfinite(image)) or abs(float(image[2])) <= 1e-9:
+            return None
+        pixel = image[:2] / image[2]
+        frame_height, frame_width = int(frame_shape[0]), int(frame_shape[1])
+        if not (
+            -frame_width * 0.25 <= pixel[0] <= frame_width * 1.25
+            and -frame_height * 0.25 <= pixel[1] <= frame_height * 1.25
+        ):
+            return None
+        self.ball_3d_projection_successes += 1
+        return float(pixel[0]), float(pixel[1])
+
+    def backproject_image_at_height(
+        self,
+        point: tuple[float, float] | np.ndarray,
+        height_cm: float,
+        frame_shape: tuple[int, int] | tuple[int, int, int],
+        require_reliable: bool = True,
+    ) -> tuple[float, float] | None:
+        self.ball_3d_backprojection_attempts += 1
+        projection = self.camera_projection_matrix(frame_shape, require_reliable)
+        if projection is None:
+            return None
+        u, v = float(point[0]), float(point[1])
+        z = max(0.0, float(height_cm))
+        first = projection[0] - u * projection[2]
+        second = projection[1] - v * projection[2]
+        system = np.array(
+            [[first[0], first[1]], [second[0], second[1]]],
+            dtype=np.float64,
+        )
+        target = -np.array(
+            [
+                first[2] * z + first[3],
+                second[2] * z + second[3],
+            ],
+            dtype=np.float64,
+        )
+        if abs(float(np.linalg.det(system))) <= 1e-9:
+            return None
+        xy = np.linalg.solve(system, target)
+        if not np.all(np.isfinite(xy)):
+            return None
+        if not (
+            -1500.0 <= xy[0] <= PITCH_LENGTH_CM + 1500.0
+            and -1500.0 <= xy[1] <= PITCH_WIDTH_CM + 1500.0
+        ):
+            return None
+        self.ball_3d_backprojection_successes += 1
+        return float(xy[0]), float(xy[1])
 
     def _pitch_vertices(self) -> np.ndarray:
         penalty_width = PENALTY_AREA_WIDTH_CM
@@ -6875,7 +8003,12 @@ class MatchAnalysisPlusRunner:
             }
         )
         cached_specialized_player_active = bool(
-            cached_objects_by_frame and reuse_model_mode == "football-specialized-yolo"
+            cached_objects_by_frame
+            and reuse_model_mode
+            in {
+                "football-specialized-yolo",
+                "cached-football-specialized-detections",
+            }
         )
         model = None
         if cached_objects_by_frame:
@@ -6895,6 +8028,11 @@ class MatchAnalysisPlusRunner:
             }
         else:
             model = self._select_model_for_video(capture, actual_start_frame)
+        player_detection_mode = (
+            "football-specialized-yolo"
+            if cached_specialized_player_active
+            else self.model_mode
+        )
         pitch_model = self._select_pitch_model_for_video(
             capture,
             actual_start_frame,
@@ -6953,7 +8091,7 @@ class MatchAnalysisPlusRunner:
         )
         participant_role_classifier = ParticipantRoleClassifierV2()
         ball_filter = BallStaticFilter()
-        ball_tracker = BallTrackerV4()
+        ball_tracker = BallTrackerV4(fps=fps)
         possession_tracker = PossessionTracker(fps=fps)
         radar = PitchRadar(
             pitch_model,
@@ -7029,12 +8167,17 @@ class MatchAnalysisPlusRunner:
                     "stable_identity_layer": "identity_isolation_stabilizer_v5_conservative_reid",
                 }
             raw_detections_count += len(raw_objects)
+            detected_players = [
+                item for item in raw_objects if item.class_name == "player"
+            ]
+            ball_guard_players = PlayerValidityFilter.geometry_candidates(
+                detected_players
+            )
             shape_valid_players = player_filter.filter(
-                [item for item in raw_objects if item.class_name == "player"],
+                detected_players,
                 frame,
                 specialized_detector=(
-                    self.model_mode == "football-specialized-yolo"
-                    or cached_specialized_player_active
+                    player_detection_mode == "football-specialized-yolo"
                 ),
             )
             raw_balls = [item for item in raw_objects if item.class_name == "ball"]
@@ -7068,20 +8211,25 @@ class MatchAnalysisPlusRunner:
                 player for player in players if player.role_name in ANALYTICS_ROLES
             ]
             reliable_pitch_transform = radar.transform_point if radar.is_reliable() else None
+            # Ball geometry sees every plausible physical participant,
+            # including identity candidates withheld by appearance and pitch
+            # filters. These boxes can reject shoes/body patches but can never
+            # create labels, possession owners, analytics rows, or reports.
             filtered_balls = ball_filter.filter(
                 frames_processed,
                 raw_balls,
-                analytics_players,
+                ball_guard_players,
                 width,
                 pitch_transform=reliable_pitch_transform,
             )
             balls = ball_tracker.update(
                 frames_processed,
                 filtered_balls,
-                analytics_players,
+                ball_guard_players,
                 width,
                 pitch_transform=reliable_pitch_transform,
                 frame=frame,
+                pitch_camera=radar,
             )
             self._record_pitch_projection(
                 frame_index=frames_processed,
@@ -7365,6 +8513,7 @@ class MatchAnalysisPlusRunner:
             "engine": "match_analysis_plus",
             "model": str(self.model_path),
             "model_mode": self.model_mode,
+            "player_detection_mode": player_detection_mode,
             "model_selection": self.model_selection,
             "ball_model": str(self.ball_model_path or self.model_path),
             "ball_detection_mode": self.ball_detection_mode,

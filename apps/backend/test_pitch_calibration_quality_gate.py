@@ -6,6 +6,53 @@ from app.match_analysis_plus.runner import PitchRadar
 
 
 class PitchCalibrationQualityGateTests(unittest.TestCase):
+    def test_metric_camera_projects_and_backprojects_airborne_point(self) -> None:
+        frame_shape = (720, 1280, 3)
+        focal = max(frame_shape[:2]) * 1.20
+        intrinsics = np.array(
+            [
+                [focal, 0.0, frame_shape[1] / 2.0],
+                [0.0, focal, frame_shape[0] / 2.0],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float64,
+        )
+        camera_center = np.array([5250.0, -5600.0, 4300.0])
+        target = np.array([5250.0, 3400.0, 0.0])
+        forward = target - camera_center
+        forward /= np.linalg.norm(forward)
+        right = np.cross(forward, np.array([0.0, 0.0, 1.0]))
+        right /= np.linalg.norm(right)
+        up = np.cross(right, forward)
+        rotation = np.vstack((right, -up, forward))
+        translation = -rotation @ camera_center
+        expected_projection = intrinsics @ np.column_stack(
+            (rotation, translation)
+        )
+        ground_projection = expected_projection[:, [0, 1, 3]]
+
+        radar = PitchRadar(model=None)
+        radar.homography = np.linalg.inv(ground_projection)
+        radar.calibration_confidence = 0.95
+        point_3d = np.array([7000.0, 3000.0, 850.0, 1.0])
+        expected_pixel_h = expected_projection @ point_3d
+        expected_pixel = expected_pixel_h[:2] / expected_pixel_h[2]
+
+        projected = radar.project_pitch_3d(
+            tuple(point_3d[:3]),
+            frame_shape,
+        )
+        self.assertIsNotNone(projected)
+        np.testing.assert_allclose(projected, expected_pixel, atol=3.0)
+
+        backprojected = radar.backproject_image_at_height(
+            projected,
+            point_3d[2],
+            frame_shape,
+        )
+        self.assertIsNotNone(backprojected)
+        np.testing.assert_allclose(backprojected, point_3d[:2], atol=8.0)
+
     def test_constrained_bootstrap_accepts_strong_partial_wide_view_only_before_lock(self) -> None:
         radar = PitchRadar(model=None)
 

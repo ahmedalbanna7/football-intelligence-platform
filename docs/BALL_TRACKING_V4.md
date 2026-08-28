@@ -1,5 +1,9 @@
 # Ball Tracking v4.1
 
+> Superseded by [Ball Tracking v6](BALL_TRACKING_V6.md). The v6 validation
+> rechecked the source video at full resolution and corrected the historical
+> interpretation of frames 626-678 below.
+
 Ball Tracking v4 is the guarded single-ball pipeline used by `Match Analysis +`.
 Its priority is identity correctness: when the ball cannot be located reliably,
 the overlay is intentionally omitted instead of attaching the marker to a
@@ -75,10 +79,11 @@ checked against the rendered video and image-space path:
 | Ballistic trajectory rejections | 7 |
 | Dormant-track challenger promotions | 4 |
 
-The marker reacquired the real ball at frame 580, crossed in front of the
-player without attaching to the player body, and remained on the airborne path
-toward the goalkeeper through frame 749. The prior false path around image
-coordinates `x=925..1050` was not present in the final run.
+The marker reacquired the real ball at frame 580 and crossed in front of the
+player without attaching to the player body. A later full-resolution review in
+v6 established that the path around image coordinates `x=925..1050` in frames
+626-678 is the real ball moving at the player's feet, not a false player-body
+path. This correction is covered by a dedicated v6 regression test.
 
 ## Remaining limitation
 

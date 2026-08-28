@@ -271,7 +271,9 @@ async def run_match_analysis_plus(
         reuse_ball_detection_mode = (source_run.summary_json or {}).get(
             "ball_detection_mode"
         )
-        reuse_model_mode = (source_run.summary_json or {}).get("model_mode")
+        reuse_model_mode = (source_run.summary_json or {}).get(
+            "player_detection_mode"
+        ) or (source_run.summary_json or {}).get("model_mode")
 
     run = MatchAnalysisRun(
         match_id=match_id,
