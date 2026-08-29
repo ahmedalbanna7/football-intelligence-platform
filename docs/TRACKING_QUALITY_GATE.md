@@ -210,9 +210,9 @@ pitch calibration, and ball logic without paying the YOLO cost again.
 | Participant roles | 29 players, 2 goalkeepers, 1 referee, 1 assistant referee, 2 outside staff |
 | Tracking release suite | Passed across five verified tactical and close/moving-camera cases |
 
-The release suite minimums are `IDF1 99.029` and `HOTA 98.2`, with zero exact
-ID switches, zero unresolved ground-truth fragments, and zero cross-team
-identity transfers in the verified samples. These values apply to manually
+The final post-fix release suite minimums are `IDF1 97.436` and `HOTA 95.394`,
+with zero exact ID switches, zero unresolved ground-truth fragments, and zero
+cross-team identity transfers in the verified samples. These values apply to manually
 verified selected identities and frames. They are not a 100% full-match claim.
 
 Automated triage found 12 high-value review windows from 1,094 heuristic
