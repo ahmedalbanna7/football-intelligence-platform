@@ -7,7 +7,8 @@ physical people.
 ## Association order
 
 1. Reject impossible image-plane foot displacement before appearance scoring.
-2. Preserve a locally plausible native BoT-SORT ID.
+2. Treat a locally plausible native BoT-SORT ID as evidence, never as an
+   unconditional identity owner through an ambiguous overlap.
 3. Reject locked kit-family conflicts and strong color conflicts.
 4. Use 2D foot trajectory, depth proxy, direction, body scale, and robust
    appearance-gallery similarity in a global one-to-one assignment.
@@ -92,22 +93,32 @@ verified 17-person fixture measured zero ID switches, zero fragmentation,
 integrated motion gate reported zero tracks over the hard-motion limit and
 rejected 19 conflicting native-ID ownership claims.
 
-The expanded release suite measured the current candidate on all four fixtures:
+The expanded release suite measured the current candidate on all five fixtures.
+Runs 100-102 are the final post-fix validation runs. They include the nested
+detection-cache provenance fix and resolution-relative participant geometry:
 
 | Camera | Scenario | ID switches | IDF1 | HOTA | Cross-team transfers |
 | --- | --- | ---: | ---: | ---: | ---: |
 | Tactical | Crossing | 0 | 100.000 | 100.000 | 0 |
 | Tactical | Crowding | 0 | 99.030 | 99.030 | 0 |
 | Tactical | Re-entry | 0 | 99.510 | 98.200 | 0 |
-| Close/moving | Crowding | 0 | 100.000 | 100.000 | 0 |
+| Close/moving 4K | Crowding | 0 | 97.436 | 95.394 | 0 |
 | Tactical mid-match | Camera motion | 0 | 100.000 | 100.000 | 0 |
 
-The aggregate release conditions pass with minimum `IDF1 99.029`, minimum
-`HOTA 98.2`, zero critical ID switches, zero cross-team transfers, and both
-required camera styles across five measured cases. These are selected-identity benchmark results, not a
-claim of perfect full-match tracking. The manifest in
+The aggregate release conditions pass with minimum `IDF1 97.436`, minimum
+`HOTA 95.394`, zero critical ID switches, zero cross-team transfers, zero
+unresolved fragments, and both required camera styles across five measured
+cases. The tested source resolutions include 360p tactical, 1080p tactical,
+and 4K close/moving footage. These are selected-identity benchmark results,
+not a claim of perfect full-match tracking. The manifest in
 `benchmarks/tracking/release-gate-manifest.json` records the exact coverage and
 remaining all-visible annotation recommendations.
+
+Detection-cache reuse follows the complete parent-run chain and restores the
+original detector mode. This prevents a cached specialized football detector
+from being treated as a generic thin-field detector. Participant minimum height
+and ball body-guard geometry scale with frame height, so a valid distant player
+in a 360p tactical view is not rejected by a pixel threshold tuned for 1080p.
 
 ## Release quality gate
 

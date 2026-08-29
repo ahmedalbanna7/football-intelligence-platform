@@ -174,6 +174,45 @@ def get_run_or_404(db: Session, match_id: int, run_id: int) -> MatchAnalysisRun:
     return run
 
 
+def resolve_player_detection_mode(
+    db: Session,
+    source_run: MatchAnalysisRun,
+) -> str | None:
+    """Recover detector provenance through nested detection-cache reuse."""
+
+    cached_placeholders = {"cached-football-detections"}
+    current: MatchAnalysisRun | None = source_run
+    seen_run_ids: set[int] = set()
+    fallback: str | None = None
+
+    while current is not None and current.id not in seen_run_ids:
+        seen_run_ids.add(current.id)
+        summary = current.summary_json or {}
+        config = current.analysis_config_json or {}
+        candidates = (
+            summary.get("player_detection_mode"),
+            config.get("reuse_model_mode"),
+            summary.get("model_mode"),
+        )
+        for candidate in candidates:
+            if not candidate:
+                continue
+            mode = str(candidate)
+            fallback = fallback or mode
+            if mode not in cached_placeholders:
+                return mode
+
+        parent_run_id = config.get("reuse_run_id")
+        if parent_run_id is None:
+            break
+        try:
+            current = db.get(MatchAnalysisRun, int(parent_run_id))
+        except (TypeError, ValueError):
+            break
+
+    return fallback
+
+
 @router.get("/options/modes")
 def get_match_analysis_modes():
     return {
@@ -271,9 +310,7 @@ async def run_match_analysis_plus(
         reuse_ball_detection_mode = (source_run.summary_json or {}).get(
             "ball_detection_mode"
         )
-        reuse_model_mode = (source_run.summary_json or {}).get(
-            "player_detection_mode"
-        ) or (source_run.summary_json or {}).get("model_mode")
+        reuse_model_mode = resolve_player_detection_mode(db, source_run)
 
     run = MatchAnalysisRun(
         match_id=match_id,

@@ -196,12 +196,20 @@ class PlayerValidityFilter:
         specialized_detector: bool = False,
     ) -> list[AnalysisObject]:
         kept: list[AnalysisObject] = []
+        minimum_height = (
+            3.0
+            if specialized_detector
+            else max(4.0, float(frame.shape[0]) * 0.012)
+        )
         for player in players:
             self.raw_seen += 1
             width = max(1.0, player.bbox[2] - player.bbox[0])
             height = max(1.0, player.bbox[3] - player.bbox[1])
             aspect_ratio = width / height
-            if not self._has_plausible_person_geometry(player):
+            if not self._has_plausible_person_geometry(
+                player,
+                minimum_height=minimum_height,
+            ):
                 self.rejected_implausible_shape += 1
                 continue
             if specialized_detector:
@@ -216,21 +224,29 @@ class PlayerValidityFilter:
     @staticmethod
     def geometry_candidates(
         players: list[AnalysisObject],
+        frame_height: int | None = None,
     ) -> list[AnalysisObject]:
         """Broad physical-body guard that never creates canonical tracks."""
 
+        minimum_height = max(4.0, float(frame_height or 1080) * 0.012)
         return [
             player
             for player in players
-            if PlayerValidityFilter._has_plausible_person_geometry(player)
+            if PlayerValidityFilter._has_plausible_person_geometry(
+                player,
+                minimum_height=minimum_height,
+            )
         ]
 
     @staticmethod
-    def _has_plausible_person_geometry(player: AnalysisObject) -> bool:
+    def _has_plausible_person_geometry(
+        player: AnalysisObject,
+        minimum_height: float,
+    ) -> bool:
         width = max(1.0, player.bbox[2] - player.bbox[0])
         height = max(1.0, player.bbox[3] - player.bbox[1])
         aspect_ratio = width / height
-        return height >= 18.0 and 0.105 <= aspect_ratio <= 1.18
+        return height >= minimum_height and 0.105 <= aspect_ratio <= 1.18
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -472,7 +488,6 @@ class TrackIdStabilizer:
         self.rejected_long_gap_reentries = 0
         self.rejected_role_conflicts = 0
         self.frozen_identity_visual_updates = 0
-        self.native_continuity_rescues = 0
 
     def update(self, frame_index: int, players: list[AnalysisObject], frame: np.ndarray | None = None) -> list[AnalysisObject]:
         self._expire_tentative_tracks(frame_index)
@@ -486,15 +501,6 @@ class TrackIdStabilizer:
             prediction_ambiguity = self._is_prediction_ambiguous(player, players, frame_index)
             matching_visual_reliable = appearance_hist is not None
             visual_quality = 0.45 if severe_overlap else (0.65 if current_crowding else 1.0)
-            native_continuity_safe = self._native_continuity_is_safe(
-                raw_id=raw_id,
-                player=player,
-                frame_index=frame_index,
-                appearance_hist=appearance_hist,
-                jersey_color=jersey_color,
-            )
-            if prediction_ambiguity and native_continuity_safe:
-                self.native_continuity_rescues += 1
             update_visual_reliable = (
                 matching_visual_reliable
                 and not current_crowding
@@ -514,10 +520,7 @@ class TrackIdStabilizer:
                     "matching_visual_reliable": matching_visual_reliable,
                     "visual_quality": visual_quality,
                     "update_visual_reliable": update_visual_reliable,
-                    "identity_ambiguous": (
-                        prediction_ambiguity and not native_continuity_safe
-                    ),
-                    "native_continuity_safe": native_continuity_safe,
+                    "identity_ambiguous": prediction_ambiguity,
                     "crowded": current_crowding,
                     "severe_overlap": severe_overlap,
                 }
@@ -561,9 +564,6 @@ class TrackIdStabilizer:
                 pair_scores=pair_scores,
                 crowded=bool(candidates[candidate_index]["crowded"]),
                 severe_overlap=bool(candidates[candidate_index]["severe_overlap"]),
-                native_continuity_safe=bool(
-                    candidates[candidate_index]["native_continuity_safe"]
-                ),
                 frame_index=frame_index,
             ):
                 uncertain_candidates.add(candidate_index)
@@ -681,7 +681,6 @@ class TrackIdStabilizer:
             "rejected_long_gap_reentries": self.rejected_long_gap_reentries,
             "rejected_role_conflicts": self.rejected_role_conflicts,
             "frozen_identity_visual_updates": self.frozen_identity_visual_updates,
-            "native_continuity_rescues": self.native_continuity_rescues,
             "tracks_with_multiple_raw_ids": sum(1 for count in raw_ids_per_stable.values() if count > 1),
             "max_raw_ids_per_stable_track": max(raw_ids_per_stable.values(), default=0),
             "avg_raw_ids_per_stable_track": round(raw_count / stable_count, 3),
@@ -757,7 +756,6 @@ class TrackIdStabilizer:
         pair_scores: list[tuple[float, int, int]],
         crowded: bool,
         severe_overlap: bool,
-        native_continuity_safe: bool,
         frame_index: int,
     ) -> bool:
         competing_scores = [
@@ -774,11 +772,6 @@ class TrackIdStabilizer:
         ]
         if not competing_scores:
             return False
-        if native_continuity_safe:
-            # The native tracker remains useful through a short overlap when
-            # its candidate also agrees with this stable identity's motion and
-            # appearance history. Motion-conflict checks still veto swapped IDs.
-            return assigned_score + 0.18 < max(competing_scores)
         gap = max(frame_index - self.tracks[stable_id].last_frame, 1)
         required_margin = (
             0.90
@@ -1969,65 +1962,6 @@ class TrackIdStabilizer:
             if self._center_distance(candidate_foot, self._foot(other.bbox)) <= largest_gate
         )
         return nearby_predictions > nearby_detections
-
-    def _native_continuity_is_safe(
-        self,
-        raw_id: int,
-        player: AnalysisObject,
-        frame_index: int,
-        appearance_hist: np.ndarray | None,
-        jersey_color: tuple[int, int, int] | None,
-    ) -> bool:
-        stable_id = self.raw_to_stable.get(raw_id)
-        state = self.tracks.get(stable_id) if stable_id is not None else None
-        if state is None or not state.confirmed:
-            return False
-        gap = frame_index - state.last_frame
-        if gap < 0 or gap > self.hidden_hold_frames:
-            return False
-        if self._raw_id_motion_conflict(state, player, frame_index):
-            return False
-        appearance = self._state_appearance_similarity(appearance_hist, state)
-        color_similarity = self._color_similarity(jersey_color, state.jersey_color)
-        if self._is_locked_jersey_mismatch(
-            state,
-            jersey_color,
-            appearance,
-            color_similarity,
-        ):
-            return False
-
-        candidate_foot = self._foot(player.bbox)
-        own_prediction = self._predicted_foot(state, max(gap, 1))
-        own_distance = self._center_distance(candidate_foot, own_prediction)
-        motion_gate = self._hard_motion_gate(state, player.bbox, max(gap, 1))
-        if own_distance > motion_gate * 0.72:
-            return False
-
-        best_other_distance = float("inf")
-        for other in self.tracks.values():
-            if other.stable_id == state.stable_id or not other.confirmed:
-                continue
-            other_gap = frame_index - other.last_frame
-            if other_gap < 0 or other_gap > self.hidden_hold_frames:
-                continue
-            best_other_distance = min(
-                best_other_distance,
-                self._center_distance(
-                    candidate_foot,
-                    self._predicted_foot(other, max(other_gap, 1)),
-                ),
-            )
-        motion_margin = max(8.0, self._bbox_height(player.bbox) * 0.12)
-        motion_owner = own_distance + motion_margin <= best_other_distance
-        visual_owner = appearance >= 0.70 and color_similarity >= 0.62
-        locked_native_owner = (
-            state.identity_locked
-            and own_distance <= motion_gate * 0.34
-            and (appearance >= 0.48 or color_similarity >= 0.66)
-        )
-        return motion_owner or visual_owner or locked_native_owner
-
 
 class TeamColorClassifier:
     """Resolve stable team identity from kit references and temporal appearance."""
@@ -8171,7 +8105,8 @@ class MatchAnalysisPlusRunner:
                 item for item in raw_objects if item.class_name == "player"
             ]
             ball_guard_players = PlayerValidityFilter.geometry_candidates(
-                detected_players
+                detected_players,
+                frame_height=frame.shape[0],
             )
             shape_valid_players = player_filter.filter(
                 detected_players,

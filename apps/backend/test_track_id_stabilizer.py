@@ -284,7 +284,7 @@ class PlayerValidityFilterTests(unittest.TestCase):
             track_id=41,
             raw_track_id=41,
             class_name="player",
-            bbox=[300, 80, 308, 112],
+            bbox=[300, 80, 305, 96],
             confidence=0.72,
         )
 
@@ -297,6 +297,27 @@ class PlayerValidityFilterTests(unittest.TestCase):
 
         self.assertEqual([41], [item.track_id for item in output])
         self.assertEqual(1, validity_filter.summary()["specialized_detector_observations"])
+
+    def test_ball_body_guard_scales_with_video_height(self) -> None:
+        distant_player = AnalysisObject(
+            track_id=52,
+            raw_track_id=52,
+            class_name="player",
+            bbox=[230, 120, 235, 136],
+            confidence=0.68,
+        )
+
+        low_resolution = PlayerValidityFilter.geometry_candidates(
+            [distant_player],
+            frame_height=360,
+        )
+        high_resolution = PlayerValidityFilter.geometry_candidates(
+            [distant_player],
+            frame_height=2160,
+        )
+
+        self.assertEqual([52], [item.track_id for item in low_resolution])
+        self.assertEqual([], high_resolution)
 
     def test_football_model_classes_include_players_goalkeepers_and_ball(self) -> None:
         class Model:

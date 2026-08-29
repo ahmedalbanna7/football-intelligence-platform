@@ -94,11 +94,26 @@ Possession coverage in this 30-second segment is only 5.2%. The pipeline
 therefore keeps possession and pass analytics blocked instead of presenting
 low-coverage estimates as verified facts.
 
+## Final Run 101 regression
+
+Run 101 repeated the same 750 source frames after the final generic identity,
+cache-provenance, and resolution-scaling fixes. The ball quality gate still
+passes with 328 observed frames, 173 interpolated frames, 661 successful
+optical-flow updates, five player-body false-candidate rejections, and 34
+low-confidence 3D-to-2D fallbacks.
+
+The critical path remained unchanged: frame 626 starts near `(915.2, 539.0)`,
+frames 638-640 bridge the player occlusion, frame 641 reacquires near
+`(949.1, 554.6)`, and frame 678 ends near `(1050.2, 613.9)`. It does not jump
+to the nearby goalkeeper or a remote player. This confirms that the tracking
+identity fixes did not regress the guarded ball path.
+
 ## Generalization boundaries
 
 No coordinates, shirt colors, player IDs, or goalkeeper locations from this
 match are hardcoded. The gates use normalized geometry, temporal evidence,
-camera calibration confidence, and participant roles. Release validation must
-still include other matches, camera motion, crowded crossings, long
-occlusions, and manually labeled ball ground truth before claiming production
-accuracy across every broadcast style.
+camera calibration confidence, and participant roles. Track identity has been
+benchmarked across 360p, 1080p, and 4K videos from tactical and close/moving
+cameras. Ball behavior is generic in code and has guarded regression coverage,
+but additional manually labeled ball ground truth from other matches is still
+required before claiming measured ball accuracy across every broadcast style.
