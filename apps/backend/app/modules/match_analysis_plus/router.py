@@ -60,6 +60,24 @@ class TrackingGroundTruthDraftRequest(BaseModel):
     critical: bool = False
 
 
+class TrackingGroundTruthSaveRequest(BaseModel):
+    ground_truth: dict[str, Any]
+
+
+class BallGroundTruthDraftRequest(BaseModel):
+    start_frame: int = Field(default=0, ge=0)
+    end_frame: int = Field(ge=0)
+    sample_every_frames: int = Field(default=3, ge=1, le=120)
+    scenario: str = Field(default="general", max_length=60)
+    camera_style: str = Field(default="tactical", max_length=60)
+    critical: bool = False
+
+
+class BallGroundTruthBenchmarkRequest(BaseModel):
+    ground_truth: dict[str, Any]
+    tolerance_pixels: float | None = Field(default=None, ge=1.0, le=500.0)
+
+
 class TrackingCriticalRangeSuggestionRequest(BaseModel):
     padding_frames: int = Field(default=20, ge=5, le=150)
     max_ranges: int = Field(default=12, ge=1, le=50)
@@ -688,6 +706,101 @@ def build_tracking_ground_truth_draft(
             scenario=payload.scenario,
             camera_style=payload.camera_style,
             critical=payload.critical,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/{match_id}/runs/{run_id}/quality/ground-truth")
+def get_tracking_ground_truth(
+    match_id: int,
+    run_id: int,
+    db: Session = Depends(get_db),
+):
+    run = get_run_or_404(db, match_id, run_id)
+    try:
+        return quality_service.get_tracking_ground_truth(db, run)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.put("/{match_id}/runs/{run_id}/quality/ground-truth")
+def save_tracking_ground_truth(
+    match_id: int,
+    run_id: int,
+    payload: TrackingGroundTruthSaveRequest,
+    db: Session = Depends(get_db),
+):
+    run = get_run_or_404(db, match_id, run_id)
+    try:
+        return quality_service.save_tracking_ground_truth(db, run, payload.ground_truth)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/{match_id}/runs/{run_id}/quality/ball-ground-truth/draft")
+def build_ball_ground_truth_draft(
+    match_id: int,
+    run_id: int,
+    payload: BallGroundTruthDraftRequest,
+    db: Session = Depends(get_db),
+):
+    run = get_run_or_404(db, match_id, run_id)
+    try:
+        return quality_service.build_ball_ground_truth_draft(
+            run=run,
+            start_frame=payload.start_frame,
+            end_frame=payload.end_frame,
+            sample_every_frames=payload.sample_every_frames,
+            scenario=payload.scenario,
+            camera_style=payload.camera_style,
+            critical=payload.critical,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/{match_id}/runs/{run_id}/quality/ball-ground-truth")
+def get_ball_ground_truth(
+    match_id: int,
+    run_id: int,
+    db: Session = Depends(get_db),
+):
+    run = get_run_or_404(db, match_id, run_id)
+    try:
+        return quality_service.get_ball_ground_truth(run)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.put("/{match_id}/runs/{run_id}/quality/ball-ground-truth")
+def save_ball_ground_truth(
+    match_id: int,
+    run_id: int,
+    payload: TrackingGroundTruthSaveRequest,
+    db: Session = Depends(get_db),
+):
+    run = get_run_or_404(db, match_id, run_id)
+    try:
+        return quality_service.save_ball_ground_truth(db, run, payload.ground_truth)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/{match_id}/runs/{run_id}/quality/ball-ground-truth/benchmark")
+def benchmark_ball_ground_truth(
+    match_id: int,
+    run_id: int,
+    payload: BallGroundTruthBenchmarkRequest,
+    db: Session = Depends(get_db),
+):
+    run = get_run_or_404(db, match_id, run_id)
+    try:
+        return quality_service.benchmark_ball_ground_truth(
+            db,
+            run,
+            payload.ground_truth,
+            payload.tolerance_pixels,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

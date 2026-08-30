@@ -705,10 +705,92 @@ export type TrackReviewCorrection = {
   created_at?: string;
 };
 
+export type GroundTruthVerification = {
+  status: "draft" | "verified";
+  annotator?: string | null;
+  reviewed_at?: string | null;
+};
+
+export type TrackingGroundTruthObject = {
+  identity_id: string;
+  bbox: [number, number, number, number];
+  source_frame?: number | null;
+  source_track_id?: number | null;
+  source_raw_track_id?: number | null;
+  team?: number | null;
+  role_name?: TrackReviewItem["role_name"];
+  review_state: "unverified" | "verified";
+};
+
+export type TrackingGroundTruthFrame = {
+  frame: number;
+  source_frame?: number | null;
+  review_state?: "unverified" | "verified";
+  objects: TrackingGroundTruthObject[];
+};
+
+export type TrackingGroundTruthDocument = {
+  schema_version: "tracking_ground_truth.v2" | "tracking_ground_truth.v3";
+  resolution?: [number, number];
+  fps?: number;
+  coverage?: string;
+  verification: GroundTruthVerification;
+  source?: Record<string, unknown>;
+  clips?: Array<Record<string, unknown>>;
+  instructions?: string[];
+  frames: TrackingGroundTruthFrame[];
+  [key: string]: unknown;
+};
+
+export type BallGroundTruthState = "visible" | "occluded" | "out_of_frame" | "uncertain";
+
+export type BallGroundTruthFrame = {
+  frame: number;
+  source_frame?: number | null;
+  state: BallGroundTruthState;
+  review_state: "unverified" | "verified";
+  ball?: {
+    center: [number, number];
+    bbox?: [number, number, number, number];
+    airborne?: boolean | null;
+    height_cm?: number | null;
+    candidate_confidence?: number | null;
+    candidate_predicted?: boolean;
+  } | null;
+};
+
+export type BallGroundTruthDocument = {
+  schema_version: "ball_ground_truth.v1";
+  resolution?: [number, number];
+  fps?: number;
+  verification: GroundTruthVerification;
+  source?: Record<string, unknown>;
+  clips?: Array<Record<string, unknown>>;
+  release_thresholds?: Record<string, number>;
+  frames: BallGroundTruthFrame[];
+  [key: string]: unknown;
+};
+
+export type GroundTruthValidation = {
+  status: string;
+  frame_count: number;
+  verified_frames: number;
+  ready_for_evaluation: boolean;
+  annotation_count?: number;
+  identity_count?: number;
+  state_counts?: Record<string, number>;
+};
+
 export type TrackingQualityResponse = {
   run_id: number;
   match_id: number;
+  annotation_video_object?: string | null;
+  source_start_frame?: number;
   assessment: TrackingQualityAssessment;
+  annotations?: {
+    tracking?: Record<string, unknown>;
+    ball?: Record<string, unknown>;
+  };
   tracks: TrackReviewItem[];
   corrections: TrackReviewCorrection[];
   players: Array<{

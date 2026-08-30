@@ -1,11 +1,12 @@
 import {
   AlertTriangle,
+  CircleDot,
   CheckCircle2,
-  Download,
   Eye,
   FileCheck2,
   GitMerge,
   History,
+  Plus,
   RefreshCw,
   RotateCcw,
   Scissors,
@@ -18,12 +19,15 @@ import {
 } from "lucide-react";
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
+import { GroundTruthAnnotationEditor } from "./GroundTruthAnnotationEditor";
 import type {
+  BallGroundTruthDocument,
+  TrackingGroundTruthDocument,
   TrackReviewItem,
   TrackingQualityResponse
 } from "./types";
 
-type QualityTab = "overview" | "review" | "history";
+type QualityTab = "overview" | "annotation" | "review" | "history";
 
 type TrackingQualityPanelProps = {
   matchId: number;
@@ -44,6 +48,36 @@ function metricPercent(value?: number | null) {
 
 function titleCase(value: string) {
   return value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function normalizeTrackingGroundTruth(payload: Record<string, unknown>): TrackingGroundTruthDocument {
+  if (Array.isArray(payload.frames)) return payload as TrackingGroundTruthDocument;
+  if (!Array.isArray(payload.observations)) {
+    throw new Error("Tracking ground truth must contain frames or observations.");
+  }
+  const grouped = new Map<number, TrackingGroundTruthDocument["frames"][number]>();
+  for (const value of payload.observations) {
+    const item = value as Record<string, unknown>;
+    const frame = Number(item.frame);
+    const bbox = (item.bbox || item.bbox_xyxy) as number[];
+    if (!Number.isFinite(frame) || !Array.isArray(bbox) || bbox.length !== 4) continue;
+    const frameItem = grouped.get(frame) || { frame, objects: [] };
+    frameItem.objects.push({
+      identity_id: String(item.identity_id ?? ""),
+      bbox: bbox.map(Number) as [number, number, number, number],
+      source_frame: item.source_frame == null ? null : Number(item.source_frame),
+      team: item.team == null ? null : Number(item.team),
+      role_name: (item.role_name as TrackReviewItem["role_name"]) || "player",
+      review_state: item.review_state === "verified" ? "verified" : "unverified"
+    });
+    grouped.set(frame, frameItem);
+  }
+  return {
+    ...payload,
+    schema_version: "tracking_ground_truth.v2",
+    verification: (payload.verification || { status: "draft" }) as TrackingGroundTruthDocument["verification"],
+    frames: [...grouped.values()].sort((first, second) => first.frame - second.frame)
+  } as TrackingGroundTruthDocument;
 }
 
 function QualityBar({ value }: { value: number }) {
@@ -83,7 +117,10 @@ export function TrackingQualityPanel({
   const [playerId, setPlayerId] = useState<number | null>(null);
   const [participantRole, setParticipantRole] = useState<TrackReviewItem["role_name"]>("player");
   const [note, setNote] = useState("");
-  const [groundTruth, setGroundTruth] = useState<Record<string, unknown> | null>(null);
+  const [groundTruth, setGroundTruth] = useState<TrackingGroundTruthDocument | null>(null);
+  const [ballGroundTruth, setBallGroundTruth] = useState<BallGroundTruthDocument | null>(null);
+  const [annotationKind, setAnnotationKind] = useState<"tracking" | "ball">("tracking");
+  const [ballGroundTruthMetrics, setBallGroundTruthMetrics] = useState<Record<string, unknown> | null>(null);
   const [groundTruthName, setGroundTruthName] = useState<string | null>(null);
   const [iouThreshold, setIouThreshold] = useState(0.5);
   const [groundTruthStart, setGroundTruthStart] = useState(0);
@@ -115,6 +152,10 @@ export function TrackingQualityPanel({
   useEffect(() => {
     setData(null);
     setSelectedTrackId(null);
+    setGroundTruth(null);
+    setBallGroundTruth(null);
+    setBallGroundTruthMetrics(null);
+    setAnnotationKind("tracking");
     void load();
   }, [matchId, runId]);
 
@@ -225,9 +266,16 @@ export function TrackingQualityPanel({
     if (!file) return;
     try {
       const parsed = JSON.parse(await file.text()) as Record<string, unknown>;
-      setGroundTruth(parsed);
+      if (parsed.schema_version === "ball_ground_truth.v1") {
+        setBallGroundTruth(parsed as BallGroundTruthDocument);
+        setAnnotationKind("ball");
+      } else {
+        setGroundTruth(normalizeTrackingGroundTruth(parsed));
+        setAnnotationKind("tracking");
+      }
       setGroundTruthName(file.name);
-      setMessage("Ground truth loaded and ready to evaluate.");
+      setTab("annotation");
+      setMessage("Ground truth loaded in the annotation editor.");
     } catch {
       setGroundTruth(null);
       setGroundTruthName(null);
@@ -235,15 +283,15 @@ export function TrackingQualityPanel({
     }
   }
 
-  async function benchmark() {
-    if (!groundTruth) return;
+  async function benchmark(document: TrackingGroundTruthDocument | null = groundTruth) {
+    if (!document) return;
     setBusy(true);
     setMessage("Measuring IDF1, HOTA, switches, and fragmentation...");
     try {
       const response = await api.benchmarkTrackingQuality(
         matchId,
         runId,
-        groundTruth,
+        document,
         iouThreshold
       );
       setData(response.quality);
@@ -255,7 +303,7 @@ export function TrackingQualityPanel({
     }
   }
 
-  async function downloadGroundTruthDraft() {
+  async function openTrackingGroundTruthDraft() {
     setBusy(true);
     setMessage("Building selected ground-truth clip...");
     try {
@@ -267,18 +315,101 @@ export function TrackingQualityPanel({
         camera_style: groundTruthCamera,
         critical: groundTruthCritical
       });
-      const blob = new Blob([JSON.stringify(response.ground_truth, null, 2)], {
-        type: "application/json"
-      });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = `match-${matchId}-run-${runId}-gt-${groundTruthStart}-${groundTruthEnd}.json`;
-      link.click();
-      URL.revokeObjectURL(url);
-      setMessage(`${response.frame_count} draft frames generated with ${response.annotation_count} annotations.`);
+      setGroundTruth(response.ground_truth as TrackingGroundTruthDocument);
+      setAnnotationKind("tracking");
+      setTab("annotation");
+      setMessage(`${response.frame_count} identity frames opened with ${response.annotation_count} annotations.`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Ground-truth draft failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function openBallGroundTruthDraft() {
+    setBusy(true);
+    setMessage("Building ball annotation frames...");
+    try {
+      const response = await api.buildBallGroundTruthDraft(matchId, runId, {
+        start_frame: groundTruthStart,
+        end_frame: groundTruthEnd,
+        sample_every_frames: groundTruthStep,
+        scenario: groundTruthScenario,
+        camera_style: groundTruthCamera,
+        critical: groundTruthCritical
+      });
+      setBallGroundTruth(response.ground_truth);
+      setBallGroundTruthMetrics(null);
+      setAnnotationKind("ball");
+      setTab("annotation");
+      setMessage(`${response.frame_count} ball frames opened with ${response.candidate_count} model candidates.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Ball ground-truth draft failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function loadSavedAnnotations(kind: "tracking" | "ball") {
+    setBusy(true);
+    try {
+      if (kind === "tracking") {
+        const response = await api.getTrackingGroundTruth(matchId, runId);
+        setGroundTruth(response.ground_truth);
+      } else {
+        const response = await api.getBallGroundTruth(matchId, runId);
+        setBallGroundTruth(response.ground_truth);
+        setBallGroundTruthMetrics(response.metrics || null);
+      }
+      setAnnotationKind(kind);
+      setTab("annotation");
+      setMessage(`Saved ${kind} ground truth loaded.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Saved annotation could not be loaded.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveTrackingAnnotations(document: TrackingGroundTruthDocument) {
+    setBusy(true);
+    try {
+      const response = await api.saveTrackingGroundTruth(matchId, runId, document);
+      setGroundTruth(response.ground_truth);
+      await load();
+      setMessage(`${response.validation.verified_frames}/${response.validation.frame_count} identity frames verified and saved.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Tracking annotations could not be saved.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveBallAnnotations(document: BallGroundTruthDocument) {
+    setBusy(true);
+    try {
+      const response = await api.saveBallGroundTruth(matchId, runId, document);
+      setBallGroundTruth(response.ground_truth);
+      await load();
+      setMessage(`${response.validation.verified_frames}/${response.validation.frame_count} ball frames verified and saved.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Ball annotations could not be saved.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function evaluateBallAnnotations(document: BallGroundTruthDocument) {
+    setBusy(true);
+    setMessage("Measuring ball localization, coverage, continuity, and airborne state...");
+    try {
+      const response = await api.benchmarkBallGroundTruth(matchId, runId, document);
+      setBallGroundTruth(document);
+      setBallGroundTruthMetrics(response.metrics);
+      await load();
+      setMessage(`Ball benchmark completed: ${String(response.metrics.f1 ?? "-")}% F1.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Ball benchmark failed.");
     } finally {
       setBusy(false);
     }
@@ -386,6 +517,12 @@ export function TrackingQualityPanel({
         <button className={tab === "overview" ? "active" : ""} onClick={() => setTab("overview")} role="tab" type="button">
           <FileCheck2 size={16} /> Quality Overview
         </button>
+        <button className={tab === "annotation" ? "active" : ""} onClick={() => setTab("annotation")} role="tab" type="button">
+          <CircleDot size={16} /> Ground Truth <span>{
+            Number(Boolean(groundTruth || data?.annotations?.tracking))
+              + Number(Boolean(ballGroundTruth || data?.annotations?.ball))
+          }</span>
+        </button>
         <button className={tab === "review" ? "active" : ""} onClick={() => setTab("review")} role="tab" type="button">
           <Eye size={16} /> Track Review <span>{assessment.tracks_needing_review}</span>
         </button>
@@ -486,8 +623,11 @@ export function TrackingQualityPanel({
             <label><span>Scenario</span><select className="select" onChange={(event) => setGroundTruthScenario(event.target.value)} value={groundTruthScenario}><option value="crossing">Crossing</option><option value="crowding">Crowding</option><option value="reentry">Long re-entry</option><option value="baseline">Baseline</option></select></label>
             <label><span>Camera</span><select className="select" onChange={(event) => setGroundTruthCamera(event.target.value)} value={groundTruthCamera}><option value="tactical">Tactical</option><option value="close_or_moving">Close / moving</option></select></label>
             <label className="quality-critical-check"><input checked={groundTruthCritical} onChange={(event) => setGroundTruthCritical(event.target.checked)} type="checkbox" /><span>Critical clip</span></label>
-            <button className="button" disabled={busy || groundTruthEnd < groundTruthStart} onClick={() => void downloadGroundTruthDraft()} type="button">
-              <Download size={16} /> Ground truth draft
+            <button className="button" disabled={busy || groundTruthEnd < groundTruthStart} onClick={() => void openTrackingGroundTruthDraft()} type="button">
+              <Eye size={16} /> Identity editor
+            </button>
+            <button className="button" disabled={busy || groundTruthEnd < groundTruthStart} onClick={() => void openBallGroundTruthDraft()} type="button">
+              <CircleDot size={16} /> Ball editor
             </button>
           </div>
 
@@ -496,13 +636,8 @@ export function TrackingQualityPanel({
               <Upload size={16} /> {groundTruthName || "Ground truth JSON"}
             </label>
             <input accept="application/json,.json" id={`ground-truth-${runId}`} onChange={(event) => void selectGroundTruth(event)} type="file" />
-            <label>
-              <span>IoU threshold</span>
-              <input className="input" max="0.95" min="0.05" onChange={(event) => setIouThreshold(Number(event.target.value))} step="0.05" type="number" value={iouThreshold} />
-            </label>
-            <button className="button primary" disabled={!groundTruth || busy || !assessment.predictions_object} onClick={() => void benchmark()} type="button">
-              <ShieldCheck size={16} /> Evaluate
-            </button>
+            <button className="button" disabled={busy} onClick={() => void loadSavedAnnotations("tracking")} type="button"><FileCheck2 size={16} /> Saved identities</button>
+            <button className="button" disabled={busy} onClick={() => void loadSavedAnnotations("ball")} type="button"><CircleDot size={16} /> Saved ball</button>
           </div>
 
           <div className="quality-table-wrap">
@@ -526,6 +661,60 @@ export function TrackingQualityPanel({
               </tbody>
             </table>
           </div>
+        </div>
+      ) : null}
+
+      {tab === "annotation" ? (
+        <div className="quality-annotation-tab">
+          <div className="annotation-mode-bar">
+            <div className="segmented-control">
+              <button className={annotationKind === "tracking" ? "active" : ""} onClick={() => setAnnotationKind("tracking")} type="button"><Eye size={16} /> Identities</button>
+              <button className={annotationKind === "ball" ? "active" : ""} onClick={() => setAnnotationKind("ball")} type="button"><CircleDot size={16} /> Ball</button>
+            </div>
+            {annotationKind === "tracking" ? (
+              <label className="annotation-iou"><span>IoU threshold</span><input className="input" max="0.95" min="0.05" onChange={(event) => setIouThreshold(Number(event.target.value))} step="0.05" type="number" value={iouThreshold} /></label>
+            ) : null}
+            <button className="button" disabled={busy} onClick={() => void loadSavedAnnotations(annotationKind)} type="button"><FileCheck2 size={16} /> Load saved</button>
+          </div>
+          {annotationKind === "tracking" && groundTruth ? (
+            <GroundTruthAnnotationEditor
+              busy={busy}
+              document={groundTruth}
+              fps={fps}
+              mode="tracking"
+              onChange={(document) => setGroundTruth(document as TrackingGroundTruthDocument)}
+              onEvaluate={async (document) => {
+                const tracking = document as TrackingGroundTruthDocument;
+                setGroundTruth(tracking);
+                await benchmark(tracking);
+              }}
+              onSave={async (document) => saveTrackingAnnotations(document as TrackingGroundTruthDocument)}
+              videoFrameOffset={data.source_start_frame || 0}
+              videoSrc={api.objectUrl(data.annotation_video_object || videoObject)}
+            />
+          ) : annotationKind === "ball" && ballGroundTruth ? (
+            <GroundTruthAnnotationEditor
+              busy={busy}
+              document={ballGroundTruth}
+              fps={fps}
+              metrics={ballGroundTruthMetrics}
+              mode="ball"
+              onChange={(document) => setBallGroundTruth(document as BallGroundTruthDocument)}
+              onEvaluate={async (document) => evaluateBallAnnotations(document as BallGroundTruthDocument)}
+              onSave={async (document) => saveBallAnnotations(document as BallGroundTruthDocument)}
+              videoFrameOffset={data.source_start_frame || 0}
+              videoSrc={api.objectUrl(data.annotation_video_object || videoObject)}
+            />
+          ) : (
+            <div className="annotation-start-state">
+              {annotationKind === "tracking" ? <Eye size={24} /> : <CircleDot size={24} />}
+              <strong>{annotationKind === "tracking" ? "Identity annotation set" : "Ball annotation set"}</strong>
+              <div>
+                <button className="button primary" disabled={busy} onClick={() => void (annotationKind === "tracking" ? openTrackingGroundTruthDraft() : openBallGroundTruthDraft())} type="button"><Plus size={16} /> Create draft</button>
+                <button className="button" disabled={busy} onClick={() => void loadSavedAnnotations(annotationKind)} type="button"><FileCheck2 size={16} /> Load saved</button>
+              </div>
+            </div>
+          )}
         </div>
       ) : null}
 

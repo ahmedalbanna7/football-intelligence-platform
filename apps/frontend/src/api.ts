@@ -1,4 +1,6 @@
 import type {
+  BallGroundTruthDocument,
+  GroundTruthValidation,
   MatchVisualLayers,
   MatchSummary,
   Player,
@@ -9,6 +11,7 @@ import type {
   RosterPlayer,
   Team,
   TrackingQualityResponse,
+  TrackingGroundTruthDocument,
   YoloStatus
 } from "./types";
 
@@ -232,6 +235,92 @@ export const api = {
     }>(`/match-analysis-plus/${matchId}/runs/${runId}/quality/ground-truth/draft`, {
       method: "POST",
       json: payload
+    });
+  },
+
+  getTrackingGroundTruth(matchId: number, runId: number) {
+    return request<{
+      object_name: string;
+      validation: GroundTruthValidation;
+      ground_truth: TrackingGroundTruthDocument;
+    }>(`/match-analysis-plus/${matchId}/runs/${runId}/quality/ground-truth`);
+  },
+
+  saveTrackingGroundTruth(
+    matchId: number,
+    runId: number,
+    groundTruth: TrackingGroundTruthDocument
+  ) {
+    return request<{
+      object_name: string;
+      validation: GroundTruthValidation;
+      ground_truth: TrackingGroundTruthDocument;
+    }>(`/match-analysis-plus/${matchId}/runs/${runId}/quality/ground-truth`, {
+      method: "PUT",
+      json: { ground_truth: groundTruth }
+    });
+  },
+
+  buildBallGroundTruthDraft(
+    matchId: number,
+    runId: number,
+    payload: {
+      start_frame: number;
+      end_frame: number;
+      sample_every_frames: number;
+      scenario?: string;
+      camera_style?: string;
+      critical?: boolean;
+    }
+  ) {
+    return request<{
+      frame_count: number;
+      candidate_count: number;
+      validation: GroundTruthValidation;
+      ground_truth: BallGroundTruthDocument;
+    }>(`/match-analysis-plus/${matchId}/runs/${runId}/quality/ball-ground-truth/draft`, {
+      method: "POST",
+      json: payload
+    });
+  },
+
+  getBallGroundTruth(matchId: number, runId: number) {
+    return request<{
+      object_name: string;
+      validation: GroundTruthValidation;
+      metrics?: Record<string, unknown> | null;
+      ground_truth: BallGroundTruthDocument;
+    }>(`/match-analysis-plus/${matchId}/runs/${runId}/quality/ball-ground-truth`);
+  },
+
+  saveBallGroundTruth(
+    matchId: number,
+    runId: number,
+    groundTruth: BallGroundTruthDocument
+  ) {
+    return request<{
+      object_name: string;
+      validation: GroundTruthValidation;
+      ground_truth: BallGroundTruthDocument;
+    }>(`/match-analysis-plus/${matchId}/runs/${runId}/quality/ball-ground-truth`, {
+      method: "PUT",
+      json: { ground_truth: groundTruth }
+    });
+  },
+
+  benchmarkBallGroundTruth(
+    matchId: number,
+    runId: number,
+    groundTruth: BallGroundTruthDocument,
+    tolerancePixels?: number | null
+  ) {
+    return request<{
+      object_name: string;
+      validation: GroundTruthValidation;
+      metrics: Record<string, unknown>;
+    }>(`/match-analysis-plus/${matchId}/runs/${runId}/quality/ball-ground-truth/benchmark`, {
+      method: "POST",
+      json: { ground_truth: groundTruth, tolerance_pixels: tolerancePixels ?? null }
     });
   },
 

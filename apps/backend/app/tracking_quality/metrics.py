@@ -26,6 +26,11 @@ def _validate_ground_truth(payload: dict[str, Any]) -> dict[str, Any]:
     for frame_payload in payload.get("frames", []):
         if not isinstance(frame_payload, dict):
             continue
+        if (
+            str(payload.get("schema_version") or "") == "tracking_ground_truth.v3"
+            and str(frame_payload.get("review_state") or "") != "verified"
+        ):
+            raise ValueError("Every v3 ground-truth frame must have review_state='verified'")
         for item in frame_payload.get("objects", frame_payload.get("annotations", [])):
             if isinstance(item, dict) and item.get("review_state") != "verified":
                 raise ValueError(

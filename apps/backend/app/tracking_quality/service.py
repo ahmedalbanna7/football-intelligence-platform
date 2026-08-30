@@ -18,6 +18,10 @@ from app.models.tracking_quality import (
     TrackingQualityAssessment,
 )
 from app.services.minio_client import BUCKET_NAME, client
+from app.tracking_quality.ball_metrics import (
+    evaluate_ball_tracking,
+    validate_ball_ground_truth,
+)
 from app.tracking_quality.metrics import evaluate_tracking
 from app.match_analysis_plus.analytics_v1 import AnalyticsRealV1
 from app.match_analysis_plus.reports_v2 import ReportsV2Builder
@@ -190,7 +194,10 @@ class TrackingQualityService:
         return {
             "run_id": run.id,
             "match_id": run.match_id,
+            "annotation_video_object": run.video.object_name if run.video is not None else None,
+            "source_start_frame": int((run.summary_json or {}).get("source_start_frame") or 0),
             "assessment": self._serialize_assessment(assessment),
+            "annotations": deepcopy((run.summary_json or {}).get("annotations") or {}),
             "tracks": [self._serialize_item(item) for item in items],
             "corrections": [self._serialize_correction(item) for item in corrections],
             "players": [
@@ -550,6 +557,7 @@ class TrackingQualityService:
         ground_truth: dict[str, Any],
         iou_threshold: float,
     ) -> dict[str, Any]:
+        self._validate_tracking_annotation_document(ground_truth)
         assessment = (
             db.query(TrackingQualityAssessment)
             .filter(TrackingQualityAssessment.run_id == run.id)
@@ -582,8 +590,18 @@ class TrackingQualityService:
         tracking_quality["benchmark"] = metrics
         summary["tracking_quality"] = tracking_quality
         run.summary_json = summary
-        if run.summary_object:
-            self._put_json(BUCKET_NAME, run.summary_object, summary)
+        self._save_annotation_summary(
+            run,
+            "tracking",
+            {
+                **deepcopy(((summary.get("annotations") or {}).get("tracking") or {})),
+                "status": "verified",
+                "object_name": ground_truth_object,
+                "ready_for_evaluation": True,
+                "metrics": metrics,
+                "release_gate_status": (metrics.get("release_gate") or {}).get("status"),
+            },
+        )
         db.commit()
         return metrics
 
@@ -615,9 +633,13 @@ class TrackingQualityService:
 
         predictions = self._get_predictions(BUCKET_NAME, assessment.predictions_object)
         selected_ids = set(track_ids or [])
-        frames: dict[int, list[dict[str, Any]]] = {}
-        source_frames: dict[int, int] = {}
-        for observation in predictions.get("observations", []):
+        frame_indexes = list(range(start_frame, end_frame + 1, sample_every_frames))
+        frames: dict[int, list[dict[str, Any]]] = {
+            frame_index: [] for frame_index in frame_indexes
+        }
+        source_offsets: list[int] = []
+        observations = predictions.get("observations", [])
+        for observation in observations:
             frame_index = int(observation.get("frame", -1))
             track_id = int(observation.get("track_id", -1))
             if frame_index < start_frame or frame_index > end_frame:
@@ -628,7 +650,7 @@ class TrackingQualityService:
                 continue
             source_frame = observation.get("source_frame")
             if source_frame is not None:
-                source_frames[frame_index] = int(source_frame)
+                source_offsets.append(int(source_frame) - frame_index)
             frames.setdefault(frame_index, []).append(
                 {
                     "identity_id": f"identity-{track_id}",
@@ -641,11 +663,20 @@ class TrackingQualityService:
                     "review_state": "unverified",
                 }
             )
-        if not frames:
+        if not any(frames.values()):
             raise ValueError("No tracking observations exist in the selected clip")
 
+        summary_offset = (run.summary_json or {}).get("source_start_frame")
+        source_offset = (
+            int(summary_offset)
+            if summary_offset is not None
+            else (sorted(source_offsets)[len(source_offsets) // 2] if source_offsets else 0)
+        )
+
         payload = {
-            "schema_version": "tracking_ground_truth.v2",
+            "schema_version": "tracking_ground_truth.v3",
+            "resolution": list((run.summary_json or {}).get("resolution") or []),
+            "fps": float((run.summary_json or {}).get("fps") or 25.0),
             "coverage": "all_visible_identities" if not selected_ids else "selected_identities",
             "verification": {
                 "status": "draft",
@@ -661,14 +692,8 @@ class TrackingQualityService:
                 {
                     "start_frame": start_frame,
                     "end_frame": end_frame,
-                    **(
-                        {
-                            "source_start_frame": min(source_frames.values()),
-                            "source_end_frame": max(source_frames.values()),
-                        }
-                        if source_frames
-                        else {}
-                    ),
+                    "source_start_frame": source_offset + start_frame,
+                    "source_end_frame": source_offset + end_frame,
                     "sample_every_frames": sample_every_frames,
                     "coverage": "all_visible_identities" if not selected_ids else "selected_identities",
                     "scenario": str(scenario or "general").lower(),
@@ -679,11 +704,16 @@ class TrackingQualityService:
             "instructions": [
                 "Correct every identity_id and bbox in the selected frames.",
                 "Add missing visible identities and remove false detections.",
-                "Set every review_state to verified, then set verification.status to verified.",
+                "Verify each frame in the editor after reviewing all visible identities.",
                 "Use a stable identity_id for the same physical person across every clip.",
             ],
             "frames": [
-                {"frame": frame_index, "objects": frames[frame_index]}
+                {
+                    "frame": frame_index,
+                    "source_frame": source_offset + frame_index,
+                    "review_state": "unverified",
+                    "objects": frames[frame_index],
+                }
                 for frame_index in sorted(frames)
             ],
         }
@@ -698,6 +728,260 @@ class TrackingQualityService:
             "frame_count": len(frames),
             "annotation_count": sum(len(items) for items in frames.values()),
             "ground_truth": payload,
+        }
+
+    def save_tracking_ground_truth(
+        self,
+        db: Session,
+        run: MatchAnalysisRun,
+        ground_truth: dict[str, Any],
+    ) -> dict[str, Any]:
+        validation = self._validate_tracking_annotation_document(ground_truth)
+        assessment = (
+            db.query(TrackingQualityAssessment)
+            .filter(TrackingQualityAssessment.run_id == run.id)
+            .first()
+        )
+        if assessment is None:
+            assessment = self.sync_from_summary(db, run, run.summary_json or {})
+        if not assessment.predictions_object:
+            raise ValueError("This run does not contain tracking prediction artifacts")
+
+        prefix = assessment.predictions_object.rsplit("/", 1)[0]
+        object_name = f"{prefix}/ground_truth.json"
+        self._put_json(BUCKET_NAME, object_name, ground_truth)
+        assessment.ground_truth_object = object_name
+        assessment.id_switches = None
+        assessment.idf1 = None
+        assessment.hota = None
+        assessment.fragmentation = None
+        assessment.release_gate_status = "not_ready"
+        assessment.release_gate_json = None
+        assessment.metrics_json = {
+            key: value
+            for key, value in (assessment.metrics_json or {}).items()
+            if key != "benchmark"
+        }
+        assessment.benchmark_status = (
+            "verified_ready" if validation["ready_for_evaluation"] else "ground_truth_required"
+        )
+        summary = deepcopy(run.summary_json or {})
+        tracking_quality = deepcopy(summary.get("tracking_quality") or {})
+        tracking_quality.pop("benchmark", None)
+        summary["tracking_quality"] = tracking_quality
+        run.summary_json = summary
+        self._save_annotation_summary(
+            run,
+            "tracking",
+            {
+                "status": validation["status"],
+                "object_name": object_name,
+                "frame_count": validation["frame_count"],
+                "annotation_count": validation["annotation_count"],
+                "verified_frames": validation["verified_frames"],
+                "ready_for_evaluation": validation["ready_for_evaluation"],
+            },
+        )
+        db.commit()
+        return {
+            "object_name": object_name,
+            "validation": validation,
+            "ground_truth": ground_truth,
+        }
+
+    def get_tracking_ground_truth(
+        self,
+        db: Session,
+        run: MatchAnalysisRun,
+    ) -> dict[str, Any]:
+        assessment = (
+            db.query(TrackingQualityAssessment)
+            .filter(TrackingQualityAssessment.run_id == run.id)
+            .first()
+        )
+        if assessment is None:
+            assessment = self.sync_from_summary(db, run, run.summary_json or {})
+        if not assessment.ground_truth_object:
+            raise ValueError("No saved tracking ground truth exists for this run")
+        ground_truth = self._get_json(BUCKET_NAME, assessment.ground_truth_object)
+        return {
+            "object_name": assessment.ground_truth_object,
+            "validation": self._validate_tracking_annotation_document(ground_truth),
+            "ground_truth": ground_truth,
+        }
+
+    def build_ball_ground_truth_draft(
+        self,
+        run: MatchAnalysisRun,
+        start_frame: int,
+        end_frame: int,
+        sample_every_frames: int,
+        scenario: str = "general",
+        camera_style: str = "tactical",
+        critical: bool = False,
+    ) -> dict[str, Any]:
+        if end_frame < start_frame:
+            raise ValueError("end_frame must be greater than or equal to start_frame")
+        if end_frame - start_frame > 3000:
+            raise ValueError("A ball ground-truth clip cannot exceed 3000 frames")
+        layers, layer_object = self._visual_layers_for_run(run)
+        image_path = ((layers.get("ball") or {}).get("image_path") or [])
+        candidates = {
+            int(item["frame"]): item
+            for item in image_path
+            if isinstance(item, dict) and item.get("frame") is not None
+        }
+        resolution = list(layers.get("resolution") or (run.summary_json or {}).get("resolution") or [1920, 1080])
+        width = max(1.0, float(resolution[0]))
+        height = max(1.0, float(resolution[1]))
+        radius = max(4.0, math.hypot(width, height) * 0.004)
+        source_offset = int((run.summary_json or {}).get("source_start_frame") or 0)
+        frames: list[dict[str, Any]] = []
+        for frame_index in range(start_frame, end_frame + 1, sample_every_frames):
+            candidate = candidates.get(frame_index)
+            ball = None
+            state = "uncertain"
+            if candidate is not None:
+                x = float(candidate["x"])
+                y = float(candidate["y"])
+                if 0 <= x <= width and 0 <= y <= height:
+                    ball = {
+                        "center": [round(x, 3), round(y, 3)],
+                        "bbox": [
+                            round(max(0.0, x - radius), 3),
+                            round(max(0.0, y - radius), 3),
+                            round(min(width, x + radius), 3),
+                            round(min(height, y + radius), 3),
+                        ],
+                        "airborne": bool(candidate.get("airborne", False)),
+                        "height_cm": candidate.get("height_cm"),
+                        "candidate_confidence": candidate.get("confidence"),
+                        "candidate_predicted": bool(candidate.get("predicted", False)),
+                    }
+                    if not candidate.get("predicted", False):
+                        state = "visible"
+            frames.append(
+                {
+                    "frame": frame_index,
+                    "source_frame": source_offset + frame_index,
+                    "state": state,
+                    "review_state": "unverified",
+                    "ball": ball,
+                }
+            )
+
+        if not frames:
+            raise ValueError("No frames exist in the selected ball ground-truth clip")
+        payload = {
+            "schema_version": "ball_ground_truth.v1",
+            "resolution": resolution,
+            "fps": float(layers.get("fps") or (run.summary_json or {}).get("fps") or 25.0),
+            "verification": {"status": "draft", "annotator": None, "reviewed_at": None},
+            "source": {
+                "match_id": run.match_id,
+                "run_id": run.id,
+                "visual_layers_object": layer_object,
+            },
+            "clips": [
+                {
+                    "start_frame": start_frame,
+                    "end_frame": end_frame,
+                    "source_start_frame": source_offset + start_frame,
+                    "source_end_frame": source_offset + end_frame,
+                    "sample_every_frames": sample_every_frames,
+                    "scenario": str(scenario or "general").lower(),
+                    "camera_style": str(camera_style or "tactical").lower(),
+                    "critical": bool(critical),
+                }
+            ],
+            "release_thresholds": {
+                "minimum_evaluated_frames": 20,
+                "minimum_visible_frames": 10,
+                "minimum_precision": 0.90,
+                "minimum_recall": 0.85,
+                "maximum_median_center_error_ratio": 0.012,
+                "maximum_p95_center_error_ratio": 0.03,
+                "minimum_airborne_accuracy": 0.80,
+            },
+            "frames": frames,
+        }
+        validation = validate_ball_ground_truth(payload)
+        return {
+            "frame_count": len(frames),
+            "candidate_count": sum(1 for frame in frames if frame.get("ball") is not None),
+            "validation": validation,
+            "ground_truth": payload,
+        }
+
+    def save_ball_ground_truth(
+        self,
+        db: Session,
+        run: MatchAnalysisRun,
+        ground_truth: dict[str, Any],
+    ) -> dict[str, Any]:
+        validation = validate_ball_ground_truth(ground_truth)
+        _, layer_object = self._visual_layers_for_run(run)
+        prefix = layer_object.rsplit("/", 1)[0]
+        object_name = f"{prefix}/ball_ground_truth.json"
+        self._put_json(BUCKET_NAME, object_name, ground_truth)
+        self._save_annotation_summary(
+            run,
+            "ball",
+            {
+                "status": validation["status"],
+                "object_name": object_name,
+                "frame_count": validation["frame_count"],
+                "verified_frames": validation["verified_frames"],
+                "state_counts": validation["state_counts"],
+                "ready_for_evaluation": validation["ready_for_evaluation"],
+            },
+        )
+        db.commit()
+        return {
+            "object_name": object_name,
+            "validation": validation,
+            "ground_truth": ground_truth,
+        }
+
+    def get_ball_ground_truth(self, run: MatchAnalysisRun) -> dict[str, Any]:
+        metadata = (((run.summary_json or {}).get("annotations") or {}).get("ball") or {})
+        object_name = metadata.get("object_name")
+        if not object_name:
+            raise ValueError("No saved ball ground truth exists for this run")
+        ground_truth = self._get_json(BUCKET_NAME, object_name)
+        return {
+            "object_name": object_name,
+            "validation": validate_ball_ground_truth(ground_truth),
+            "metrics": metadata.get("metrics"),
+            "ground_truth": ground_truth,
+        }
+
+    def benchmark_ball_ground_truth(
+        self,
+        db: Session,
+        run: MatchAnalysisRun,
+        ground_truth: dict[str, Any],
+        tolerance_pixels: float | None = None,
+    ) -> dict[str, Any]:
+        layers, layer_object = self._visual_layers_for_run(run)
+        source_offset = int((run.summary_json or {}).get("source_start_frame") or 0)
+        metrics = evaluate_ball_tracking(
+            layers,
+            ground_truth,
+            source_frame_offset=source_offset,
+            tolerance_pixels=tolerance_pixels,
+        )
+        saved = self.save_ball_ground_truth(db, run, ground_truth)
+        metadata = deepcopy((((run.summary_json or {}).get("annotations") or {}).get("ball") or {}))
+        metadata["metrics"] = metrics
+        metadata["release_gate_status"] = (metrics.get("release_gate") or {}).get("status")
+        metadata["visual_layers_object"] = layer_object
+        self._save_annotation_summary(run, "ball", metadata)
+        db.commit()
+        return {
+            "object_name": saved["object_name"],
+            "metrics": metrics,
+            "validation": saved["validation"],
         }
 
     def suggest_critical_ranges(
@@ -1382,6 +1666,142 @@ class TrackingQualityService:
             "thresholds": QUALITY_THRESHOLDS,
             "tracks": tracks,
         }
+
+    def _validate_tracking_annotation_document(
+        self,
+        ground_truth: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not isinstance(ground_truth, dict):
+            raise ValueError("Tracking ground truth must be a JSON object")
+        if str(ground_truth.get("schema_version") or "") not in {
+            "tracking_ground_truth.v2",
+            "tracking_ground_truth.v3",
+        }:
+            raise ValueError("Tracking ground truth must use schema_version tracking_ground_truth.v2")
+        verification = ground_truth.get("verification")
+        if not isinstance(verification, dict):
+            raise ValueError("Tracking ground truth requires verification metadata")
+        status = str(verification.get("status") or "draft").lower()
+        if status not in {"draft", "verified"}:
+            raise ValueError("Tracking verification status must be draft or verified")
+        if status == "verified":
+            if not str(verification.get("annotator") or "").strip():
+                raise ValueError("Verified tracking ground truth requires an annotator")
+            if not str(verification.get("reviewed_at") or "").strip():
+                raise ValueError("Verified tracking ground truth requires reviewed_at")
+
+        frames = ground_truth.get("frames")
+        if not isinstance(frames, list) or not frames:
+            raise ValueError("Tracking ground truth must contain grouped frame annotations")
+        if len(frames) > 3001:
+            raise ValueError("Tracking ground truth cannot exceed 3001 annotated frames")
+        resolution = ground_truth.get("resolution") or []
+        width = float(resolution[0]) if isinstance(resolution, list) and len(resolution) == 2 else None
+        height = float(resolution[1]) if isinstance(resolution, list) and len(resolution) == 2 else None
+        seen_frames: set[int] = set()
+        verified_frames = 0
+        annotation_count = 0
+        identities: set[str] = set()
+        schema_version = str(ground_truth.get("schema_version") or "")
+        for frame_item in frames:
+            if not isinstance(frame_item, dict):
+                raise ValueError("Every tracking frame annotation must be an object")
+            frame = int(frame_item.get("frame", -1))
+            if frame < 0:
+                raise ValueError("Tracking frame indexes must be non-negative")
+            if frame in seen_frames:
+                raise ValueError(f"Tracking frame {frame} occurs more than once")
+            seen_frames.add(frame)
+            objects = frame_item.get("objects")
+            if not isinstance(objects, list):
+                raise ValueError(f"Tracking frame {frame} requires an objects list")
+            frame_identities: set[str] = set()
+            explicit_frame_review = str(
+                frame_item.get("review_state") or "unverified"
+            ).lower()
+            if explicit_frame_review not in {"unverified", "verified"}:
+                raise ValueError(f"Tracking frame {frame} has an invalid review_state")
+            frame_verified = (
+                explicit_frame_review == "verified"
+                if schema_version == "tracking_ground_truth.v3"
+                else bool(objects)
+            )
+            for item in objects:
+                if not isinstance(item, dict):
+                    raise ValueError(f"Tracking annotation at frame {frame} must be an object")
+                identity = str(item.get("identity_id") or "").strip()
+                if not identity:
+                    raise ValueError(f"Tracking annotation at frame {frame} requires identity_id")
+                if identity in frame_identities:
+                    raise ValueError(f"Identity {identity!r} occurs more than once in frame {frame}")
+                frame_identities.add(identity)
+                identities.add(identity)
+                bbox = item.get("bbox") or item.get("bbox_xyxy")
+                if not isinstance(bbox, list) or len(bbox) != 4:
+                    raise ValueError(f"Tracking bbox at frame {frame} must contain four values")
+                values = [float(value) for value in bbox]
+                if not all(math.isfinite(value) for value in values):
+                    raise ValueError(f"Tracking bbox at frame {frame} must be finite")
+                if values[2] <= values[0] or values[3] <= values[1]:
+                    raise ValueError(f"Tracking bbox at frame {frame} has invalid dimensions")
+                if width is not None and height is not None and (
+                    values[0] < 0
+                    or values[1] < 0
+                    or values[2] > width
+                    or values[3] > height
+                ):
+                    raise ValueError(f"Tracking bbox at frame {frame} is outside the source resolution")
+                item_review_state = str(
+                    item.get("review_state") or "unverified"
+                ).lower()
+                if item_review_state not in {"unverified", "verified"}:
+                    raise ValueError(
+                        f"Tracking annotation {identity!r} at frame {frame} has an invalid review_state"
+                    )
+                if item_review_state != "verified":
+                    frame_verified = False
+                annotation_count += 1
+            if status == "verified" and not frame_verified:
+                raise ValueError(f"Tracking frame {frame} is not verified")
+            if frame_verified:
+                verified_frames += 1
+        if annotation_count == 0:
+            raise ValueError("Tracking ground truth does not contain any identity annotations")
+        return {
+            "status": status,
+            "frame_count": len(frames),
+            "verified_frames": verified_frames,
+            "annotation_count": annotation_count,
+            "identity_count": len(identities),
+            "ready_for_evaluation": status == "verified" and verified_frames == len(frames),
+        }
+
+    def _visual_layers_for_run(
+        self,
+        run: MatchAnalysisRun,
+    ) -> tuple[dict[str, Any], str]:
+        layer_summary = (run.summary_json or {}).get("visual_layers") or {}
+        object_name = layer_summary.get("object_name")
+        if not object_name:
+            raise ValueError("This run does not contain visual layer data")
+        return self._get_json(BUCKET_NAME, object_name), str(object_name)
+
+    def _save_annotation_summary(
+        self,
+        run: MatchAnalysisRun,
+        kind: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        summary = deepcopy(run.summary_json or {})
+        annotations = deepcopy(summary.get("annotations") or {})
+        annotations[kind] = {
+            **metadata,
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+        summary["annotations"] = annotations
+        run.summary_json = summary
+        if run.summary_object:
+            self._put_json(BUCKET_NAME, run.summary_object, summary)
 
     def _refresh_assessment_status(self, db: Session, run_id: int) -> None:
         assessment = (

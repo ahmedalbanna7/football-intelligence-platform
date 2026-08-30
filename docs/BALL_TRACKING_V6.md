@@ -117,3 +117,18 @@ benchmarked across 360p, 1080p, and 4K videos from tactical and close/moving
 cameras. Ball behavior is generic in code and has guarded regression coverage,
 but additional manually labeled ball ground truth from other matches is still
 required before claiming measured ball accuracy across every broadcast style.
+
+## Ball Ground Truth
+
+The built-in `Ground Truth > Ball` editor now creates and resumes server-side
+ball annotation documents against the original source video. It records visible,
+occluded, out-of-frame, and uncertain states, center coordinates, airborne state,
+and optional height. Generated model candidates always begin unverified.
+
+Only a fully reviewed document with an annotator can run the ball benchmark.
+The benchmark measures localization precision/recall/F1, center error,
+continuity gaps, airborne accuracy, and height error when height labels exist.
+Its default release gate needs at least 20 evaluated frames, including 10
+visible-ball frames, before accuracy thresholds can pass.
+This is the evidence required to replace guarded runtime observations with a
+measured cross-video accuracy claim. See `docs/GROUND_TRUTH_ANNOTATION_EDITOR.md`.

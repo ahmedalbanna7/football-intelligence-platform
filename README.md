@@ -16,11 +16,14 @@ The project is built as a practical foundation for football clubs, academies, an
 - BoT-SORT Re-ID runtime diagnostics and per-track identity confidence.
 - Tracking Quality Gate with ID-switch risk, fragmentation review, crops, merge/split corrections, and undo history.
 - Ground-truth evaluation for IDF1, HOTA, exact ID switches, and track fragmentation.
+- Built-in Ground Truth Annotation Editor for identity boxes and ball paths,
+  with strict draft/verified states and source-frame alignment.
 - Per-clip Tracking Release Gate with cross-team identity checks and multi-camera suite coverage.
 - Participant Role Classifier v2 for players, goalkeepers, referees, assistant referees, and outside staff.
 - Static-field-marker ball filtering to reduce false ball detections.
-- Ball Tracking v4 with dedicated per-frame detection, metric/image continuity,
-  optical flow, body-overlap rejection, and possession quality gates.
+- Ball Tracking v6 with guarded multi-frame detection, Kalman/optical-flow gap
+  recovery, confidence-gated monocular 3D, body-overlap rejection, and a ball
+  Ground Truth quality gate.
 - Team profile and opponent team management.
 - Player roster, shirt number, tactical zone, and assignment data models.
 - Match analysis run history with saved artifacts.
@@ -95,7 +98,7 @@ flowchart TD
     FrameRead --> Detector["YOLO Detector"]
     Detector --> RawObjects["Frame Observations"]
     RawObjects --> BallFilter["Ball Static Marker Filter"]
-    BallFilter --> BallTracker["Ball Tracker v4"]
+    BallFilter --> BallTracker["Ball Tracker v6"]
     BallTracker --> PossessionGate["Possession Quality Gate"]
     RawObjects --> Tracker["BoT-SORT + Re-ID"]
     Tracker --> Stabilizer["Stable Track ID Layer"]

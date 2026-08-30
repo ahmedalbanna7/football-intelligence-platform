@@ -2,6 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+from app.tracking_quality.ball_metrics import evaluate_ball_tracking, validate_ball_ground_truth
 from app.tracking_quality.metrics import evaluate_release_suite, evaluate_tracking
 from app.tracking_quality.service import TrackingQualityService
 
@@ -170,9 +171,88 @@ class TrackingQualityMetricTests(unittest.TestCase):
         )
 
         ground_truth = result["ground_truth"]
+        self.assertEqual("tracking_ground_truth.v3", ground_truth["schema_version"])
         self.assertEqual(90000, ground_truth["clips"][0]["source_start_frame"])
         self.assertEqual(90010, ground_truth["clips"][0]["source_end_frame"])
+        self.assertEqual(90000, ground_truth["frames"][0]["source_frame"])
+        self.assertEqual("unverified", ground_truth["frames"][0]["review_state"])
         self.assertEqual(90000, ground_truth["frames"][0]["objects"][0]["source_frame"])
+
+    def test_ground_truth_draft_includes_sampled_frames_without_detections(self) -> None:
+        service = TrackingQualityService()
+        service._get_predictions = Mock(
+            return_value={
+                "observations": [
+                    {
+                        "frame": 0,
+                        "source_frame": 500,
+                        "track_id": 1,
+                        "bbox": [10, 10, 30, 60],
+                    },
+                    {
+                        "frame": 20,
+                        "source_frame": 520,
+                        "track_id": 1,
+                        "bbox": [20, 10, 40, 60],
+                    },
+                ]
+            }
+        )
+        service._put_json = Mock()
+        assessment = SimpleNamespace(predictions_object="matches/1/run/predictions.jsonl")
+        db = Mock()
+        db.query.return_value.filter.return_value.first.return_value = assessment
+        run = SimpleNamespace(id=1, match_id=1, summary_json={})
+
+        document = service.build_ground_truth_draft(
+            db,
+            run,
+            start_frame=0,
+            end_frame=20,
+            sample_every_frames=10,
+        )["ground_truth"]
+
+        self.assertEqual([0, 10, 20], [frame["frame"] for frame in document["frames"]])
+        self.assertEqual([], document["frames"][1]["objects"])
+        self.assertEqual(510, document["frames"][1]["source_frame"])
+
+    def test_verified_v3_tracking_document_requires_explicit_frame_review(self) -> None:
+        service = TrackingQualityService()
+        document = {
+            "schema_version": "tracking_ground_truth.v3",
+            "resolution": [100, 100],
+            "verification": {
+                "status": "verified",
+                "annotator": "reviewer",
+                "reviewed_at": "2026-08-30T10:00:00Z",
+            },
+            "frames": [
+                {
+                    "frame": 0,
+                    "review_state": "unverified",
+                    "objects": [
+                        {
+                            "identity_id": "player-a",
+                            "bbox": [10, 10, 30, 60],
+                            "review_state": "verified",
+                        }
+                    ],
+                }
+            ],
+        }
+
+        with self.assertRaisesRegex(ValueError, "frame 0 is not verified"):
+            service._validate_tracking_annotation_document(document)
+
+        with self.assertRaisesRegex(ValueError, "v3 ground-truth frame"):
+            evaluate_tracking(
+                {
+                    "observations": [
+                        {"frame": 0, "track_id": 1, "bbox": [10, 10, 30, 60]}
+                    ]
+                },
+                document,
+            )
 
     def test_critical_range_suggestions_find_team_switch_reentry_and_crowding(self) -> None:
         service = TrackingQualityService()
@@ -488,6 +568,139 @@ class TrackingQualityMetricTests(unittest.TestCase):
         self.assertEqual(2, canonical["events"][0]["from_track_id"])
         self.assertEqual(1, canonical["completed_passes"])
         self.assertTrue(canonical["canonical_track_ids"])
+
+
+class BallGroundTruthMetricTests(unittest.TestCase):
+    def _ground_truth(self) -> dict:
+        return {
+            "schema_version": "ball_ground_truth.v1",
+            "resolution": [1000, 500],
+            "verification": {
+                "status": "verified",
+                "annotator": "ball-reviewer",
+                "reviewed_at": "2026-08-30T10:00:00Z",
+            },
+            "release_thresholds": {
+                "minimum_evaluated_frames": 3,
+                "minimum_visible_frames": 2,
+            },
+            "frames": [
+                {
+                    "frame": 0,
+                    "source_frame": 100,
+                    "state": "visible",
+                    "review_state": "verified",
+                    "ball": {"center": [100, 200], "airborne": False, "height_cm": 0},
+                },
+                {
+                    "frame": 1,
+                    "source_frame": 101,
+                    "state": "visible",
+                    "review_state": "verified",
+                    "ball": {"center": [110, 190], "airborne": True, "height_cm": 80},
+                },
+                {
+                    "frame": 2,
+                    "source_frame": 102,
+                    "state": "out_of_frame",
+                    "review_state": "verified",
+                    "ball": None,
+                },
+            ],
+        }
+
+    def test_perfect_ball_path_passes_release_gate(self) -> None:
+        layers = {
+            "resolution": [1000, 500],
+            "ball": {
+                "image_path": [
+                    {"frame": 0, "x": 100, "y": 200, "predicted": False, "airborne": False, "height_cm": 0},
+                    {"frame": 1, "x": 110, "y": 190, "predicted": True, "airborne": True, "height_cm": 80},
+                ]
+            },
+        }
+
+        metrics = evaluate_ball_tracking(layers, self._ground_truth(), source_frame_offset=100)
+
+        self.assertEqual(100.0, metrics["precision"])
+        self.assertEqual(100.0, metrics["recall"])
+        self.assertEqual(1, metrics["observed_matches"])
+        self.assertEqual(1, metrics["interpolated_matches"])
+        self.assertEqual("passed", metrics["release_gate"]["status"])
+
+    def test_remote_marker_is_both_false_positive_and_false_negative(self) -> None:
+        layers = {
+            "resolution": [1000, 500],
+            "ball": {"image_path": [{"frame": 0, "x": 800, "y": 400, "predicted": False}]},
+        }
+
+        metrics = evaluate_ball_tracking(layers, self._ground_truth(), source_frame_offset=100)
+
+        self.assertEqual(0, metrics["true_positives"])
+        self.assertGreater(metrics["false_positives"], 0)
+        self.assertEqual("blocked", metrics["release_gate"]["status"])
+
+    def test_unverified_ball_ground_truth_is_rejected(self) -> None:
+        payload = self._ground_truth()
+        payload["verification"]["status"] = "draft"
+        payload["frames"][0]["review_state"] = "unverified"
+
+        with self.assertRaisesRegex(ValueError, "manually reviewed"):
+            evaluate_ball_tracking({"ball": {"image_path": []}}, payload)
+
+    def test_ball_draft_preserves_source_frames_and_candidates(self) -> None:
+        service = TrackingQualityService()
+        service._visual_layers_for_run = Mock(
+            return_value=(
+                {
+                    "fps": 25,
+                    "resolution": [1000, 500],
+                    "ball": {
+                        "image_path": [
+                            {"frame": 10, "x": 250, "y": 180, "predicted": False, "confidence": 0.9},
+                            {"frame": 20, "x": 300, "y": 160, "predicted": True, "confidence": 0.5},
+                        ]
+                    },
+                },
+                "matches/20/run/visual_layers.json",
+            )
+        )
+        run = SimpleNamespace(
+            id=90,
+            match_id=20,
+            summary_json={"source_start_frame": 90000, "resolution": [1000, 500]},
+        )
+
+        result = service.build_ball_ground_truth_draft(
+            run,
+            start_frame=10,
+            end_frame=20,
+            sample_every_frames=10,
+            scenario="airborne",
+            camera_style="close_or_moving",
+            critical=True,
+        )
+
+        document = result["ground_truth"]
+        self.assertEqual(90010, document["frames"][0]["source_frame"])
+        self.assertEqual("visible", document["frames"][0]["state"])
+        self.assertEqual("uncertain", document["frames"][1]["state"])
+        self.assertEqual(2, result["candidate_count"])
+        self.assertFalse(result["validation"]["ready_for_evaluation"])
+
+    def test_verified_ball_document_requires_every_frame_reviewed(self) -> None:
+        payload = self._ground_truth()
+        payload["frames"][1]["review_state"] = "unverified"
+
+        with self.assertRaisesRegex(ValueError, "frame 1 is not verified"):
+            validate_ball_ground_truth(payload)
+
+    def test_ball_document_rejects_coordinates_outside_source_resolution(self) -> None:
+        payload = self._ground_truth()
+        payload["frames"][0]["ball"]["center"] = [1200, 200]
+
+        with self.assertRaisesRegex(ValueError, "outside the source resolution"):
+            validate_ball_ground_truth(payload)
 
 
 if __name__ == "__main__":

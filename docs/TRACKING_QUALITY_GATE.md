@@ -20,6 +20,8 @@ flowchart LR
     Review --> Corrections["Approve / reject / merge / split / assign"]
     Corrections --> Corrected["Corrected visual layers"]
     Predictions --> Benchmark["Ground-truth benchmark"]
+    Predictions --> Editor["Ground Truth Annotation Editor"]
+    Editor --> Benchmark
 ```
 
 Each new analysis run records:
@@ -50,7 +52,8 @@ They are quality-control signals, not benchmark claims.
 
 ### Ground-truth benchmark
 
-These values are only populated after uploading frame-level ground truth:
+These values are only populated after reviewing and saving frame-level ground
+truth in the built-in editor (or importing an equivalent verified JSON):
 
 - exact ID switches;
 - IDF1;
@@ -142,6 +145,12 @@ POST /match-analysis-plus/{match_id}/runs/{run_id}/quality/corrections
 POST /match-analysis-plus/{match_id}/runs/{run_id}/quality/corrections/{correction_id}/undo
 POST /match-analysis-plus/{match_id}/runs/{run_id}/quality/recalculate
 POST /match-analysis-plus/{match_id}/runs/{run_id}/quality/ground-truth/draft
+GET  /match-analysis-plus/{match_id}/runs/{run_id}/quality/ground-truth
+PUT  /match-analysis-plus/{match_id}/runs/{run_id}/quality/ground-truth
+POST /match-analysis-plus/{match_id}/runs/{run_id}/quality/ball-ground-truth/draft
+GET  /match-analysis-plus/{match_id}/runs/{run_id}/quality/ball-ground-truth
+PUT  /match-analysis-plus/{match_id}/runs/{run_id}/quality/ball-ground-truth
+POST /match-analysis-plus/{match_id}/runs/{run_id}/quality/ball-ground-truth/benchmark
 POST /match-analysis-plus/{match_id}/runs/{run_id}/quality/critical-ranges/suggest
 POST /match-analysis-plus/{match_id}/runs/{run_id}/quality/benchmark
 POST /match-analysis-plus/{match_id}/quality/release-gate/plan
@@ -163,13 +172,14 @@ under one release decision.
    hints, not labels.
 3. Select a suggested window. The UI seeks to its peak frame and fills the
    Ground Truth range and scenario.
-4. Download the draft. Review every visible identity and bounding box, add
+4. Choose `Identity editor`. Review every visible identity and bounding box, add
    misses, remove false detections, and keep one `identity_id` for the same
    physical person throughout all clips.
-5. Set every object's `review_state` to `verified`, then set
-   `verification.status` to `verified` with the annotator and review time.
-6. Load the verified JSON in the same panel and choose `Evaluate`. IDF1, HOTA,
-   exact switches, fragmentation, and the release decision are then measured.
+5. Use `Verify frame` after each frame, enter the annotator, then choose
+   `Verify all & save`. The backend rejects incomplete verified documents.
+6. Choose `Evaluate`. IDF1, HOTA, exact switches, fragmentation, and the release
+   decision are measured. `Save draft` can be used at any time without making a
+   benchmark claim.
 7. Review Team, Participant Role, Pitch, and Ball gates separately. Tracking
    metrics cannot prove team, role, field geometry, or ball-path correctness.
 
@@ -193,6 +203,9 @@ $draft = Invoke-RestMethod -Method Post `
 
 Do not send `$draft.ground_truth` directly to the benchmark. It remains a
 draft until a human has reviewed every annotated object.
+
+See `docs/GROUND_TRUTH_ANNOTATION_EDITOR.md` for the complete identity and ball
+annotation workflow and the meaning of every editor state.
 
 ## Match 12 GPU Validation
 
