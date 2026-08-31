@@ -10,7 +10,7 @@ The project is built as a practical foundation for football clubs, academies, an
 
 - Match video upload API with MinIO storage.
 - RabbitMQ-based asynchronous processing.
-- Dedicated `Match Analysis +` worker flow.
+- Dedicated `Match Analysis` worker flow.
 - YOLO / Ultralytics integration for player and ball observations.
 - Stable track ID layer on top of detector/tracker outputs.
 - BoT-SORT Re-ID runtime diagnostics and per-track identity confidence.
@@ -28,7 +28,7 @@ The project is built as a practical foundation for football clubs, academies, an
 - Player roster, shirt number, tactical zone, and assignment data models.
 - Match analysis run history with saved artifacts.
 - Interactive per-player movement paths and metric heatmaps for saved analysis runs.
-- React + TypeScript dashboard for uploads, teams, Match Analysis +, reports, and agent workflows.
+- React + TypeScript dashboard for uploads, teams, Match Analysis, reports, and agent workflows.
 - Open-source architecture designed for extension.
 
 ## Product Surface
@@ -40,7 +40,7 @@ The frontend is organized around the workflows an analyst naturally needs:
 - **My Team**: primary club profile, kits, roster, player metadata.
 - **Teams**: opponent and external team history, profiles, kits, players, and related matches.
 - **Matches**: video upload and match metadata.
-- **Match Analysis +**: primary worker-based analysis, saved runs, video overlays, and metric heatmaps.
+- **Match Analysis**: primary worker-based analysis, saved runs, video overlays, and metric heatmaps.
 - **Reports**: JSON/PDF/reporting foundation.
 - **Agent**: future coach/analyst assistant surface.
 - **Recommendations**: future season, team, player, and match recommendation area.
@@ -56,7 +56,7 @@ flowchart LR
     API --> RabbitMQ["RabbitMQ"]
     API --> Redis["Redis"]
 
-    RabbitMQ --> MatchWorker["Match Analysis + Worker"]
+    RabbitMQ --> MatchWorker["Match Analysis Worker"]
     RabbitMQ --> VideoWorker["Video Worker (optional profile)"]
 
     MatchWorker --> YOLO["YOLO / Ultralytics"]
@@ -154,7 +154,7 @@ flowchart LR
     Exchange --> VideoQueue["video.processing"]
     Exchange --> MatchQueue["match_analysis.processing"]
     VideoQueue --> VideoWorker["Video Worker"]
-    MatchQueue --> MatchWorker["Match Analysis + Worker"]
+    MatchQueue --> MatchWorker["Match Analysis Worker"]
 ```
 
 ## Stack
@@ -191,7 +191,7 @@ flowchart LR
 - **Redis 7**
 - **MinIO**
 - Optional worker profile for the legacy video pipeline.
-- Dedicated `match-analysis-worker` service for `Match Analysis +`.
+- Dedicated `match-analysis-worker` service for `Match Analysis`.
 
 ## Services
 
@@ -216,7 +216,7 @@ flowchart LR
 | Reports | `GET /matches/{id}/report`, `GET /matches/{id}/report.pdf` |
 | Primary team | `GET /primary-team`, `POST /primary-team`, `POST /primary-team/players` |
 | Teams | `GET /teams`, `POST /teams`, `POST /teams/{id}/players` |
-| Match Analysis + | `POST /match-analysis-plus/{match_id}/run`, `GET /match-analysis-plus/{match_id}` |
+| Match Analysis | `POST /match-analysis-plus/{match_id}/run`, `GET /match-analysis-plus/{match_id}` |
 | Tracking quality | `GET /match-analysis-plus/{match_id}/runs/{run_id}/quality`, corrections, recalculation, benchmark |
 | AI status | `GET /ai/yolo/status` |
 
@@ -241,7 +241,6 @@ Detailed quality-gate behavior and the ground-truth JSON contract are documented
 │   ├── frontend
 │   │   └── src
 │   └── match-analysis-worker
-│       └── sports-main
 ├── docker-compose.yml
 └── README.md
 ```
@@ -324,7 +323,7 @@ The exact release URLs and checksums are versioned in
 
 1. Open `Matches`.
 2. Upload a video.
-3. Open `Match Analysis +`.
+3. Open `Match Analysis`.
 4. Select the uploaded match.
 5. Run analysis with a small `max_frames` value first.
 6. Review the generated annotated video, summary, tracks, and run history.
@@ -380,7 +379,7 @@ gantt
     section Foundation
     Upload + storage + queues       :done, f1, 2026-06-01, 7d
     React dashboard                 :done, f2, 2026-06-08, 10d
-    Match Analysis + worker          :done, f3, 2026-06-18, 10d
+    Match Analysis worker            :done, f3, 2026-06-18, 10d
     section Vision
     Stronger tracking / ReID         :active, v1, 2026-07-01, 21d
     Jersey OCR                       :v2, after v1, 21d

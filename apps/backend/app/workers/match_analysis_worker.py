@@ -314,7 +314,7 @@ async def run_worker() -> None:
             raise
         except Exception:
             print(
-                "Match Analysis + consumer connection failed; reconnecting.",
+                "Match Analysis consumer connection failed; reconnecting.",
                 flush=True,
             )
             traceback.print_exc()

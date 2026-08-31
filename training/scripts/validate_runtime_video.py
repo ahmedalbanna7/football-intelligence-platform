@@ -54,7 +54,7 @@ def install_runtime_stubs(device: str) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run the real Match Analysis + pipeline against a local video."
+        description="Run the real Match Analysis pipeline against a local video."
     )
     parser.add_argument("--video", type=Path, required=True)
     parser.add_argument("--start-frame", type=int, default=0)

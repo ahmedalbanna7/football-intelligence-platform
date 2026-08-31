@@ -22,7 +22,7 @@ class MatchAnalysisRun(Base):
     video_id: Mapped[int] = mapped_column(ForeignKey("match_videos.id"), nullable=False)
     mode: Mapped[str] = mapped_column(String(80), default="PLAYER_TRACKING", nullable=False)
     status: Mapped[str] = mapped_column(String(50), default="processing", nullable=False)
-    source: Mapped[str] = mapped_column(String(120), default="sports-main", nullable=False)
+    source: Mapped[str] = mapped_column(String(120), default="native-runner", nullable=False)
     max_frames: Mapped[int] = mapped_column(Integer, default=450, nullable=False)
     analysis_config_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     output_object: Mapped[str | None] = mapped_column(String(500), nullable=True)

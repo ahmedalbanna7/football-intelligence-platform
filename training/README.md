@@ -1,7 +1,7 @@
 # Football Intelligence Model Training
 
 This directory contains the reproducible training and evaluation pipeline for the
-versioned model bundle used by Match Analysis +.
+versioned model bundle used by Match Analysis.
 
 The production weights in `apps/backend/models` are never overwritten by a
 training command. New weights are written under `training/runs` and remain

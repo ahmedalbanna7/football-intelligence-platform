@@ -4,7 +4,7 @@
 > rechecked the source video at full resolution and corrected the historical
 > interpretation of frames 626-678 below.
 
-Ball Tracking v4 is the guarded single-ball pipeline used by `Match Analysis +`.
+Ball Tracking v4 is the guarded single-ball pipeline used by `Match Analysis`.
 Its priority is identity correctness: when the ball cannot be located reliably,
 the overlay is intentionally omitted instead of attaching the marker to a
 distant player or a static pitch feature.

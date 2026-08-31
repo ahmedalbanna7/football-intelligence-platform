@@ -1,7 +1,7 @@
 # Ground Truth Annotation Editor
 
 The Ground Truth Annotation Editor is the analyst-facing validation surface for
-identity tracking and ball tracking. It lives inside `Match Analysis +` and uses
+identity tracking and ball tracking. It lives inside `Match Analysis` and uses
 the original uploaded video, not the rendered overlay, so generated labels do
 not hide the evidence being reviewed.
 
@@ -23,7 +23,7 @@ still unverified, the annotator is missing, or the coordinates are invalid.
 
 ## Open the Editor
 
-1. Open `Match Analysis +` and select a processed run.
+1. Open `Match Analysis` and select a processed run.
 2. Open `Tracking Quality Gate`.
 3. In `Quality Overview`, set `Clip start`, `Clip end`, and `Sample every`.
 4. Select the scenario and camera style, then enable `Critical clip` when the

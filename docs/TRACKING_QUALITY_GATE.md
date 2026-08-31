@@ -1,6 +1,6 @@
 # Tracking Quality Gate
 
-The Tracking Quality Gate sits after BoT-SORT and the stable identity layer in `Match Analysis +`. It does not claim perfect identity from a single camera. It makes identity quality measurable, exposes difficult cases, and stores analyst corrections without overwriting the original run artifacts.
+The Tracking Quality Gate sits after BoT-SORT and the stable identity layer in `Match Analysis`. It does not claim perfect identity from a single camera. It makes identity quality measurable, exposes difficult cases, and stores analyst corrections without overwriting the original run artifacts.
 
 ## Runtime Pipeline
 

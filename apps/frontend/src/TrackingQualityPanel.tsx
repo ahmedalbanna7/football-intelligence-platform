@@ -20,6 +20,7 @@ import {
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
 import { GroundTruthAnnotationEditor } from "./GroundTruthAnnotationEditor";
+import { ActionWithHelp, HelpTip, LabelWithHelp, PaginatedTable } from "./UiPrimitives";
 import type {
   BallGroundTruthDocument,
   TrackingGroundTruthDocument,
@@ -497,19 +498,15 @@ export function TrackingQualityPanel({
       <div className="quality-heading">
         <div>
           <span className="eyebrow">Identity assurance</span>
-          <h2 className="section-title">Tracking Quality Gate</h2>
+          <h2 className="section-title title-with-help">Tracking Quality Gate <HelpTip text="Measures identity stability, builds verified ground truth, and blocks release when tracking quality is not proven." /></h2>
         </div>
         <div className="quality-heading-actions">
           <span className={`quality-state ${assessment.status}`}>
             {assessment.status === "approved" ? <ShieldCheck size={15} /> : <AlertTriangle size={15} />}
             {titleCase(assessment.status)}
           </span>
-          <button className="button icon-button" disabled={busy} onClick={() => void load()} title="Refresh quality" type="button">
-            <RefreshCw size={16} />
-          </button>
-          <button className="button" disabled={busy} onClick={() => void recalculate()} type="button">
-            <RotateCcw size={16} /> Recalculate
-          </button>
+          <ActionWithHelp help="Reload the saved quality state without changing run artifacts."><button className="button icon-button" disabled={busy} onClick={() => void load()} title="Refresh quality" type="button"><RefreshCw size={16} /></button></ActionWithHelp>
+          <ActionWithHelp help="Recompute tracking confidence, risks and review flags from the saved run data."><button className="button" disabled={busy} onClick={() => void recalculate()} type="button"><RotateCcw size={16} /> Recalculate</button></ActionWithHelp>
         </div>
       </div>
 
@@ -580,10 +577,10 @@ export function TrackingQualityPanel({
 
           <div className="release-plan-builder">
             <div><span className="eyebrow">Full-video coverage</span><strong>500-1000 frame clip plan</strong></div>
-            <label><span>Clip size</span><input className="input" max="1000" min="500" onChange={(event) => setReleaseClipSize(Number(event.target.value))} step="50" type="number" value={releaseClipSize} /></label>
-            <label><span>Overlap</span><input className="input" max="250" min="0" onChange={(event) => setReleaseOverlap(Number(event.target.value))} step="25" type="number" value={releaseOverlap} /></label>
-            <button className="button" disabled={busy} onClick={() => void suggestCriticalRanges()} type="button"><AlertTriangle size={16} /> Find critical clips</button>
-            <button className="button" disabled={busy || releaseOverlap >= releaseClipSize} onClick={() => void buildReleasePlan()} type="button"><FileCheck2 size={16} /> Build plan</button>
+            <label><LabelWithHelp help="Number of source frames in each validation clip; production validation uses 500 to 1000.">Clip size</LabelWithHelp><input className="input" max="1000" min="500" onChange={(event) => setReleaseClipSize(Number(event.target.value))} step="50" type="number" value={releaseClipSize} /></label>
+            <label><LabelWithHelp help="Frames shared by consecutive clips so identities crossing clip boundaries are still checked.">Overlap</LabelWithHelp><input className="input" max="250" min="0" onChange={(event) => setReleaseOverlap(Number(event.target.value))} step="25" type="number" value={releaseOverlap} /></label>
+            <ActionWithHelp help="Search run observations for crowding, crossings, re-entry and cross-team identity risk."><button className="button" disabled={busy} onClick={() => void suggestCriticalRanges()} type="button"><AlertTriangle size={16} /> Find critical clips</button></ActionWithHelp>
+            <ActionWithHelp help="Split the full processed interval into repeatable validation clips with the selected size and overlap."><button className="button" disabled={busy || releaseOverlap >= releaseClipSize} onClick={() => void buildReleasePlan()} type="button"><FileCheck2 size={16} /> Build plan</button></ActionWithHelp>
             {releasePlan ? <span className="release-plan-result"><strong>{releasePlan.clips_count}</strong> clips · {releasePlan.source_frames} frames · {releasePlan.fps} FPS</span> : null}
             {releasePlan ? (
               <div className="release-plan-clips">
@@ -617,18 +614,14 @@ export function TrackingQualityPanel({
           ) : null}
 
           <div className="quality-ground-truth-builder">
-            <label><span>Clip start</span><input className="input" min="0" onChange={(event) => setGroundTruthStart(Number(event.target.value))} type="number" value={groundTruthStart} /></label>
-            <label><span>Clip end</span><input className="input" max={lastAvailableFrame} min={groundTruthStart} onChange={(event) => setGroundTruthEnd(Number(event.target.value))} type="number" value={groundTruthEnd} /></label>
-            <label><span>Sample every</span><input className="input" max="120" min="1" onChange={(event) => setGroundTruthStep(Number(event.target.value))} type="number" value={groundTruthStep} /></label>
-            <label><span>Scenario</span><select className="select" onChange={(event) => setGroundTruthScenario(event.target.value)} value={groundTruthScenario}><option value="crossing">Crossing</option><option value="crowding">Crowding</option><option value="reentry">Long re-entry</option><option value="baseline">Baseline</option></select></label>
-            <label><span>Camera</span><select className="select" onChange={(event) => setGroundTruthCamera(event.target.value)} value={groundTruthCamera}><option value="tactical">Tactical</option><option value="close_or_moving">Close / moving</option></select></label>
-            <label className="quality-critical-check"><input checked={groundTruthCritical} onChange={(event) => setGroundTruthCritical(event.target.checked)} type="checkbox" /><span>Critical clip</span></label>
-            <button className="button" disabled={busy || groundTruthEnd < groundTruthStart} onClick={() => void openTrackingGroundTruthDraft()} type="button">
-              <Eye size={16} /> Identity editor
-            </button>
-            <button className="button" disabled={busy || groundTruthEnd < groundTruthStart} onClick={() => void openBallGroundTruthDraft()} type="button">
-              <CircleDot size={16} /> Ball editor
-            </button>
+            <label><LabelWithHelp help="First local frame included in this annotation clip.">Clip start</LabelWithHelp><input className="input" min="0" onChange={(event) => setGroundTruthStart(Number(event.target.value))} type="number" value={groundTruthStart} /></label>
+            <label><LabelWithHelp help="Last local frame included in this annotation clip.">Clip end</LabelWithHelp><input className="input" max={lastAvailableFrame} min={groundTruthStart} onChange={(event) => setGroundTruthEnd(Number(event.target.value))} type="number" value={groundTruthEnd} /></label>
+            <label><LabelWithHelp help="Annotation sampling interval. A value of 1 includes every frame; larger values reduce manual work.">Sample every</LabelWithHelp><input className="input" max="120" min="1" onChange={(event) => setGroundTruthStep(Number(event.target.value))} type="number" value={groundTruthStep} /></label>
+            <label><LabelWithHelp help="Describes the identity challenge represented by this clip for quality reporting.">Scenario</LabelWithHelp><select className="select" onChange={(event) => setGroundTruthScenario(event.target.value)} value={groundTruthScenario}><option value="crossing">Crossing</option><option value="crowding">Crowding</option><option value="reentry">Long re-entry</option><option value="baseline">Baseline</option></select></label>
+            <label><LabelWithHelp help="Records whether this sample comes from a wide tactical view or a close/moving camera.">Camera</LabelWithHelp><select className="select" onChange={(event) => setGroundTruthCamera(event.target.value)} value={groundTruthCamera}><option value="tactical">Tactical</option><option value="close_or_moving">Close / moving</option></select></label>
+            <label className="quality-critical-check"><input checked={groundTruthCritical} onChange={(event) => setGroundTruthCritical(event.target.checked)} type="checkbox" /><LabelWithHelp help="Marks this clip as mandatory for the release gate because it contains a difficult case.">Critical clip</LabelWithHelp></label>
+            <ActionWithHelp help="Create an editable identity draft for people, teams and participant roles in the selected frames."><button className="button" disabled={busy || groundTruthEnd < groundTruthStart} onClick={() => void openTrackingGroundTruthDraft()} type="button"><Eye size={16} /> Identity editor</button></ActionWithHelp>
+            <ActionWithHelp help="Create an editable ball draft with visibility, position, airborne state and estimated height."><button className="button" disabled={busy || groundTruthEnd < groundTruthStart} onClick={() => void openBallGroundTruthDraft()} type="button"><CircleDot size={16} /> Ball editor</button></ActionWithHelp>
           </div>
 
           <div className="quality-benchmark-band">
@@ -640,27 +633,24 @@ export function TrackingQualityPanel({
             <button className="button" disabled={busy} onClick={() => void loadSavedAnnotations("ball")} type="button"><CircleDot size={16} /> Saved ball</button>
           </div>
 
-          <div className="quality-table-wrap">
-            <table className="table quality-table">
-              <thead><tr><th>Track</th><th>Team</th><th>Role</th><th>Identity</th><th>Re-ID</th><th>Motion</th><th>Fragments</th><th>Risk</th><th>Status</th><th>Review</th></tr></thead>
-              <tbody>
-                {data.tracks.map((track) => (
-                  <tr key={track.track_id}>
-                    <td><strong>#{track.track_id}</strong></td>
-                    <td>{track.team ? `Team ${track.team}` : "Unknown"}</td>
-                    <td><strong>{titleCase(track.role_name)}</strong><small className="table-subline">{percent(track.role_confidence)}{track.role_locked ? " · locked" : " · learning"}</small></td>
-                    <td><div className="quality-score"><QualityBar value={track.identity_confidence} /><span>{percent(track.identity_confidence)}</span></div></td>
-                    <td>{percent(track.reid_confidence)}</td>
-                    <td>{percent(track.motion_consistency)}</td>
-                    <td>{track.fragment_count}</td>
-                    <td><RiskBadge risk={track.switch_risk} /></td>
-                    <td>{titleCase(track.status)}</td>
-                    <td><button className="button icon-button" onClick={() => { setSelectedTrackId(track.track_id); setTab("review"); }} title={`Review track ${track.track_id}`} type="button"><Eye size={15} /></button></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <PaginatedTable
+            className="quality-table-wrap quality-table"
+            headers={["Track", "Team", "Role", "Identity", "Re-ID", "Motion", "Fragments", "Risk", "Status", "Review"]}
+            rows={data.tracks}
+            style={{ marginTop: 12 }}
+            renderRow={(track) => (
+              <tr key={track.track_id}>
+                <td><strong>#{track.track_id}</strong></td>
+                <td>{track.team ? `Team ${track.team}` : "Unknown"}</td>
+                <td><strong>{titleCase(track.role_name)}</strong><small className="table-subline">{percent(track.role_confidence)}{track.role_locked ? " · locked" : " · learning"}</small></td>
+                <td><div className="quality-score"><QualityBar value={track.identity_confidence} /><span>{percent(track.identity_confidence)}</span></div></td>
+                <td>{percent(track.reid_confidence)}</td><td>{percent(track.motion_consistency)}</td>
+                <td>{track.fragment_count}</td><td><RiskBadge risk={track.switch_risk} /></td>
+                <td>{titleCase(track.status)}</td>
+                <td><button className="button icon-button" onClick={() => { setSelectedTrackId(track.track_id); setTab("review"); }} title={`Review track ${track.track_id}`} type="button"><Eye size={15} /></button></td>
+              </tr>
+            )}
+          />
         </div>
       ) : null}
 
@@ -721,18 +711,18 @@ export function TrackingQualityPanel({
       {tab === "review" ? (
         <div className="track-review">
           <div className="track-review-filters">
-            <select className="select" onChange={(event) => setRiskFilter(event.target.value)} value={riskFilter}>
+            <label className="review-filter"><LabelWithHelp help="Filter tracks by estimated identity-switch risk.">Risk</LabelWithHelp><select className="select" onChange={(event) => setRiskFilter(event.target.value)} value={riskFilter}>
               <option value="all">All risk levels</option><option value="high">High risk</option><option value="medium">Medium risk</option><option value="low">Low risk</option>
-            </select>
-            <select className="select" onChange={(event) => setStatusFilter(event.target.value)} value={statusFilter}>
+            </select></label>
+            <label className="review-filter"><LabelWithHelp help="Show pending or already corrected review states.">State</LabelWithHelp><select className="select" onChange={(event) => setStatusFilter(event.target.value)} value={statusFilter}>
               <option value="all">All review states</option><option value="pending">Pending</option><option value="approved">Approved</option><option value="rejected">Rejected</option><option value="merged">Merged</option><option value="split">Split</option>
-            </select>
-            <select className="select" onChange={(event) => setTeamFilter(event.target.value)} value={teamFilter}>
+            </select></label>
+            <label className="review-filter"><LabelWithHelp help="Limit review to one team or identities whose team is still unknown.">Team</LabelWithHelp><select className="select" onChange={(event) => setTeamFilter(event.target.value)} value={teamFilter}>
               <option value="all">Both teams</option><option value="1">Team 1</option><option value="2">Team 2</option><option value="unknown">Unknown team</option>
-            </select>
-            <select className="select" onChange={(event) => setRoleFilter(event.target.value)} value={roleFilter}>
+            </select></label>
+            <label className="review-filter"><LabelWithHelp help="Limit review to players, goalkeepers, officials, or people outside the pitch.">Role</LabelWithHelp><select className="select" onChange={(event) => setRoleFilter(event.target.value)} value={roleFilter}>
               <option value="all">All roles</option><option value="player">Players</option><option value="goalkeeper">Goalkeepers</option><option value="referee">Referees</option><option value="assistant_referee">Assistant referees</option><option value="staff_outside_pitch">Staff / outside pitch</option>
-            </select>
+            </select></label>
             <span>{filteredTracks.length} tracks</span>
           </div>
 
@@ -798,23 +788,23 @@ export function TrackingQualityPanel({
                     </div>
                   </div>
                   <div className="review-control">
-                    <label htmlFor={`role-${runId}`}>Participant role</label>
+                    <label htmlFor={`role-${runId}`}><LabelWithHelp help="Correct and lock the participant role used by tracking, analytics and reports.">Participant role</LabelWithHelp></label>
                     <div className="control-row"><select className="select" id={`role-${runId}`} value={participantRole} onChange={(event) => setParticipantRole(event.target.value as TrackReviewItem["role_name"])}><option value="player">Player</option><option value="goalkeeper">Goalkeeper</option><option value="referee">Referee</option><option value="assistant_referee">Assistant referee</option><option value="staff_outside_pitch">Staff / outside pitch</option></select><button className="button icon-button" disabled={busy || participantRole === selectedTrack.role_name} onClick={() => void applyCorrection("change_role", { assigned_role_name: participantRole })} title="Confirm participant role" type="button"><UserRoundCog size={16} /></button></div>
                     <small>{selectedTrack.role_evidence.length ? selectedTrack.role_evidence.map(titleCase).join(" · ") : "No role evidence recorded"}</small>
                   </div>
                   <div className="review-control">
-                    <label htmlFor={`player-${runId}`}>Player identity</label>
+                    <label htmlFor={`player-${runId}`}><LabelWithHelp help="Link this canonical track to a roster player.">Player identity</LabelWithHelp></label>
                     <div className="control-row"><select className="select" id={`player-${runId}`} onChange={(event) => setPlayerId(Number(event.target.value) || null)} value={playerId || ""}><option value="">Select player</option>{data.players.map((player) => <option key={player.id} value={player.id}>{player.jersey_number != null ? `#${player.jersey_number} ` : ""}{player.name}</option>)}</select><button className="button icon-button" disabled={!playerId || busy} onClick={() => void applyCorrection("assign_player", { assigned_player_id: playerId })} title="Assign player" type="button"><UserCheck size={16} /></button></div>
                   </div>
                   <div className="review-control">
-                    <label htmlFor={`merge-${runId}`}>Merge into</label>
+                    <label htmlFor={`merge-${runId}`}><LabelWithHelp help="Combine this track with another track when both represent the same person.">Merge into</LabelWithHelp></label>
                     <div className="control-row"><select className="select" id={`merge-${runId}`} onChange={(event) => setMergeTarget(Number(event.target.value))} value={mergeTarget || ""}>{data.tracks.filter((track) => track.track_id !== selectedTrack.track_id).map((track) => <option key={track.track_id} value={track.track_id}>Track {track.track_id}</option>)}</select><button className="button icon-button" disabled={!mergeTarget || busy} onClick={() => void applyCorrection("merge", { target_track_id: mergeTarget })} title="Merge track" type="button"><GitMerge size={16} /></button></div>
                   </div>
                   <div className="review-control">
-                    <label htmlFor={`split-${runId}`}>Split at frame</label>
+                    <label htmlFor={`split-${runId}`}><LabelWithHelp help="Create a new identity from this frame when the current track switched to a different person.">Split at frame</LabelWithHelp></label>
                     <div className="control-row"><input className="input" id={`split-${runId}`} max={selectedTrack.last_frame ?? undefined} min={(selectedTrack.first_frame ?? 0) + 1} onChange={(event) => setSplitFrame(Number(event.target.value))} type="number" value={splitFrame ?? ""} /><button className="button icon-button" disabled={!splitFrame || busy} onClick={() => void applyCorrection("split", { split_frame: splitFrame })} title="Split track" type="button"><Scissors size={16} /></button></div>
                   </div>
-                  <label className="review-note"><span>Review note</span><textarea className="textarea" onChange={(event) => setNote(event.target.value)} rows={2} value={note} /></label>
+                  <label className="review-note"><LabelWithHelp help="Optional audit note saved with the next correction.">Review note</LabelWithHelp><textarea className="textarea" onChange={(event) => setNote(event.target.value)} rows={2} value={note} /></label>
                 </>
               ) : <div className="review-empty">No track matches the selected filters.</div>}
             </aside>
@@ -825,20 +815,20 @@ export function TrackingQualityPanel({
       {tab === "history" ? (
         <div className="quality-history">
           {!data.corrections.length ? <div className="review-empty">No corrections saved for this run.</div> : (
-            <table className="table">
-              <thead><tr><th>Action</th><th>Source</th><th>Target / value</th><th>Note</th><th>Created</th><th>State</th><th>Undo</th></tr></thead>
-              <tbody>{data.corrections.map((correction) => (
+            <PaginatedTable
+              headers={["Action", "Source", "Target / value", "Note", "Created", "State", "Undo"]}
+              rows={data.corrections}
+              renderRow={(correction) => (
                 <tr key={correction.id}>
                   <td>{titleCase(correction.action)}</td>
                   <td>{correction.source_track_id != null ? `Track ${correction.source_track_id}` : "-"}</td>
                   <td>{correction.target_track_id != null ? `Track ${correction.target_track_id}` : correction.split_frame != null ? `Frame ${correction.split_frame}` : correction.assigned_role_name ? titleCase(correction.assigned_role_name) : correction.assigned_team_number != null ? `Team ${correction.assigned_team_number}` : correction.assigned_player_id != null ? `Player ${correction.assigned_player_id}` : "-"}</td>
-                  <td>{correction.note || "-"}</td>
-                  <td>{correction.created_at ? new Date(correction.created_at).toLocaleString() : "-"}</td>
+                  <td>{correction.note || "-"}</td><td>{correction.created_at ? new Date(correction.created_at).toLocaleString() : "-"}</td>
                   <td>{correction.undone ? "Undone" : "Active"}</td>
                   <td><button className="button icon-button" disabled={busy || correction.undone} onClick={() => void undo(correction.id)} title="Undo correction" type="button"><Undo2 size={16} /></button></td>
                 </tr>
-              ))}</tbody>
-            </table>
+              )}
+            />
           )}
         </div>
       ) : null}

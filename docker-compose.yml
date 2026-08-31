@@ -92,10 +92,9 @@ services:
       - ./apps/backend/.env
     environment:
       YOLO_CONFIG_DIR: /tmp
-      PYTHONPATH: /app:/opt/sports-main
+      PYTHONPATH: /app
     volumes:
       - ./apps/backend:/app
-      - ./apps/match-analysis-worker/sports-main:/opt/sports-main:ro
     depends_on:
       model-setup:
         condition: service_completed_successfully

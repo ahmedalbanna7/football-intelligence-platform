@@ -35,24 +35,19 @@ dependency merely because the current release does not call it.
   removed only with a clean Docker rebuild because the current requirements
   file also contains transitive packages.
 
-## Confirmed unused runtime coupling
+## Removed unused runtime coupling
 
-- `apps/match-analysis-worker/sports-main` is a 3.7 MB vendored reference tree.
-  The worker imports the native runner from
-  `apps/backend/app/match_analysis_plus`; no production module imports the
-  vendored package. Its `/opt/sports-main` volume and extra `PYTHONPATH` entry
-  are unnecessary for runtime. The source tree can be archived or deleted once
-  its license/reference value is no longer wanted.
-- Run labels and summary notes still use the historical `sports-main` name.
-  They are metadata, not executable dependencies, and can be migrated in a
-  separate compatibility-safe cleanup.
+- The unused `apps/match-analysis-worker/sports-main` reference tree, its
+  `/opt/sports-main` volume, and its extra `PYTHONPATH` entry were removed.
+  The worker runs only `apps/backend/app/match_analysis_plus`.
+- New run metadata uses `native-runner`. Existing database rows may retain the
+  historical source label so saved analysis history remains unchanged.
 - `.codex-*.json`, `.codex-*.jsonl`, and generated local validation layers are
   temporary evidence exports. They are not application inputs and must not be
   committed.
-- Docker build cache is disposable. The latest audit found about 15 GB
-  reclaimable with `docker builder prune`; pruning affects rebuild speed, not
-  source code or runtime data. Named Postgres and MinIO volumes are not build
-  cache and must not be deleted.
+- Docker build cache is disposable. On 2026-08-31, `docker builder prune`
+  reclaimed the unused cache without deleting images, containers, `.pt` files,
+  or named Postgres and MinIO volumes.
 
 ## Generalization checks
 

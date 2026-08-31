@@ -1453,7 +1453,7 @@ async def upload_match(
             video_id=video.id,
             mode=settings.MATCH_ANALYSIS_DEFAULT_MODE.upper(),
             status="queued",
-            source="sports-main",
+            source="native-runner",
             max_frames=max(settings.MATCH_ANALYSIS_DEFAULT_MAX_FRAMES, 0),
         )
         db.add(match_analysis_run)

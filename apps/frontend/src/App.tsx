@@ -28,6 +28,7 @@ import {
 import { FormEvent, MouseEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
 import { TrackingQualityPanel } from "./TrackingQualityPanel";
+import { ActionWithHelp, HelpTip, LabelWithHelp, PaginatedTable } from "./UiPrimitives";
 import type {
   MatchVisualLayers,
   MatchVisualLayerTrack,
@@ -88,7 +89,7 @@ const routes: Array<{
   { key: "my-team", label: "My Team", icon: <Shield size={18} />, subtitle: "Primary club identity" },
   { key: "teams", label: "Teams", icon: <Users size={18} />, subtitle: "Opponent history and rosters" },
   { key: "matches", label: "Matches", icon: <Video size={18} />, subtitle: "Upload and prepare games" },
-  { key: "match-analysis-plus", label: "Match Analysis +", icon: <BarChart3 size={18} />, subtitle: "Full player, ball, team, and pitch analysis" },
+  { key: "match-analysis-plus", label: "Match Analysis", icon: <BarChart3 size={18} />, subtitle: "Full player, ball, team, and pitch analysis" },
   { key: "reports", label: "Reports", icon: <FileText size={18} />, subtitle: "Team and player reports" },
   { key: "agent", label: "Agent", icon: <Bot size={18} />, subtitle: "Coach assistant" },
   { key: "recommendations", label: "Recommendations", icon: <Lightbulb size={18} />, subtitle: "Match and season ideas" }
@@ -207,7 +208,7 @@ function DashboardPage({ setRoute }: { setRoute: (route: RouteKey) => void }) {
         <StatCard title="Matches" value={matches.data?.items?.length ?? "-"} label="latest loaded" />
         <StatCard title="Latest status" value={latest ? statusBadge(latest.status) : "-"} label={latest?.title} />
         <StatCard title="YOLO detections" value={summary?.detections_count ?? "-"} label={summary?.model_mode || "waiting"} />
-        <StatCard title="Stable tracks" value={summary?.tracks_count ?? "-"} label="Match Analysis +" />
+        <StatCard title="Stable tracks" value={summary?.tracks_count ?? "-"} label="Match Analysis" />
       </section>
 
       <section className="split">
@@ -253,47 +254,24 @@ function MatchesTable({
 }) {
   if (!matches.length) return <Empty>No matches yet. Upload a video to start the pipeline.</Empty>;
   return (
-    <div className="table-wrap">
-      <table className="table">
-        <thead>
-          <tr>
-            <th>ID</th>
-            <th>Title</th>
-            <th>Status</th>
-            <th>Type</th>
-            <th>Scope</th>
-              <th>Analysis</th>
-            <th>Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {matches.map((match) => (
-            <tr key={match.id}>
-              <td>{match.id}</td>
-              <td>{match.title}</td>
-              <td>{statusBadge(match.status)}</td>
-              <td>{match.match_context?.match_type || "-"}</td>
-              <td>{match.match_context?.analysis_scope || "-"}</td>
-              <td>
-                {match.latest_match_analysis_run
-                  ? `M+ ${match.latest_match_analysis_run.status}`
-                  : "-"}
-              </td>
-              <td>
-                <button className="button" onClick={() => onOpen?.(match.id)} type="button">
-                  Open
-                </button>
-                {onDelete ? (
-                  <button className="button danger" onClick={() => onDelete(match.id)} type="button">
-                    Delete
-                  </button>
-                ) : null}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    <PaginatedTable
+      headers={["ID", "Title", "Status", "Type", "Scope", "Analysis", "Actions"]}
+      rows={matches}
+      renderRow={(match) => (
+        <tr key={match.id}>
+          <td>{match.id}</td>
+          <td>{match.title}</td>
+          <td>{statusBadge(match.status)}</td>
+          <td>{match.match_context?.match_type || "-"}</td>
+          <td>{match.match_context?.analysis_scope || "-"}</td>
+          <td>{match.latest_match_analysis_run ? `Run ${match.latest_match_analysis_run.status}` : "-"}</td>
+          <td>
+            <button className="button" onClick={() => onOpen?.(match.id)} type="button">Open</button>
+            {onDelete ? <button className="button danger" onClick={() => onDelete(match.id)} type="button">Delete</button> : null}
+          </td>
+        </tr>
+      )}
+    />
   );
 }
 
@@ -518,42 +496,23 @@ function MyTeamPage() {
 function PrimaryRosterTable({ players, onDelete }: { players: RosterPlayer[]; onDelete: (id: number) => void }) {
   if (!players.length) return <Empty>No primary team players yet.</Empty>;
   return (
-    <div className="table-wrap">
-      <table className="table">
-        <thead>
-          <tr>
-            <th>#</th>
-            <th>Name</th>
-            <th>Zone</th>
-            <th>Secondary</th>
-            <th>Side</th>
-            <th>Label</th>
-            <th>Notes</th>
-            <th>Context</th>
-            <th>Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {players.map((player) => (
-            <tr key={player.id}>
-              <td>{player.shirt_number}</td>
-              <td>{player.player_name}</td>
-              <td>{player.primary_zone || player.position || "-"}</td>
-              <td>{player.secondary_zones?.join(", ") || "-"}</td>
-              <td>{player.preferred_side || "-"}</td>
-              <td>{player.position_label || "-"}</td>
-              <td>{player.notes || "-"}</td>
-              <td>{player.team_context}</td>
-              <td>
-                <button className="button danger" onClick={() => onDelete(player.id)} type="button">
-                  Delete
-                </button>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    <PaginatedTable
+      headers={["#", "Name", "Zone", "Secondary", "Side", "Label", "Notes", "Context", "Actions"]}
+      rows={players}
+      renderRow={(player) => (
+        <tr key={player.id}>
+          <td>{player.shirt_number}</td>
+          <td>{player.player_name}</td>
+          <td>{player.primary_zone || player.position || "-"}</td>
+          <td>{player.secondary_zones?.join(", ") || "-"}</td>
+          <td>{player.preferred_side || "-"}</td>
+          <td>{player.position_label || "-"}</td>
+          <td>{player.notes || "-"}</td>
+          <td>{player.team_context}</td>
+          <td><button className="button danger" onClick={() => onDelete(player.id)} type="button">Delete</button></td>
+        </tr>
+      )}
+    />
   );
 }
 
@@ -757,70 +716,34 @@ function OpponentMatchesTable({
 }) {
   if (!matches.length) return <Empty>No matches linked to this opponent yet.</Empty>;
   return (
-    <div className="table-wrap">
-      <table className="table">
-        <thead>
-          <tr>
-            <th>ID</th>
-            <th>Match</th>
-            <th>Status</th>
-            <th>Type</th>
-            <th>Scope</th>
-          </tr>
-        </thead>
-        <tbody>
-          {matches.map((match) => (
-            <tr key={match.id}>
-              <td>{match.id}</td>
-              <td>{match.title}</td>
-              <td>{statusBadge(match.status)}</td>
-              <td>{match.match_type || "-"}</td>
-              <td>{match.analysis_scope || "-"}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    <PaginatedTable
+      headers={["ID", "Match", "Status", "Type", "Scope"]}
+      rows={matches}
+      renderRow={(match) => (
+        <tr key={match.id}>
+          <td>{match.id}</td><td>{match.title}</td><td>{statusBadge(match.status)}</td>
+          <td>{match.match_type || "-"}</td><td>{match.analysis_scope || "-"}</td>
+        </tr>
+      )}
+    />
   );
 }
 
 function PlayerTable({ players, onDelete }: { players: Player[]; onDelete: (id: number) => void }) {
   if (!players.length) return <Empty>No players yet.</Empty>;
   return (
-    <div className="table-wrap">
-      <table className="table">
-        <thead>
-          <tr>
-            <th>#</th>
-            <th>Name</th>
-            <th>Zone</th>
-            <th>Secondary</th>
-            <th>Side</th>
-            <th>Label</th>
-            <th>Notes</th>
-            <th>Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {players.map((player) => (
-            <tr key={player.id}>
-              <td>{player.jersey_number}</td>
-              <td>{player.name}</td>
-              <td>{player.primary_zone}</td>
-              <td>{player.secondary_zones?.join(", ")}</td>
-              <td>{player.preferred_side}</td>
-              <td>{player.position_label}</td>
-              <td>{player.notes || "-"}</td>
-              <td>
-                <button className="button danger" onClick={() => onDelete(player.id)} type="button">
-                  Delete
-                </button>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    <PaginatedTable
+      headers={["#", "Name", "Zone", "Secondary", "Side", "Label", "Notes", "Actions"]}
+      rows={players}
+      renderRow={(player) => (
+        <tr key={player.id}>
+          <td>{player.jersey_number}</td><td>{player.name}</td><td>{player.primary_zone}</td>
+          <td>{player.secondary_zones?.join(", ")}</td><td>{player.preferred_side}</td>
+          <td>{player.position_label}</td><td>{player.notes || "-"}</td>
+          <td><button className="button danger" onClick={() => onDelete(player.id)} type="button">Delete</button></td>
+        </tr>
+      )}
+    />
   );
 }
 
@@ -1101,6 +1024,7 @@ function TrackLayerPicker({
         <span>{label}</span>
         <span className="layer-count">{selected.length}</span>
       </button>
+      <HelpTip text={`${label} chooses which player or team tracks appear in this visual layer. The selection changes only the display, not saved detections.`} />
       {open ? (
         <div className="layer-menu">
           <div className="layer-menu-header">
@@ -1204,6 +1128,7 @@ function TimeWindowPicker({
           {mode === "progress" ? "LIVE" : `${formatAnalysisTime(rangeStart)}-${formatAnalysisTime(rangeEnd)}`}
         </span>
       </button>
+      <HelpTip text="Choose whether paths and heatmaps follow current playback or use a fixed start/end interval." />
       {open ? (
         <div className="layer-menu time-window-menu">
           <div className="layer-menu-header">
@@ -1798,6 +1723,7 @@ function InteractiveAnalysisViewer({
           ) : null}
 
           <div className="analysis-player-controls">
+            <HelpTip text="Video controls: play or pause, seek through the generated run, change volume, and enter full screen. Visual layers stay synchronized with this timeline." />
             <button
               aria-label={playing ? "Pause video" : "Play video"}
               onClick={togglePlayback}
@@ -2375,7 +2301,7 @@ function ManualPitchCalibration({
     <div className="manual-calibration">
       <div className="calibration-toolbar">
         <label className="field">
-          <span className="label">Pitch landmark</span>
+          <LabelWithHelp help="Select a known pitch point, then click its exact location in the video frame. Use well-separated points around the visible pitch.">Pitch landmark</LabelWithHelp>
           <select className="select" onChange={(event) => setLandmarkKey(event.target.value)} value={landmarkKey}>
             {pitchCalibrationLandmarks.map((item) => (
               <option key={item.key} value={item.key}>{item.label}</option>
@@ -2384,10 +2310,11 @@ function ManualPitchCalibration({
         </label>
         <span className={`calibration-count ${points.length >= 4 ? "ready" : ""}`}>
           {points.length}/4 minimum
+          <HelpTip text="At least four non-collinear landmarks are required. More accurately placed points improve geometric stability." />
         </span>
-        <button className="button" disabled={!points.length} onClick={() => onChange([])} type="button">
-          <RotateCcw size={15} /> Clear
-        </button>
+        <ActionWithHelp help="Remove all manually selected landmarks and start calibration again.">
+          <button className="button" disabled={!points.length} onClick={() => onChange([])} type="button"><RotateCcw size={15} /> Clear</button>
+        </ActionWithHelp>
       </div>
       <div className="calibration-frame">
         <img
@@ -2470,7 +2397,7 @@ function MatchAnalysisPlusPage() {
       return;
     }
     setRunning(true);
-    setMessage("Running Match Analysis +...");
+    setMessage("Running Match Analysis...");
     try {
       const response = await api.runMatchAnalysisPlus(activeId, {
         mode: "FULL_ANALYSIS",
@@ -2487,67 +2414,72 @@ function MatchAnalysisPlusPage() {
       runs.refresh();
       matches.refresh();
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Match Analysis + failed.");
+      setMessage(error instanceof Error ? error.message : "Match Analysis failed.");
     } finally {
       setRunning(false);
     }
   }
 
   return (
-    <section className="grid">
+    <section className="grid match-analysis-page">
       <div className="card">
-        <div className="toolbar">
-          <select className="select" value={activeId || ""} onChange={(event) => { setMatchId(Number(event.target.value)); setSelectedRunId(null); setCalibrationPoints([]); }} style={{ maxWidth: 520 }}>
-            {(matches.data?.items || []).map((match) => <option key={match.id} value={match.id}>#{match.id} {match.title}</option>)}
-          </select>
-          <label className="toolbar">
-            <span className="label">Start frame</span>
+        <div className="toolbar analysis-run-toolbar">
+          <label className="analysis-run-control match-picker">
+            <LabelWithHelp help="Choose the uploaded match whose video will be analysed. Changing it loads that match's saved runs.">Match</LabelWithHelp>
+            <select className="select" value={activeId || ""} onChange={(event) => { setMatchId(Number(event.target.value)); setSelectedRunId(null); setCalibrationPoints([]); }}>
+              {(matches.data?.items || []).map((match) => <option key={match.id} value={match.id}>#{match.id} {match.title}</option>)}
+            </select>
+          </label>
+          <label className="analysis-run-control">
+            <LabelWithHelp help="First source-video frame to process. Use it to test a later interval without analysing everything before it.">Start frame</LabelWithHelp>
             <input
               className="input"
               min="0"
               onChange={(event) => { setStartFrame(Number(event.target.value)); setCalibrationPoints([]); }}
-              style={{ maxWidth: 120 }}
               type="number"
               value={startFrame}
             />
           </label>
-          <label className="toolbar">
-            <span className="label">Detection source</span>
-            <select className="select" onChange={(event) => setReuseRunId(event.target.value ? Number(event.target.value) : null)} style={{ maxWidth: 230 }} value={reuseRunId || ""}>
+          <label className="analysis-run-control detection-source-control">
+            <LabelWithHelp help="Fresh inference runs YOLO again. Reusing a processed run loads its saved detections so tracking or rendering can be tested faster.">Detection source</LabelWithHelp>
+            <select className="select" onChange={(event) => setReuseRunId(event.target.value ? Number(event.target.value) : null)} value={reuseRunId || ""}>
               <option value="">Fresh YOLO inference</option>
               {(runs.data?.runs || [])
                 .filter((run) => run.status === "processed" && run.summary?.performance?.detection_cache?.object_name)
                 .map((run) => <option key={run.id} value={run.id}>Reuse detections from run #{run.id}</option>)}
             </select>
           </label>
-          <label className="toolbar">
-            <span className="label">Max frames</span>
+          <label className="analysis-run-control">
+            <LabelWithHelp help="Maximum number of frames processed from Start frame. Set 0 only when you intentionally want the full remaining video.">Max frames</LabelWithHelp>
             <input
               className="input"
               min="0"
               max="200000"
               onChange={(event) => setMaxFrames(Number(event.target.value))}
-              style={{ maxWidth: 120 }}
               type="number"
               value={maxFrames}
             />
           </label>
-          <button className="button primary" disabled={!activeId || running} onClick={runAnalysis} type="button">
-            <BarChart3 size={16} /> {running ? "Running..." : "Run analysis"}
-          </button>
-          <button className="button" onClick={() => { runs.refresh(); matches.refresh(); }} type="button">
-            <RefreshCw size={16} /> Refresh
-          </button>
+          <ActionWithHelp help="Queue a complete player, ball, team, role, pitch and analytics run using the options in this row.">
+            <button className="button primary" disabled={!activeId || running} onClick={runAnalysis} type="button">
+              <BarChart3 size={16} /> {running ? "Running..." : "Run analysis"}
+            </button>
+          </ActionWithHelp>
+          <ActionWithHelp help="Reload the match list, run status, progress and quality results from the API.">
+            <button className="button" onClick={() => { runs.refresh(); matches.refresh(); }} type="button">
+              <RefreshCw size={16} /> Refresh
+            </button>
+          </ActionWithHelp>
         </div>
         <div className="calibration-mode-row">
-          <span className="label">Pitch calibration</span>
+          <LabelWithHelp help="Maps image pixels to real pitch coordinates. This controls the accuracy of distance, speed, radar and heatmaps.">Pitch calibration</LabelWithHelp>
           <div className="segmented-control" role="group" aria-label="Pitch calibration mode">
-            <button className={!manualCalibration ? "active" : ""} onClick={() => setManualCalibration(false)} type="button">
-              Automatic
-            </button>
-            <button className={manualCalibration ? "active" : ""} onClick={() => setManualCalibration(true)} type="button">
-              Manual fallback
-            </button>
+            <ActionWithHelp help="Detect pitch lines and keypoints automatically for each frame.">
+              <button className={!manualCalibration ? "active" : ""} onClick={() => setManualCalibration(false)} type="button">Automatic</button>
+            </ActionWithHelp>
+            <ActionWithHelp help="Provide at least four exact pitch landmarks when automatic calibration is unreliable.">
+              <button className={manualCalibration ? "active" : ""} onClick={() => setManualCalibration(true)} type="button">Manual fallback</button>
+            </ActionWithHelp>
           </div>
           <span className="muted small">Automatic line and keypoint calibration runs on every analysis.</span>
         </div>
@@ -2565,55 +2497,51 @@ function MatchAnalysisPlusPage() {
 
       <section className="grid two">
         <div className="card">
-          <h2 className="section-title">Saved Runs</h2>
+          <h2 className="section-title title-with-help">Saved Runs <HelpTip text="Every analysis is stored as a separate run. The table shows five runs per page; use its own controls without scrolling the whole page." /></h2>
           {!runs.data?.runs.length ? (
-            <Empty>No saved Match Analysis + runs for this match yet.</Empty>
+            <Empty>No saved Match Analysis runs for this match yet.</Empty>
           ) : (
-            <div className="table-wrap" style={{ marginTop: 14 }}>
-              <table className="table">
-                <thead>
-                  <tr>
-                    <th>Run</th>
-                    <th>Profile</th>
-                    <th>Status</th>
-                    <th>Quality</th>
-                    <th>Frames</th>
-                    <th>Created</th>
-                    <th>Open</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {runs.data.runs.map((run) => (
-                    <tr key={run.id}>
-                      <td>#{run.id}</td>
-                      <td>{run.mode === "FULL_ANALYSIS" ? "Full analysis" : "Legacy run"}</td>
-                      <td>{statusBadge(run.status)}</td>
-                      <td>
-                        {run.quality ? (
-                          <span className={`quality-state ${run.quality.status}`}>
-                            {run.quality.status === "approved" ? <Shield size={14} /> : <AlertTriangle size={14} />}
-                            {run.quality.status.replaceAll("_", " ")}
-                            {run.quality.tracks_needing_review > 0 ? ` (${run.quality.tracks_needing_review})` : ""}
-                          </span>
-                        ) : "-"}
-                      </td>
-                      <td>{run.summary?.frames_processed ?? run.max_frames}</td>
-                      <td>{run.created_at ? new Date(run.created_at).toLocaleString() : "-"}</td>
-                      <td>
-                        <button className="button" onClick={() => { setSelectedRunId(run.id); setVideoError(null); }} type="button">
-                          Open
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <PaginatedTable
+              headers={[
+                <>Run <HelpTip text="Unique saved analysis run number." /></>,
+                <>Profile <HelpTip text="Analysis profile used by this run." /></>,
+                <>Status <HelpTip text="Queued, processing, processed or failed worker state." /></>,
+                <>Quality <HelpTip text="Release-gate state and number of tracks that still need review." /></>,
+                <>Frames <HelpTip text="Number of frames actually processed." /></>,
+                <>Created <HelpTip text="Local date and time when this run was created." /></>,
+                <>Open <HelpTip text="Loads this run's video, quality gates, tracks and artifacts below." /></>
+              ]}
+              rows={runs.data.runs}
+              style={{ marginTop: 14 }}
+              renderRow={(run) => (
+                <tr key={run.id}>
+                  <td>#{run.id}</td>
+                  <td>{run.mode === "FULL_ANALYSIS" ? "Full analysis" : "Legacy run"}</td>
+                  <td>{statusBadge(run.status)}</td>
+                  <td>
+                    {run.quality ? (
+                      <span className={`quality-state ${run.quality.status}`}>
+                        {run.quality.status === "approved" ? <Shield size={14} /> : <AlertTriangle size={14} />}
+                        {run.quality.status.replaceAll("_", " ")}
+                        {run.quality.tracks_needing_review > 0 ? ` (${run.quality.tracks_needing_review})` : ""}
+                      </span>
+                    ) : "-"}
+                  </td>
+                  <td>{run.summary?.frames_processed ?? run.max_frames}</td>
+                  <td>{run.created_at ? new Date(run.created_at).toLocaleString() : "-"}</td>
+                  <td>
+                    <ActionWithHelp help={`Open run ${run.id} and load its saved results.`}>
+                      <button className="button" onClick={() => { setSelectedRunId(run.id); setVideoError(null); }} type="button">Open</button>
+                    </ActionWithHelp>
+                  </td>
+                </tr>
+              )}
+            />
           )}
         </div>
 
         <div className="card">
-          <h2 className="section-title">Run Details</h2>
+          <h2 className="section-title title-with-help">Run Details <HelpTip text="Operational metadata for the selected run. This panel scrolls independently so the page layout remains stable." /></h2>
           {selectedRun ? (
             <div className="table-wrap" style={{ marginTop: 14 }}>
               <table className="table">
@@ -2637,7 +2565,7 @@ function MatchAnalysisPlusPage() {
                   <tr><th>Calibration</th><td>{selectedRun.analysis_config?.calibration_points?.length ? "Manual fallback supplied" : "Automatic"}</td></tr>
                   <tr><th>Source</th><td>{selectedRun.source}</td></tr>
                   <tr><th>Worker</th><td>{summary?.worker || "-"}</td></tr>
-                  <tr><th>Project</th><td>{summary?.source_project || "apps/match-analysis-worker/sports-main"}</td></tr>
+                  <tr><th>Project</th><td>{summary?.source_project || "apps/backend/app/match_analysis_plus"}</td></tr>
                   <tr><th>Error</th><td>{selectedRun.error_message || "-"}</td></tr>
                 </tbody>
               </table>
@@ -2652,7 +2580,7 @@ function MatchAnalysisPlusPage() {
         <>
           <section className="grid four">
             <StatCard title="Frames" value={summary.frames_processed} label={`max ${summary.max_frames}`} />
-            <StatCard title="Tracks" value={summary.tracks_count} label={summary.model_mode || "sports-main worker"} />
+            <StatCard title="Tracks" value={summary.tracks_count} label={summary.model_mode || "native analysis worker"} />
             <StatCard title="Detections" value={summary.detections_count} label={Object.entries(summary.class_counts || {}).map(([key, value]) => `${key}: ${value}`).join(" / ") || "class counts"} />
             <StatCard
               title="Pitch confidence"
@@ -2835,30 +2763,20 @@ function MatchAnalysisPlusPage() {
               </div>
             </div>
             <div className="card">
-              <h2 className="section-title">Artifacts</h2>
+              <h2 className="section-title title-with-help">Artifacts <HelpTip text="Saved files produced by the selected run. Opening an artifact does not rerun detection." /></h2>
               <div className="artifact-actions">
-                <a className="button" href={api.objectUrl(selectedRun.output_object)} target="_blank" rel="noreferrer">
-                  Open video
-                </a>
+                <ActionWithHelp help="Open the rendered analysis video with overlays."><a className="button" href={api.objectUrl(selectedRun.output_object)} target="_blank" rel="noreferrer">Open video</a></ActionWithHelp>
                 {selectedRun.summary_object ? (
-                  <a className="button" href={api.objectUrl(selectedRun.summary_object)} target="_blank" rel="noreferrer">
-                    Open JSON
-                  </a>
+                  <ActionWithHelp help="Open the complete machine-readable summary for this run."><a className="button" href={api.objectUrl(selectedRun.summary_object)} target="_blank" rel="noreferrer">Open JSON</a></ActionWithHelp>
                 ) : null}
                 {summary.visual_layers?.object_name ? (
-                  <a className="button" href={api.objectUrl(summary.visual_layers.object_name)} target="_blank" rel="noreferrer">
-                    Open layer data
-                  </a>
+                  <ActionWithHelp help="Open movement and heatmap layer coordinates used by the interactive viewer."><a className="button" href={api.objectUrl(summary.visual_layers.object_name)} target="_blank" rel="noreferrer">Open layer data</a></ActionWithHelp>
                 ) : null}
                 {summary.canonical_analytics?.object_name ? (
-                  <a className="button" href={api.objectUrl(summary.canonical_analytics.object_name)} target="_blank" rel="noreferrer">
-                    Canonical analytics
-                  </a>
+                  <ActionWithHelp help="Open analytics rebuilt with approved canonical track corrections."><a className="button" href={api.objectUrl(summary.canonical_analytics.object_name)} target="_blank" rel="noreferrer">Canonical analytics</a></ActionWithHelp>
                 ) : null}
                 {summary.canonical_report?.object_name ? (
-                  <a className="button" href={api.objectUrl(summary.canonical_report.object_name)} target="_blank" rel="noreferrer">
-                    Canonical report
-                  </a>
+                  <ActionWithHelp help="Open the report generated from canonical corrected identities."><a className="button" href={api.objectUrl(summary.canonical_report.object_name)} target="_blank" rel="noreferrer">Canonical report</a></ActionWithHelp>
                 ) : null}
               </div>
               <div className="layer-run-stats">
@@ -2931,7 +2849,7 @@ function ReportsPage() {
           ) : null}
         </div>
       </div>
-      {!activeRun ? <Empty>Run Match Analysis + to generate Reports v2.</Empty> : null}
+      {!activeRun ? <Empty>Run Match Analysis to generate Reports v2.</Empty> : null}
       {report.data ? (
         <>
           <div className="grid four">
@@ -3003,30 +2921,22 @@ function MiniDataTable({
 }) {
   if (!rows.length) return <Empty>No data yet.</Empty>;
   return (
-    <div className="table-wrap" style={{ marginTop: 14 }}>
-      <table className="table">
-        <thead>
-          <tr>
-            {columns.map((column) => <th key={column}>{column}</th>)}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.slice(0, 80).map((row, index) => (
-            <tr key={index}>
-              {columns.map((column) => (
-                <td key={column}>{String(row[column] ?? "-")}</td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    <PaginatedTable
+      headers={columns}
+      rows={rows}
+      style={{ marginTop: 14 }}
+      renderRow={(row, index) => (
+        <tr key={index}>
+          {columns.map((column) => <td key={column}>{String(row[column] ?? "-")}</td>)}
+        </tr>
+      )}
+    />
   );
 }
 
 function AgentPage() {
   const [messages, setMessages] = useState([
-    { role: "agent", text: "Select a match in Match Analysis + or Reports, then ask for a tactical explanation, player plan, or training idea." }
+    { role: "agent", text: "Select a match in Match Analysis or Reports, then ask for a tactical explanation, player plan, or training idea." }
   ]);
   const [text, setText] = useState("");
 

@@ -335,7 +335,7 @@ async def run_match_analysis_plus(
         video_id=video.id,
         mode="FULL_ANALYSIS",
         status="queued",
-        source="sports-main",
+        source="native-runner",
         max_frames=max(payload.max_frames, 0),
         analysis_config_json={
             "start_frame": max(payload.start_frame, 0),
@@ -383,7 +383,7 @@ async def run_match_analysis_plus(
         db.refresh(run)
         raise HTTPException(
             status_code=502,
-            detail=f"Could not queue Match Analysis + job: {exc}",
+            detail=f"Could not queue Match Analysis job: {exc}",
         ) from exc
 
     match.status = "queued"

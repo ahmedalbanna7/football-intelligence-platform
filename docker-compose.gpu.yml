@@ -10,7 +10,7 @@ services:
     environment:
       YOLO_DEVICE: "0"
       YOLO_CONFIG_DIR: /tmp
-      PYTHONPATH: /app:/opt/sports-main
+      PYTHONPATH: /app
     gpus: all
     ipc: host
     shm_size: 8gb

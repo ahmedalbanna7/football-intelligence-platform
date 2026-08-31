@@ -7868,7 +7868,7 @@ class MatchAnalysisPlusRunner:
                 "output_object": output_object,
                 "summary_object": summary_object,
                 "thumbnail_object": thumbnail_object if thumbnail_path.exists() else None,
-                "source_project": "apps/match-analysis-worker/sports-main",
+                "source_project": "apps/backend/app/match_analysis_plus",
                 "worker": "match-analysis-worker",
             }
             self._put_json(bucket, summary_object, payload)
@@ -8269,7 +8269,7 @@ class MatchAnalysisPlusRunner:
             if frames_processed == 1 or frames_processed % 50 == 0:
                 elapsed_seconds = max(perf_counter() - start, 0.001)
                 print(
-                    "Match Analysis + progress "
+                    "Match Analysis progress "
                     f"{frames_processed}/{expected_frames or '?'} frames "
                     f"({frames_processed / elapsed_seconds:.3f} FPS)",
                     flush=True,
@@ -8519,7 +8519,7 @@ class MatchAnalysisPlusRunner:
             "analytics_real_v1": analytics_real_v1,
             "_analytics_payload": analytics_real_v1,
             "notes": [
-                "sports-main source is vendored in apps/match-analysis-worker/sports-main",
+                "analysis uses the native backend runner",
                 "every run executes player, ball, tracking, team classification, and pitch radar analysis",
                 "field-fixture filtering runs before stable player identity assignment",
                 "distance and speed use metric ground-plane coordinates only after validated pitch calibration",
@@ -9224,7 +9224,7 @@ class MatchAnalysisPlusRunner:
     def _draw_header(self, frame: np.ndarray, mode: str) -> None:
         scale = self._font_scale(frame, 0.48)
         thickness = self._thickness(frame)
-        title = "Match Analysis +  FULL"
+        title = "Match Analysis  FULL"
         cv2.putText(frame, title, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, scale, (255, 255, 255), thickness + 2)
         cv2.putText(frame, title, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, scale, (0, 0, 0), thickness)
 

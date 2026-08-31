@@ -27,6 +27,7 @@ import type {
   TrackingGroundTruthFrame,
   TrackingGroundTruthObject
 } from "./types";
+import { ActionWithHelp, HelpTip, LabelWithHelp } from "./UiPrimitives";
 
 type AnnotationMode = "tracking" | "ball";
 type AnnotationDocument = TrackingGroundTruthDocument | BallGroundTruthDocument;
@@ -469,7 +470,7 @@ export function GroundTruthAnnotationEditor({
     <div className="ground-truth-editor">
       <div className="annotation-toolbar">
         <div className="annotation-progress">
-          <span>{mode === "tracking" ? "Identity labels" : "Ball labels"}</span>
+          <span className="title-with-help">{mode === "tracking" ? "Identity labels" : "Ball labels"}<HelpTip text="Review every sampled frame manually. Metrics are released only after every frame is verified by a named annotator." /></span>
           <strong>{verifiedCount} / {frames.length} frames verified</strong>
           <span className="annotation-progress-track"><span style={{ width: `${progress * 100}%` }} /></span>
         </div>
@@ -555,7 +556,7 @@ export function GroundTruthAnnotationEditor({
             <button className="button icon-button" disabled={safeFrameIndex === 0} onClick={() => setFrameIndex((value) => Math.max(0, value - 1))} title="Previous annotated frame" type="button"><ArrowLeft size={16} /></button>
             <span><strong>Frame {currentFrame?.frame ?? "-"}</strong><small>{((currentFrame?.frame || 0) / Math.max(fps, 0.001)).toFixed(2)}s</small></span>
             <button className="button icon-button" disabled={safeFrameIndex >= frames.length - 1} onClick={() => setFrameIndex((value) => Math.min(frames.length - 1, value + 1))} title="Next annotated frame" type="button"><ArrowRight size={16} /></button>
-            <button className="button" onClick={verifyCurrentFrame} type="button"><Check size={16} /> Verify frame</button>
+            <ActionWithHelp help="Confirm that every visible annotation in this frame is correct. Any later edit returns it to unverified."><button className="button" onClick={verifyCurrentFrame} type="button"><Check size={16} /> Verify frame</button></ActionWithHelp>
           </div>
         </div>
 
@@ -564,11 +565,11 @@ export function GroundTruthAnnotationEditor({
             selected ? (
               <>
                 <div><span className="eyebrow">Selected annotation</span><h3>{selected.identity_id}</h3></div>
-                <label><span>Stable identity</span><input className="input" onChange={(event) => updateSelectedObject({ identity_id: event.target.value, review_state: "unverified" })} value={selected.identity_id} /></label>
-                <div className="review-control"><span>Team</span><div className="segmented-control"><button className={selected.team === 1 ? "active" : ""} onClick={() => updateSelectedObject({ team: 1, review_state: "unverified" })} type="button">Team 1</button><button className={selected.team === 2 ? "active" : ""} onClick={() => updateSelectedObject({ team: 2, review_state: "unverified" })} type="button">Team 2</button></div></div>
-                <label><span>Participant role</span><select className="select" onChange={(event) => updateSelectedObject({ role_name: event.target.value as TrackingGroundTruthObject["role_name"], review_state: "unverified" })} value={selected.role_name || "player"}>{ROLE_OPTIONS.map((role) => <option key={role} value={role}>{titleCase(role)}</option>)}</select></label>
-                <label><span>New identity for draw</span><input className="input" onChange={(event) => setNewIdentity(event.target.value)} placeholder="identity-player-name" value={newIdentity} /></label>
-                <button className="button danger" onClick={removeSelectedObject} type="button"><Trash2 size={16} /> Remove false detection</button>
+                <label><LabelWithHelp help="Persistent person identity used across all frames. Keep the same value when the same person reappears.">Stable identity</LabelWithHelp><input className="input" onChange={(event) => updateSelectedObject({ identity_id: event.target.value, review_state: "unverified" })} value={selected.identity_id} /></label>
+                <div className="review-control"><LabelWithHelp help="Correct team assignment for this identity; it is used to detect forbidden cross-team ID switches.">Team</LabelWithHelp><div className="segmented-control"><button className={selected.team === 1 ? "active" : ""} onClick={() => updateSelectedObject({ team: 1, review_state: "unverified" })} type="button">Team 1</button><button className={selected.team === 2 ? "active" : ""} onClick={() => updateSelectedObject({ team: 2, review_state: "unverified" })} type="button">Team 2</button></div></div>
+                <label><LabelWithHelp help="Ground-truth role: player, goalkeeper, referee, assistant referee, or staff outside the pitch.">Participant role</LabelWithHelp><select className="select" onChange={(event) => updateSelectedObject({ role_name: event.target.value as TrackingGroundTruthObject["role_name"], review_state: "unverified" })} value={selected.role_name || "player"}>{ROLE_OPTIONS.map((role) => <option key={role} value={role}>{titleCase(role)}</option>)}</select></label>
+                <label><LabelWithHelp help="Identity assigned to the next missing person box you draw on the video.">New identity for draw</LabelWithHelp><input className="input" onChange={(event) => setNewIdentity(event.target.value)} placeholder="identity-player-name" value={newIdentity} /></label>
+                <ActionWithHelp help="Delete the selected box when it is a false or duplicate person detection."><button className="button danger" onClick={removeSelectedObject} type="button"><Trash2 size={16} /> Remove false detection</button></ActionWithHelp>
               </>
             ) : (
               <div className="annotation-empty"><MousePointer2 size={20} /><span>Select a box or draw a missing identity.</span></div>
@@ -584,9 +585,9 @@ export function GroundTruthAnnotationEditor({
               {ballFrame.ball ? (
                 <>
                   <div className="annotation-coordinate-grid"><span>X<strong>{ballFrame.ball.center[0].toFixed(1)}</strong></span><span>Y<strong>{ballFrame.ball.center[1].toFixed(1)}</strong></span></div>
-                  <label className="toggle-row"><span>Airborne</span><input checked={Boolean(ballFrame.ball.airborne)} onChange={(event) => updateBallFrame({ ball: { ...ballFrame.ball!, airborne: event.target.checked } })} type="checkbox" /></label>
-                  <label><span>Estimated height (cm)</span><input className="input" min="0" onChange={(event) => updateBallFrame({ ball: { ...ballFrame.ball!, height_cm: Number(event.target.value) } })} type="number" value={ballFrame.ball.height_cm ?? 0} /></label>
-                  <button className="button danger" onClick={() => updateBallFrame({ state: "uncertain", ball: null })} type="button"><Trash2 size={16} /> Clear marker</button>
+                  <label className="toggle-row"><LabelWithHelp help="Enable when the ball is visibly above playing height; airborne frames are excluded from normal possession assignment.">Airborne</LabelWithHelp><input checked={Boolean(ballFrame.ball.airborne)} onChange={(event) => updateBallFrame({ ball: { ...ballFrame.ball!, airborne: event.target.checked } })} type="checkbox" /></label>
+                  <label><LabelWithHelp help="Approximate vertical height above the pitch. Single-camera height is estimated and evaluated separately.">Estimated height (cm)</LabelWithHelp><input className="input" min="0" onChange={(event) => updateBallFrame({ ball: { ...ballFrame.ball!, height_cm: Number(event.target.value) } })} type="number" value={ballFrame.ball.height_cm ?? 0} /></label>
+                  <ActionWithHelp help="Remove a wrong ball point and mark this frame uncertain until a correct state is selected."><button className="button danger" onClick={() => updateBallFrame({ state: "uncertain", ball: null })} type="button"><Trash2 size={16} /> Clear marker</button></ActionWithHelp>
                 </>
               ) : null}
             </>
@@ -603,11 +604,11 @@ export function GroundTruthAnnotationEditor({
       ) : null}
 
       <div className="annotation-footer">
-        <label><span>Annotator</span><input className="input" onChange={(event) => setAnnotator(event.target.value)} placeholder="Name or email" value={annotator} /></label>
+        <label><LabelWithHelp help="Name or email of the person who manually checked every frame. Required for verified ground truth.">Annotator</LabelWithHelp><input className="input" onChange={(event) => setAnnotator(event.target.value)} placeholder="Name or email" value={annotator} /></label>
         <span className={`annotation-document-state ${document.verification.status}`}>{titleCase(document.verification.status)}</span>
-        <button className="button" disabled={busy} onClick={() => void saveDraft()} type="button"><Save size={16} /> Save draft</button>
-        <button className="button" disabled={busy || !annotator.trim() || !allFramesVerified} onClick={() => void verifyAndSave()} title="Available after every frame is manually verified" type="button"><ShieldCheck size={16} /> Verify all & save</button>
-        <button className="button primary" disabled={busy || !annotator.trim() || !allFramesVerified} onClick={() => void evaluate()} type="button"><ShieldCheck size={16} /> Evaluate</button>
+        <ActionWithHelp help="Save current work without treating it as measured ground truth."><button className="button" disabled={busy} onClick={() => void saveDraft()} type="button"><Save size={16} /> Save draft</button></ActionWithHelp>
+        <ActionWithHelp help="Available only after a named annotator verifies every frame. Saves an immutable verified state for benchmarking."><button className="button" disabled={busy || !annotator.trim() || !allFramesVerified} onClick={() => void verifyAndSave()} title="Available after every frame is manually verified" type="button"><ShieldCheck size={16} /> Verify all & save</button></ActionWithHelp>
+        <ActionWithHelp help="Compare the run output against verified annotations and calculate identity or ball quality metrics."><button className="button primary" disabled={busy || !annotator.trim() || !allFramesVerified} onClick={() => void evaluate()} type="button"><ShieldCheck size={16} /> Evaluate</button></ActionWithHelp>
       </div>
     </div>
   );

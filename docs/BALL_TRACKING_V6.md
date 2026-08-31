@@ -1,7 +1,7 @@
 # Ball Tracking v6
 
 Ball Tracking v6 is the guarded multi-frame single-ball pipeline used by
-`Match Analysis +`. It combines dedicated detections, image motion, metric
+`Match Analysis`. It combines dedicated detections, image motion, metric
 pitch motion, and a confidence-gated monocular 3D estimate. The release rule is
 deliberately conservative: a temporarily missing marker is better than a
 confident marker on a player, boot, penalty spot, or unrelated object.

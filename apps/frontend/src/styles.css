@@ -303,6 +303,7 @@ button {
 
 .table-wrap {
   overflow: auto;
+  max-height: 326px;
   border: 1px solid #dce3ea;
   border-radius: 8px;
 }
@@ -324,9 +325,152 @@ button {
 }
 
 .table th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   background: #f8fafc;
   color: #314050;
   font-size: 12px;
+}
+
+.paginated-table {
+  min-width: 0;
+  border: 1px solid #dce3ea;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #ffffff;
+}
+
+.paginated-table .table-wrap {
+  max-height: 326px;
+  border: 0;
+  border-radius: 0;
+}
+
+.table-pagination {
+  min-height: 44px;
+  padding: 7px 10px;
+  border-top: 1px solid #dce3ea;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 14px;
+  color: #526171;
+  background: #f8fafc;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.table-pagination-actions {
+  display: flex;
+  gap: 5px;
+}
+
+.table-pagination .icon-button {
+  width: 30px;
+  min-height: 30px;
+  padding: 0;
+}
+
+.label-with-help,
+.title-with-help {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.help-tip-wrap {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+}
+
+.help-tip,
+.segmented-control .help-tip,
+.annotation-tool-group .help-tip {
+  width: 20px;
+  height: 20px;
+  min-height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  display: inline-grid;
+  place-items: center;
+  background: #eaf3f1;
+  color: #006d5b;
+  cursor: help;
+}
+
+.help-tip:hover,
+.help-tip:focus-visible,
+.segmented-control .help-tip:hover,
+.annotation-tool-group .help-tip:hover {
+  background: #d5ebe5;
+  color: #005446;
+  outline: 2px solid #8bc7b7;
+  outline-offset: 1px;
+}
+
+.help-tip-content {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  z-index: 80;
+  width: min(280px, calc(100vw - 32px));
+  padding: 8px 10px;
+  border: 1px solid #b8c9c4;
+  border-radius: 6px;
+  background: #10241f;
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.45;
+  box-shadow: 0 8px 24px rgba(16, 36, 31, 0.18);
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, 4px);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+
+.help-tip-wrap:hover .help-tip-content,
+.help-tip-wrap:focus-within .help-tip-content {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+.action-with-help {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.analysis-run-toolbar {
+  display: grid;
+  grid-template-columns: minmax(260px, 2fr) minmax(105px, 0.6fr) minmax(220px, 1.2fr) minmax(105px, 0.6fr) auto auto;
+  align-items: end;
+}
+
+.analysis-run-control {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.segmented-control > .action-with-help {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0;
+}
+
+.segmented-control > .action-with-help > button:not(.help-tip) {
+  width: 100%;
+}
+
+.segmented-control > .action-with-help .help-tip-wrap {
+  padding: 0 5px;
+  background: #ffffff;
 }
 
 .badge {
@@ -449,6 +593,13 @@ button {
 
 .layer-picker {
   position: relative;
+}
+
+.layer-picker > .help-tip-wrap {
+  position: absolute;
+  z-index: 12;
+  top: -7px;
+  right: -7px;
 }
 
 .layer-picker-trigger {
@@ -956,6 +1107,12 @@ button {
   grid-template-columns: 34px auto minmax(70px, 1fr) auto 34px minmax(54px, 80px) 34px;
   align-items: center;
   gap: 6px;
+}
+
+.analysis-player-controls > .help-tip-wrap {
+  position: absolute;
+  top: 9px;
+  right: 8px;
 }
 
 .analysis-player-controls button {
@@ -1964,6 +2121,11 @@ button {
   min-width: 150px;
 }
 
+.review-filter {
+  display: grid;
+  gap: 4px;
+}
+
 .track-review-filters > span {
   margin-left: auto;
   color: #617080;
@@ -2676,6 +2838,10 @@ button {
 }
 
 @media (max-width: 1280px) {
+  .analysis-run-toolbar {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
   .quality-ground-truth-builder {
     grid-template-columns: repeat(4, minmax(105px, 1fr));
   }
@@ -2755,6 +2921,48 @@ button {
 }
 
 @media (max-width: 620px) {
+  html,
+  body,
+  #root,
+  .app-shell,
+  .main,
+  .content {
+    max-width: 100%;
+    overflow-x: hidden;
+  }
+
+  .match-analysis-page,
+  .match-analysis-page > *,
+  .tracking-quality-shell {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .help-tip-content {
+    right: 0;
+    left: auto;
+    width: min(250px, calc(100vw - 32px));
+    transform: translateY(4px);
+  }
+
+  .help-tip-wrap:hover .help-tip-content,
+  .help-tip-wrap:focus-within .help-tip-content {
+    transform: translateY(0);
+  }
+
+  .analysis-run-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .table-pagination {
+    justify-content: space-between;
+    gap: 7px;
+  }
+
+  .table-pagination > span:first-child {
+    display: none;
+  }
+
   .quality-heading-actions,
   .quality-benchmark-band {
     width: 100%;

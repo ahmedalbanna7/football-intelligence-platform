@@ -5,7 +5,7 @@ parts that can be reused safely.
 
 ## Detection cache
 
-Every completed Match Analysis + run stores the raw detector observations as
+Every completed Match Analysis run stores the raw detector observations as
 `performance/detections.jsonl`. A later run can select **Reuse detections from
 run #...** to skip player and ball YOLO inference while rebuilding tracking,
 team identity, pitch calibration, analytics, rendering, and reports.
