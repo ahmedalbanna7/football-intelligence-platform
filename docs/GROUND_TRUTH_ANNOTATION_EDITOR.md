@@ -36,6 +36,13 @@ Use `Saved identities` or `Saved ball` to resume work already stored for the
 run. The Ground Truth tab badge counts both server-side annotation documents,
 even before they are loaded into the browser.
 
+Saved annotation documents belong to one analysis run. `Load saved` never
+searches another run: the Ground Truth toolbar shows whether the selected run
+has a saved identity or ball document, its status, and its frame count. When no
+document exists, create a draft from the range selected in `Quality Overview`.
+Loading, success, and missing-document results are shown directly under the
+toolbar so the action remains visible inside the editor.
+
 ## Identity Workflow
 
 For every selected frame:

@@ -2423,6 +2423,68 @@ button {
   margin-left: auto;
 }
 
+.annotation-mode-bar > .action-with-help {
+  margin-left: auto;
+}
+
+.annotation-saved-state {
+  min-height: 26px;
+  padding: 5px 9px;
+  border: 1px solid #d6dee6;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  color: #526171;
+  background: #f5f7f9;
+  font-size: 10px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.annotation-saved-state.available {
+  border-color: #9fd2c4;
+  color: #006d54;
+  background: #eaf8f3;
+}
+
+.annotation-saved-state.missing {
+  border-color: #e1c889;
+  color: #805900;
+  background: #fff8e6;
+}
+
+.annotation-notice {
+  min-height: 42px;
+  padding: 9px 16px;
+  border-bottom: 1px solid #dbe3ea;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: #344454;
+  background: #f5f8fa;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.annotation-notice.success {
+  color: #006d54;
+  background: #eaf8f3;
+}
+
+.annotation-notice.error {
+  color: #8a3b00;
+  background: #fff3e8;
+}
+
+.annotation-notice.loading svg,
+.is-spinning {
+  animation: annotation-spin 0.9s linear infinite;
+}
+
+@keyframes annotation-spin {
+  to { transform: rotate(360deg); }
+}
+
 .annotation-iou {
   display: flex;
   align-items: center;
@@ -3010,9 +3072,15 @@ button {
   }
 
   .annotation-mode-bar > .button,
+  .annotation-mode-bar > .action-with-help,
   .annotation-footer label {
     width: 100%;
     margin: 0;
+  }
+
+  .annotation-mode-bar > .action-with-help > .button,
+  .annotation-saved-state {
+    width: 100%;
   }
 
   .annotation-workspace {

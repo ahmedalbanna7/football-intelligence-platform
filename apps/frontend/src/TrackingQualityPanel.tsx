@@ -29,6 +29,11 @@ import type {
 } from "./types";
 
 type QualityTab = "overview" | "annotation" | "review" | "history";
+type AnnotationKind = "tracking" | "ball";
+type AnnotationNotice = {
+  tone: "info" | "loading" | "success" | "error";
+  text: string;
+};
 
 type TrackingQualityPanelProps = {
   matchId: number;
@@ -49,6 +54,15 @@ function metricPercent(value?: number | null) {
 
 function titleCase(value: string) {
   return value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function annotationLabel(kind: AnnotationKind) {
+  return kind === "tracking" ? "Identity Ground Truth" : "Ball Ground Truth";
+}
+
+function annotationFrameCount(metadata?: Record<string, unknown>) {
+  const value = Number(metadata?.frame_count);
+  return Number.isFinite(value) ? value : null;
 }
 
 function normalizeTrackingGroundTruth(payload: Record<string, unknown>): TrackingGroundTruthDocument {
@@ -120,7 +134,9 @@ export function TrackingQualityPanel({
   const [note, setNote] = useState("");
   const [groundTruth, setGroundTruth] = useState<TrackingGroundTruthDocument | null>(null);
   const [ballGroundTruth, setBallGroundTruth] = useState<BallGroundTruthDocument | null>(null);
-  const [annotationKind, setAnnotationKind] = useState<"tracking" | "ball">("tracking");
+  const [annotationKind, setAnnotationKind] = useState<AnnotationKind>("tracking");
+  const [annotationNotice, setAnnotationNotice] = useState<AnnotationNotice | null>(null);
+  const [loadingSavedKind, setLoadingSavedKind] = useState<AnnotationKind | null>(null);
   const [ballGroundTruthMetrics, setBallGroundTruthMetrics] = useState<Record<string, unknown> | null>(null);
   const [groundTruthName, setGroundTruthName] = useState<string | null>(null);
   const [iouThreshold, setIouThreshold] = useState(0.5);
@@ -157,6 +173,8 @@ export function TrackingQualityPanel({
     setBallGroundTruth(null);
     setBallGroundTruthMetrics(null);
     setAnnotationKind("tracking");
+    setAnnotationNotice(null);
+    setLoadingSavedKind(null);
     void load();
   }, [matchId, runId]);
 
@@ -307,6 +325,7 @@ export function TrackingQualityPanel({
   async function openTrackingGroundTruthDraft() {
     setBusy(true);
     setMessage("Building selected ground-truth clip...");
+    setAnnotationNotice({ tone: "loading", text: `Creating an Identity Ground Truth draft for run #${runId}...` });
     try {
       const response = await api.buildTrackingGroundTruthDraft(matchId, runId, {
         start_frame: groundTruthStart,
@@ -320,8 +339,14 @@ export function TrackingQualityPanel({
       setAnnotationKind("tracking");
       setTab("annotation");
       setMessage(`${response.frame_count} identity frames opened with ${response.annotation_count} annotations.`);
+      setAnnotationNotice({
+        tone: "success",
+        text: `Created an identity draft with ${response.frame_count} frames and ${response.annotation_count} annotations for run #${runId}.`
+      });
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Ground-truth draft failed.");
+      const detail = error instanceof Error ? error.message : "Ground-truth draft failed.";
+      setMessage(detail);
+      setAnnotationNotice({ tone: "error", text: detail });
     } finally {
       setBusy(false);
     }
@@ -330,6 +355,7 @@ export function TrackingQualityPanel({
   async function openBallGroundTruthDraft() {
     setBusy(true);
     setMessage("Building ball annotation frames...");
+    setAnnotationNotice({ tone: "loading", text: `Creating a Ball Ground Truth draft for run #${runId}...` });
     try {
       const response = await api.buildBallGroundTruthDraft(matchId, runId, {
         start_frame: groundTruthStart,
@@ -344,31 +370,74 @@ export function TrackingQualityPanel({
       setAnnotationKind("ball");
       setTab("annotation");
       setMessage(`${response.frame_count} ball frames opened with ${response.candidate_count} model candidates.`);
+      setAnnotationNotice({
+        tone: "success",
+        text: `Created a ball draft with ${response.frame_count} frames and ${response.candidate_count} model candidates for run #${runId}.`
+      });
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Ball ground-truth draft failed.");
+      const detail = error instanceof Error ? error.message : "Ball ground-truth draft failed.";
+      setMessage(detail);
+      setAnnotationNotice({ tone: "error", text: detail });
     } finally {
       setBusy(false);
     }
   }
 
-  async function loadSavedAnnotations(kind: "tracking" | "ball") {
+  function selectAnnotationKind(kind: AnnotationKind) {
+    setAnnotationKind(kind);
+    const openDocument = kind === "tracking" ? groundTruth : ballGroundTruth;
+    const metadata = data?.annotations?.[kind];
+    const frameCount = annotationFrameCount(metadata);
+    if (openDocument) {
+      setAnnotationNotice({ tone: "info", text: `${annotationLabel(kind)} is open for run #${runId}.` });
+    } else if (metadata) {
+      setAnnotationNotice({
+        tone: "info",
+        text: `Saved ${annotationLabel(kind)} is available for run #${runId}${frameCount == null ? "" : ` (${frameCount} frames)`}. Click Load saved to resume it.`
+      });
+    } else {
+      setAnnotationNotice({
+        tone: "info",
+        text: `No saved ${annotationLabel(kind)} exists for run #${runId}. Create a draft to start annotating this run.`
+      });
+    }
+  }
+
+  async function loadSavedAnnotations(kind: AnnotationKind) {
+    setAnnotationKind(kind);
+    setTab("annotation");
     setBusy(true);
+    setLoadingSavedKind(kind);
+    setAnnotationNotice({ tone: "loading", text: `Loading saved ${annotationLabel(kind)} for run #${runId}...` });
     try {
       if (kind === "tracking") {
         const response = await api.getTrackingGroundTruth(matchId, runId);
         setGroundTruth(response.ground_truth);
+        setAnnotationNotice({
+          tone: "success",
+          text: `Loaded ${response.validation.frame_count} saved identity frames for run #${runId} (${titleCase(response.validation.status)}).`
+        });
       } else {
         const response = await api.getBallGroundTruth(matchId, runId);
         setBallGroundTruth(response.ground_truth);
         setBallGroundTruthMetrics(response.metrics || null);
+        setAnnotationNotice({
+          tone: "success",
+          text: `Loaded ${response.validation.frame_count} saved ball frames for run #${runId} (${titleCase(response.validation.status)}).`
+        });
       }
-      setAnnotationKind(kind);
-      setTab("annotation");
-      setMessage(`Saved ${kind} ground truth loaded.`);
+      setMessage(`Saved ${annotationLabel(kind)} loaded for run #${runId}.`);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Saved annotation could not be loaded.");
+      const detail = error instanceof Error ? error.message : "Saved annotation could not be loaded.";
+      const missing = detail.toLowerCase().includes("no saved");
+      const localMessage = missing
+        ? `No saved ${annotationLabel(kind)} exists for run #${runId}. Set the clip range in Quality Overview, then click ${kind === "tracking" ? "Identity editor" : "Ball editor"} to create a draft.`
+        : detail;
+      setMessage(localMessage);
+      setAnnotationNotice({ tone: "error", text: localMessage });
     } finally {
       setBusy(false);
+      setLoadingSavedKind(null);
     }
   }
 
@@ -492,6 +561,12 @@ export function TrackingQualityPanel({
 
   const assessment = data.assessment;
   const benchmarkReady = assessment.benchmark_status === "measured";
+  const savedAnnotationMetadata = data.annotations?.[annotationKind];
+  const savedAnnotationFrames = annotationFrameCount(savedAnnotationMetadata);
+  const savedAnnotationStatus = typeof savedAnnotationMetadata?.status === "string"
+    ? titleCase(savedAnnotationMetadata.status)
+    : "Saved";
+  const isLoadingSaved = loadingSavedKind === annotationKind;
 
   return (
     <section className="tracking-quality-shell">
@@ -658,14 +733,29 @@ export function TrackingQualityPanel({
         <div className="quality-annotation-tab">
           <div className="annotation-mode-bar">
             <div className="segmented-control">
-              <button className={annotationKind === "tracking" ? "active" : ""} onClick={() => setAnnotationKind("tracking")} type="button"><Eye size={16} /> Identities</button>
-              <button className={annotationKind === "ball" ? "active" : ""} onClick={() => setAnnotationKind("ball")} type="button"><CircleDot size={16} /> Ball</button>
+              <button className={annotationKind === "tracking" ? "active" : ""} onClick={() => selectAnnotationKind("tracking")} type="button"><Eye size={16} /> Identities</button>
+              <button className={annotationKind === "ball" ? "active" : ""} onClick={() => selectAnnotationKind("ball")} type="button"><CircleDot size={16} /> Ball</button>
             </div>
             {annotationKind === "tracking" ? (
               <label className="annotation-iou"><span>IoU threshold</span><input className="input" max="0.95" min="0.05" onChange={(event) => setIouThreshold(Number(event.target.value))} step="0.05" type="number" value={iouThreshold} /></label>
             ) : null}
-            <button className="button" disabled={busy} onClick={() => void loadSavedAnnotations(annotationKind)} type="button"><FileCheck2 size={16} /> Load saved</button>
+            <span className={`annotation-saved-state ${savedAnnotationMetadata ? "available" : "missing"}`}>
+              {savedAnnotationMetadata
+                ? `${savedAnnotationStatus}${savedAnnotationFrames == null ? "" : ` · ${savedAnnotationFrames} frames`}`
+                : `No saved ${annotationKind === "tracking" ? "identities" : "ball"}`}
+            </span>
+            <ActionWithHelp help={`Load ${annotationLabel(annotationKind)} saved for run #${runId}. Saved data belongs to this run only.`}>
+              <button className="button" disabled={busy} onClick={() => void loadSavedAnnotations(annotationKind)} type="button">
+                <RefreshCw className={isLoadingSaved ? "is-spinning" : undefined} size={16} /> {isLoadingSaved ? "Loading..." : "Load saved"}
+              </button>
+            </ActionWithHelp>
           </div>
+          {annotationNotice ? (
+            <div className={`annotation-notice ${annotationNotice.tone}`} role={annotationNotice.tone === "error" ? "alert" : "status"}>
+              {annotationNotice.tone === "error" ? <AlertTriangle size={17} /> : annotationNotice.tone === "success" ? <CheckCircle2 size={17} /> : <FileCheck2 size={17} />}
+              <span>{annotationNotice.text}</span>
+            </div>
+          ) : null}
           {annotationKind === "tracking" && groundTruth ? (
             <GroundTruthAnnotationEditor
               busy={busy}
@@ -700,8 +790,8 @@ export function TrackingQualityPanel({
               {annotationKind === "tracking" ? <Eye size={24} /> : <CircleDot size={24} />}
               <strong>{annotationKind === "tracking" ? "Identity annotation set" : "Ball annotation set"}</strong>
               <div>
-                <button className="button primary" disabled={busy} onClick={() => void (annotationKind === "tracking" ? openTrackingGroundTruthDraft() : openBallGroundTruthDraft())} type="button"><Plus size={16} /> Create draft</button>
-                <button className="button" disabled={busy} onClick={() => void loadSavedAnnotations(annotationKind)} type="button"><FileCheck2 size={16} /> Load saved</button>
+                <button className="button primary" disabled={busy} onClick={() => void (annotationKind === "tracking" ? openTrackingGroundTruthDraft() : openBallGroundTruthDraft())} type="button"><Plus size={16} /> Create {annotationKind === "tracking" ? "identity" : "ball"} draft</button>
+                <button className="button" disabled={busy} onClick={() => void loadSavedAnnotations(annotationKind)} type="button"><FileCheck2 size={16} /> {isLoadingSaved ? "Loading..." : "Load saved"}</button>
               </div>
             </div>
           )}
