@@ -1,5 +1,8 @@
 # Ball Tracking v6
 
+> Superseded by [Ball Tracking v8](BALL_TRACKING_V8.md). This document keeps
+> the earlier run 94/101 validation record.
+
 Ball Tracking v6 is the guarded multi-frame single-ball pipeline used by
 `Match Analysis`. It combines dedicated detections, image motion, metric
 pitch motion, and a confidence-gated monocular 3D estimate. The release rule is

@@ -21,9 +21,9 @@ The project is built as a practical foundation for football clubs, academies, an
 - Per-clip Tracking Release Gate with cross-team identity checks and multi-camera suite coverage.
 - Participant Role Classifier v2 for players, goalkeepers, referees, assistant referees, and outside staff.
 - Static-field-marker ball filtering to reduce false ball detections.
-- Ball Tracking v6 with guarded multi-frame detection, Kalman/optical-flow gap
-  recovery, confidence-gated monocular 3D, body-overlap rejection, and a ball
-  Ground Truth quality gate.
+- Ball Tracking v8 with guarded ground/air states, Kalman/optical-flow gap
+  recovery, confidence-gated monocular ballistics, bounded airborne episodes,
+  body-path rejection, and a Ball Ground Truth quality gate.
 - Team profile and opponent team management.
 - Player roster, shirt number, tactical zone, and assignment data models.
 - Match analysis run history with saved artifacts.

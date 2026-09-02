@@ -777,6 +777,259 @@ class BallTrackingV2Tests(unittest.TestCase):
         self.assertGreater(predicted_x, 119.0)
         self.assertGreaterEqual(tracker.summary()["optical_flow_successes"], 1)
 
+    def test_verified_ground_flow_extends_detector_gap(self) -> None:
+        tracker = BallTrackerV2(
+            max_interpolation_frames=3,
+            max_ground_flow_interpolation_frames=6,
+        )
+        frames = [np.zeros((240, FRAME_WIDTH, 3), dtype=np.uint8) for _ in range(7)]
+        for frame_index, frame in enumerate(frames):
+            cv2.circle(frame, (107 + frame_index * 8, 107), 5, (255, 255, 255), -1)
+        first = AnalysisObject(4, "ball", [100, 100, 114, 114], 0.9)
+        second = AnalysisObject(4, "ball", [108, 100, 122, 114], 0.9)
+
+        tracker.update(0, [first], [], FRAME_WIDTH, frame=frames[0])
+        tracker.update(1, [second], [], FRAME_WIDTH, frame=frames[1])
+        output = []
+        for frame_index in range(2, 7):
+            output = tracker.update(
+                frame_index,
+                [],
+                [],
+                FRAME_WIDTH,
+                frame=frames[frame_index],
+            )
+
+        self.assertEqual(1, len(output))
+        self.assertTrue(output[0].is_predicted)
+        self.assertFalse(output[0].airborne)
+        self.assertGreater(
+            (output[0].bbox[0] + output[0].bbox[2]) / 2,
+            145.0,
+        )
+        self.assertGreaterEqual(tracker.summary()["ground_flow_extensions"], 1)
+
+    def test_low_confidence_kick_path_replaces_stale_ground_marker(self) -> None:
+        tracker = BallTrackerV2(max_interpolation_frames=3, fps=25.0)
+        player = _player(90, 100, 7)
+        first = AnalysisObject(1, "ball", [104, 212, 118, 226], 0.82)
+        second = AnalysisObject(2, "ball", [108, 208, 122, 222], 0.78)
+
+        tracker.update(0, [first], [player], FRAME_WIDTH)
+        tracker.update(1, [second], [player], FRAME_WIDTH)
+        tracker.update(2, [], [player], FRAME_WIDTH)
+        output = []
+        for frame_index, center_x, confidence in (
+            (3, 207.0, 0.38),
+            (4, 257.0, 0.12),
+            (5, 317.0, 0.13),
+            (6, 387.0, 0.12),
+        ):
+            output = tracker.update(
+                frame_index,
+                [
+                    AnalysisObject(
+                        frame_index,
+                        "ball",
+                        [center_x - 7, 170, center_x + 7, 184],
+                        confidence,
+                    )
+                ],
+                [player],
+                FRAME_WIDTH,
+            )
+
+        self.assertEqual(1, len(output))
+        self.assertTrue(output[0].airborne)
+        self.assertGreater(
+            (output[0].bbox[0] + output[0].bbox[2]) / 2,
+            360.0,
+        )
+        summary = tracker.summary()
+        self.assertGreaterEqual(summary["early_launch_searches"], 1)
+        self.assertEqual(1, summary["early_launch_promotions"])
+
+    def test_sparse_fast_kick_reacquires_after_two_consistent_hits(self) -> None:
+        tracker = BallTrackerV2(max_interpolation_frames=3, fps=25.0)
+        controller = _player(90, 100, 7)
+        tracker.update(
+            0,
+            [AnalysisObject(1, "ball", [104, 212, 118, 226], 0.82)],
+            [controller],
+            FRAME_WIDTH,
+        )
+        tracker.update(
+            1,
+            [AnalysisObject(2, "ball", [108, 208, 122, 222], 0.78)],
+            [controller],
+            FRAME_WIDTH,
+        )
+        tracker.update(2, [], [controller], FRAME_WIDTH)
+        tracker.update(
+            3,
+            [AnalysisObject(3, "ball", [294, 168, 308, 182], 0.42)],
+            [controller],
+            FRAME_WIDTH,
+        )
+        output = tracker.update(
+            4,
+            [AnalysisObject(4, "ball", [300, 166, 314, 180], 0.12)],
+            [controller],
+            FRAME_WIDTH,
+        )
+
+        self.assertEqual(1, len(output))
+        self.assertTrue(output[0].airborne)
+        self.assertGreater((output[0].bbox[0] + output[0].bbox[2]) / 2, 295.0)
+        self.assertEqual(1, tracker.summary()["sparse_launch_promotions"])
+
+    def test_moving_player_body_path_cannot_become_airborne_ball(self) -> None:
+        for candidate_y in (98.0, 132.0):
+            with self.subTest(candidate_y=candidate_y):
+                tracker = BallTrackerV2(max_interpolation_frames=3, fps=25.0)
+                controller = _player(90, 100, 7)
+                tracker.update(
+                    0,
+                    [AnalysisObject(1, "ball", [104, 212, 118, 226], 0.82)],
+                    [controller],
+                    FRAME_WIDTH,
+                )
+                tracker.update(
+                    1,
+                    [AnalysisObject(2, "ball", [108, 208, 122, 222], 0.78)],
+                    [controller],
+                    FRAME_WIDTH,
+                )
+                tracker.update(2, [], [controller], FRAME_WIDTH)
+
+                output = []
+                for frame_index, center_x in (
+                    (3, 207.0),
+                    (4, 257.0),
+                    (5, 317.0),
+                    (6, 387.0),
+                ):
+                    moving_player = _player(center_x - 22, 100, 99, height=40)
+                    output = tracker.update(
+                        frame_index,
+                        [
+                            AnalysisObject(
+                                frame_index,
+                                "ball",
+                                [
+                                    center_x - 7,
+                                    candidate_y - 4,
+                                    center_x + 7,
+                                    candidate_y + 4,
+                                ],
+                                0.42,
+                            )
+                        ],
+                        [controller, moving_player],
+                        FRAME_WIDTH,
+                    )
+
+                self.assertEqual([], output)
+                self.assertEqual(0, tracker.summary()["challenger_promotions"])
+                self.assertGreaterEqual(
+                    tracker.summary()["challenger_body_path_rejections"],
+                    1,
+                )
+
+    def test_high_confidence_3d_landing_returns_to_ground_state(self) -> None:
+        tracker = BallTrackerV2(max_interpolation_frames=3)
+        tracker.flight_mode = True
+        tracker.position_3d = np.array([1200.0, 1800.0, 0.0], dtype=np.float64)
+        tracker.velocity_3d = np.array([10.0, 5.0, -24.0], dtype=np.float64)
+        tracker.trajectory_3d_confidence = 0.9
+        tracker.selected_measurement_details = {
+            "image_consistent": True,
+            "metric_conflict": False,
+        }
+
+        tracker._confirm_high_confidence_3d_landing(
+            20,
+            np.array([1200.0, 1800.0], dtype=np.float64),
+        )
+
+        self.assertFalse(tracker.flight_mode)
+        self.assertEqual(20, tracker.last_ground_contact_frame)
+        self.assertEqual(1, tracker.summary()["ground_reacquisitions"])
+
+    def test_ballistic_height_keeps_falling_across_observed_frames(self) -> None:
+        tracker = BallTrackerV2(max_interpolation_frames=3, fps=25.0)
+        tracker.flight_mode = True
+        tracker.flight_start_frame = 0
+        tracker.position_3d = np.array([1200.0, 1800.0, 100.0], dtype=np.float64)
+        tracker.velocity_3d = np.array([8.0, 2.0, 0.0], dtype=np.float64)
+        tracker.pitch_position = tracker.position_3d[:2].copy()
+        tracker.last_3d_frame = 0
+        tracker.selected_measurement_details = {"ground_contact": False}
+
+        heights = []
+        for frame_index in range(1, 7):
+            predicted = tracker._predict_3d(frame_index)
+            tracker._update_3d_state(
+                frame_index,
+                np.array([300.0, 180.0], dtype=np.float64),
+                tracker.pitch_position,
+                predicted,
+                None,
+            )
+            heights.append(float(tracker.position_3d[2]))
+
+        self.assertTrue(all(a >= b for a, b in zip(heights, heights[1:])))
+        self.assertLess(heights[-1], 75.0)
+        self.assertLess(tracker.velocity_3d[2], 0.0)
+
+    def test_predicted_ballistic_landing_returns_to_ground(self) -> None:
+        tracker = BallTrackerV2(max_interpolation_frames=3, fps=25.0)
+        tracker.flight_mode = True
+        tracker.flight_start_frame = 0
+        tracker.airborne_episode_start_frame = 0
+        tracker.position_3d = np.array([1200.0, 1800.0, 0.0], dtype=np.float64)
+        tracker.velocity_3d = np.array([10.0, 5.0, -24.0], dtype=np.float64)
+        tracker.trajectory_3d_confidence = 0.9
+
+        tracker._confirm_predicted_3d_landing(6)
+
+        self.assertFalse(tracker.flight_mode)
+        self.assertEqual(6, tracker.last_ground_contact_frame)
+
+    def test_unresolved_airborne_episode_expires_instead_of_staying_visible(self) -> None:
+        tracker = BallTrackerV2(
+            max_interpolation_frames=3,
+            fps=25.0,
+            max_airborne_episode_seconds=5.0,
+        )
+        tracker.flight_mode = True
+        tracker.flight_start_frame = 80
+        tracker.airborne_episode_start_frame = 0
+        tracker.position = np.array([400.0, 220.0], dtype=np.float64)
+        tracker.kalman_state = np.array(
+            [400.0, 220.0, 2.0, -1.0],
+            dtype=np.float64,
+        )
+        tracker.last_frame = 124
+        tracker.last_observed_frame = 124
+        tracker.position_3d = np.array(
+            [1200.0, 1800.0, 250.0],
+            dtype=np.float64,
+        )
+        tracker.last_3d_frame = 124
+
+        output = tracker.update(126, [], [], FRAME_WIDTH)
+
+        self.assertEqual([], output)
+        self.assertFalse(tracker.flight_mode)
+        self.assertIsNone(tracker.position)
+        self.assertEqual(1, tracker.summary()["airborne_episode_timeouts"])
+        self.assertEqual(1, tracker.summary()["expired_track_resets"])
+        self.assertGreaterEqual(
+            tracker.summary()["maximum_airborne_episode_frames_seen"],
+            126,
+        )
+
     def test_ball_track_reacquires_after_a_long_detector_gap(self) -> None:
         tracker = BallTrackerV2(
             max_interpolation_frames=3,
@@ -1452,6 +1705,59 @@ class BallTrackingV2Tests(unittest.TestCase):
         )
 
         self.assertEqual((None, None), (owner, team))
+
+    def test_explicit_airborne_state_has_no_owner_until_grounded(self) -> None:
+        tracker = PossessionTracker(confirmation_frames=1)
+        player = _player(100, 100, 7)
+        airborne_ball = AnalysisObject(
+            1,
+            "ball",
+            [116, 212, 130, 226],
+            0.9,
+            pitch_position=(122.0, 220.0),
+            height_cm=0.0,
+            trajectory_3d_confidence=0.0,
+            airborne=True,
+        )
+        grounded_ball = AnalysisObject(
+            1,
+            "ball",
+            [116, 212, 130, 226],
+            0.9,
+            pitch_position=(122.0, 220.0),
+        )
+
+        self.assertEqual(
+            (None, None),
+            tracker.update(0, [player], [airborne_ball], {7: 1}, lambda point: point),
+        )
+        self.assertEqual(
+            (7, 1),
+            tracker.update(1, [player], [grounded_ball], {7: 1}, lambda point: point),
+        )
+        self.assertEqual(1, tracker.summary()["airborne_unassigned_frames"])
+
+    def test_airborne_marker_is_not_the_ground_yellow_arrow(self) -> None:
+        runner = MatchAnalysisPlusRunner()
+        airborne_frame = np.zeros((240, FRAME_WIDTH, 3), dtype=np.uint8)
+        ground_frame = np.zeros_like(airborne_frame)
+        airborne_ball = AnalysisObject(
+            1,
+            "ball",
+            [200, 100, 214, 114],
+            0.9,
+            airborne=True,
+        )
+
+        runner._draw_airborne_ball(airborne_frame, airborne_ball)
+        runner._draw_triangle(ground_frame, airborne_ball.bbox, (0, 255, 255))
+
+        airborne_yellow = np.all(airborne_frame == (0, 255, 255), axis=2)
+        ground_yellow = np.all(ground_frame == (0, 255, 255), axis=2)
+        airborne_cyan = np.all(airborne_frame == (255, 200, 0), axis=2)
+        self.assertFalse(bool(np.any(airborne_yellow)))
+        self.assertTrue(bool(np.any(airborne_cyan)))
+        self.assertTrue(bool(np.any(ground_yellow)))
 
     def test_fast_ball_moving_away_does_not_jump_possession(self) -> None:
         tracker = PossessionTracker(confirmation_frames=1, fps=25.0)
